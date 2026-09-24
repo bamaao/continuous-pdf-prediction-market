@@ -155,11 +155,11 @@ Identity is a Solana pubkey. There is no password account.
 | ID | Requirement | Verify |
 | --- | --- | --- |
 | FR-HAL-01 | At `close_ts` Keeper SHALL stop prediction fills and Commit / Undelegate $\theta$, $E$, `trades_root` to L1. | Clock + accounts |
-| FR-RES-01 | $x^*$ SHALL be written only by `submit_result`. Pyth and sports APIs SHALL be evidence, never writers of $x^*$. | No auto-oracle ix |
+| FR-RES-01 | $x^*$ SHALL be written only by committee (or authorized reporter) `submit_result`. No oracle or feed SHALL write $x^*$. | No auto-oracle ix |
 | FR-RES-02 | After a proposal, a challenge window SHALL run. No challenge → finalize. Challenge → $M/N$ vote. | State machine |
 | FR-RES-03 | Failed vote SHALL extend or `RESOLUTION_FAILED`. Failed finalization SHALL refund users, return LP collateral, and return unused premium. | Refund balances |
 | FR-RES-04 | Football SHALL report a score pair; CPI the first official print; election the defined winner / TOP_N set / shares; price the `price_rule` scalar; binary YES or NO. | Type-specific accounts |
-| FR-RES-05 | Live Pyth evidence, if used, SHALL be read in `[observe_ts, observe_ts+\Delta]` in the same transaction. After that window, current Pyth SHALL NOT be treated as the historical price. | Time + feed checks |
+| FR-RES-05 | `evidence_hash` SHALL be an opaque digest. The program SHALL NOT parse oracles, price feeds, or sports APIs. | No feed accounts on ixs |
 | FR-SET-01 | Settlement SHALL use $L=E(x^*)$, not $L_{\max}$. | Fixture $E\neq L_{\max}$ |
 | FR-SET-02 | $C_{\max}$ SHALL equal $R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$. | Ledger identity |
 | FR-SET-03 | $\rho=\min(1,C_{\max}/L)$ (or $\rho=1$ if $L=0$). Every winner SHALL receive $\rho\cdot q$. FIFO or entry-order haircuts SHALL NOT be used. | All winners same $\rho$ |
@@ -200,7 +200,7 @@ Identity is a Solana pubkey. There is no password account.
 | IR-02 | MagicBlock ER | `buy_set` / `sell_set` / optional risk fills; `<10` ms in-chain target |
 | IR-03 | Wallet Adapter | Web: `@solana/wallet-adapter-react`. Mobile: deep link / injected provider / MWA on TWA |
 | IR-04 | USDC mint | Circle official SPL USDC; `mint == USDC_MINT` on every funds ix |
-| IR-05 | Pyth | Optional same-tx evidence; never scheduler of $x^*$ |
+| IR-05 | — | No on-chain oracle or price-feed dependency |
 | IR-06 | Object store | Committee evidence and append-only fill journal; L1 stores hashes / `trades_root` |
 | IR-07 | BFF / Market API | Metadata, positions, snapshots; no hot-path fill |
 | IR-08 | Quote WSS | PDF / book push, `<50` ms target |
@@ -242,7 +242,7 @@ Identity is a Solana pubkey. There is no password account.
 | CR-08 | Collateral and payouts SHALL be Circle SPL USDC only. SOL pays L1 fees only. |
 | CR-09 | No in-protocol swap, Jupiter CPI, or second mint. |
 | CR-10 | Light Protocol, if used, SHALL archive **closed** books only; never Vault or hot $\theta$. |
-| CR-11 | TEE, if used, SHALL attest ER integrity and MAY attest a live Pyth read. TEE SHALL NOT replace the committee or L1 Vault. |
+| CR-11 | TEE, if used, SHALL attest ER integrity only. TEE SHALL NOT replace the committee or L1 Vault. |
 | CR-12 | PDF / $E$ / $L_{\max}$ SHALL remain public. Private ER encryption SHALL NOT be used for the main book. |
 
 ---

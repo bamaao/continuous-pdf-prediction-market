@@ -18,7 +18,7 @@ Diagrams: `docs/business-flow.png`, `docs/system-arch.png`, `docs/tech-arch.png`
 - Client: Next.js only (PWA / wallet WebView / official Android TWA). No store apps.
 - Chain: Anchor + MagicBlock ER + session-keys. `vault` / `resolution` never Delegate.
 - Collateral: Circle SPL USDC only.
-- Outcomes: `submit_result` only. Pyth / sports APIs are evidence.
+- Outcomes: committee `submit_result` only. No oracle writes $x^*$.
 - Solvency: do not reject when $L_{\max}$ is high; settle $L=E(x^*)$; one global $\rho$.
 
 Suggested repo layout is in `docs/technical-architecture.md` section 9.

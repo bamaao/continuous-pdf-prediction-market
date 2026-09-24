@@ -377,7 +377,7 @@ $$
 
 `submit_result(value, evidence?)` → challenge window → `finalize` or `vote`.
 
-On-the-spot Pyth evidence: the same transaction reads the price account and checks `feed`, `publishTime` tolerance, and the confidence interval. After the window, “current Pyth” must not be treated as a historical price. The algorithmic convention lives in the `price_rule` text and is executed by the committee; the chain stores only the result scalar.
+The algorithmic convention lives in the `price_rule` text and is executed by the committee; the chain stores only the result scalar. No oracle or feed account is read.
 
 ---
 
@@ -458,7 +458,7 @@ infra/                   k8s, terraform, dashboards
 | Concern | Can TEE solve it? | What should actually be relied on |
 | --- | --- | --- |
 | Was the outcome changed by ops? | No. CPI, elections, football, custom price algorithms — hardware does not know “the truth” | Committee `submit_result` + challenge + $M/N$; evidence is public |
-| Was the Dec 1 BTC price invented after the fact? | **Partially.** Read Pyth inside the enclave at observation time and produce a proof that “this number was read then” | A challenge window is still required; if the window is missed, committee members still copy per `price_rule` |
+| Was the Dec 1 BTC price invented after the fact? | No. Hardware does not know the listing `price_rule` | Committee `submit_result` by `price_rule` + challenge + $M/N$ |
 | Was LMSR on ER altered by the node? | **This is TEE’s proper job.** Prove the audited image is what ran | Plus: funds on L1, Commit is replayable, `crates/math` is open source |
 | Can the high-speed layer abscond with the money? | TEE alone cannot | `vault` / `resolution` never Delegate |
 | Would hiding the PDF make it more trustworthy? | The opposite. A prediction book needs a public curve | Do not use MagicBlock PER’s “default privacy” mode |
@@ -487,11 +487,9 @@ Trading nodes run inside Intel TDX (or equivalent). Remote attestation binds:
 
 Clients verify the quote before connecting to ER; proofs may be attached when Commit returns to L1, for audit. This answers “did the operator change LMSR,” not “what was the football score.”
 
-**B. Evidence-collection Keeper (optional for price books)**
+**B. Evidence-collection Keeper (optional)**
 
-Inside the enclave, read Pyth in $[observe\_ts, observe\_ts+\Delta]$ and produce `{price, publishTime, quote}`. `submit_result` carries this evidence set; the program checks time and feed. This only proves “the enclave read this Pyth at that time”; it does **not** prove that this is the only legal price under your `price_rule`, and it **cannot** replay history.
-
-Football / CPI / elections should not expect TEE to “auto-scrape official sites.” Sites, APIs, and DNS all sit outside the enclave; the proof chain breaks on the first hop out of the box.
+A keeper may hash off-chain source material for the reporter. That hash is `evidence_hash` only. The program does not parse it, and it does not write $x^*$. Football / CPI / elections / prices are still submitted by the committee.
 
 ### 10.4 Things not to use TEE for
 

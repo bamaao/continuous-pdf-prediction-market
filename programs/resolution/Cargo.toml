@@ -1,0 +1,20 @@
+[package]
+name = "resolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L1 resolution: submit_result, challenge, M/N vote, finalize. Never Delegates. No Session."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "resolution"
+
+[features]
+default = []
+idl-build = ["anchor-lang/idl-build", "market/idl-build"]
+no-entrypoint = []
+cpi = ["no-entrypoint"]
+
+[dependencies]
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+market = { path = "../market", default-features = false, features = ["cpi"] }

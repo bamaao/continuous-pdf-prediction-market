@@ -185,6 +185,18 @@ pub mod market {
     ) -> Result<()> {
         fill_skellam(&mut ctx, contract, q_raw, false)
     }
+
+    /// Creator or roster member stops fills (early YES, VOID, or after close).
+    pub fn halt(ctx: Context<Halt>) -> Result<()> {
+        let market = &mut ctx.accounts.market;
+        require!(
+            ctx.accounts.authority.key() == market.creator || market.is_member(&ctx.accounts.authority.key()),
+            MarketError::NotResolver
+        );
+        require!(market.status == Status::Trading as u8, MarketError::NotTrading);
+        market.status = Status::Halted as u8;
+        Ok(())
+    }
 }
 
 fn open_interval(
@@ -247,6 +259,7 @@ fn open_board(
     require!(common.fee_bps <= 10_000, MarketError::BadFee);
     require!(now < common.close_ts, MarketError::BadClock);
     require!(common.close_ts <= common.risk_lock_ts, MarketError::BadClock);
+    lock_roster(common)?;
 
     let market = &mut ctx.accounts.market;
     market.family = family as u8;
@@ -257,8 +270,17 @@ fn open_board(
     market.fee_bps = common.fee_bps;
     market.creator = ctx.accounts.creator.key();
     market.committee = common.committee;
+    market.members = [Pubkey::default(); MAX_COMMITTEE];
+    for (i, m) in common.members.iter().enumerate() {
+        market.members[i] = *m;
+    }
+    market.authorized_reporter = common.authorized_reporter;
+    market.member_count = common.members.len() as u8;
+    market.m = common.m;
     market.close_ts = common.close_ts;
     market.risk_lock_ts = common.risk_lock_ts;
+    market.report_window_secs = common.report_window_secs;
+    market.challenge_secs = common.challenge_secs;
     market.beta = common.beta;
     market.c_m = common.c_m;
     market.fees_accrued = 0;
@@ -507,6 +529,29 @@ fn check_common(id_hash: &[u8; 32], n: u16, common: &CreateCommon) -> Result<()>
     Ok(())
 }
 
+fn lock_roster(common: &CreateCommon) -> Result<()> {
+    let n = common.members.len();
+    require!(
+        n >= 1 && n <= MAX_COMMITTEE && common.m >= 1 && (common.m as usize) <= n,
+        MarketError::BadCommittee
+    );
+    require!(
+        common.report_window_secs > 0 && common.challenge_secs > 0,
+        MarketError::BadClock
+    );
+    require!(
+        common.members.iter().any(|m| *m == common.committee),
+        MarketError::BadCommittee
+    );
+    for (i, m) in common.members.iter().enumerate() {
+        require!(*m != Pubkey::default(), MarketError::BadCommittee);
+        for prev in common.members.iter().take(i) {
+            require!(m != prev, MarketError::BadCommittee);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Accounts)]
 #[instruction(id_hash: [u8; 32], n: u16)]
 pub struct CreateBoard<'info> {
@@ -592,6 +637,17 @@ pub struct TradeSkellam<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct Halt<'info> {
+    pub authority: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [MARKET_SEED, market.id_hash.as_ref()],
+        bump = market.bump
+    )]
+    pub market: Account<'info, Market>,
+}
+
 #[error_code]
 pub enum MarketError {
     #[msg("id_hash does not match the locked identity")]
@@ -626,6 +682,10 @@ pub enum MarketError {
     NoInventory,
     #[msg("arithmetic overflow")]
     Overflow,
+    #[msg("committee roster or M/N is illegal")]
+    BadCommittee,
+    #[msg("signer is not the creator or a roster member")]
+    NotResolver,
 }
 
 #[cfg(test)]
@@ -663,5 +723,34 @@ mod tests {
         assert!(home[math::football::cell(2, 1, 10)]);
         assert!(exact[math::football::cell(2, 1, 10)]);
         assert!(!exact[math::football::cell(1, 0, 10)]);
+    }
+
+    #[test]
+    fn roster_is_locked_at_create() {
+        use super::{lock_roster, CreateCommon};
+        use anchor_lang::prelude::Pubkey;
+        let a = Pubkey::new_from_array([1u8; 32]);
+        let b = Pubkey::new_from_array([2u8; 32]);
+        let mut common = CreateCommon {
+            id_hash: [0; 32],
+            n: 2,
+            close_ts: 10,
+            risk_lock_ts: 20,
+            beta: 1,
+            c_m: 1,
+            fee_bps: 0,
+            committee: a,
+            members: vec![a, b],
+            m: 2,
+            authorized_reporter: Pubkey::default(),
+            report_window_secs: 60,
+            challenge_secs: 30,
+        };
+        assert!(lock_roster(&common).is_ok());
+        common.members = vec![b];
+        assert!(lock_roster(&common).is_err());
+        common.members = vec![a, a];
+        common.committee = a;
+        assert!(lock_roster(&common).is_err());
     }
 }

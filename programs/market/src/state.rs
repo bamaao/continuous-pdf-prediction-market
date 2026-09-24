@@ -5,6 +5,7 @@ pub const GRID_SEED: &[u8] = b"grid";
 pub const POS_SEED: &[u8] = b"pos";
 
 pub const MAX_N: u16 = 1024;
+pub const MAX_COMMITTEE: usize = 8;
 pub const FOOTBALL_K_MAX: u8 = 10;
 pub const FOOTBALL_N: u16 = 121;
 
@@ -41,8 +42,14 @@ pub struct Market {
     pub fee_bps: u16,
     pub creator: Pubkey,
     pub committee: Pubkey,
+    pub members: [Pubkey; MAX_COMMITTEE],
+    pub authorized_reporter: Pubkey,
+    pub member_count: u8,
+    pub m: u8,
     pub close_ts: i64,
     pub risk_lock_ts: i64,
+    pub report_window_secs: i64,
+    pub challenge_secs: i64,
     pub beta: i128,
     pub c_m: u64,
     pub fees_accrued: u64,
@@ -52,7 +59,19 @@ pub struct Market {
 }
 
 impl Market {
-    pub const SIZE: usize = 8 + 512;
+    pub const SIZE: usize = 8 + 640;
+
+    pub fn is_member(&self, who: &Pubkey) -> bool {
+        self.members
+            .iter()
+            .take(self.member_count as usize)
+            .any(|k| k == who)
+    }
+
+    pub fn can_propose(&self, who: &Pubkey) -> bool {
+        self.is_member(who)
+            || (self.authorized_reporter != Pubkey::default() && self.authorized_reporter == *who)
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default)]
@@ -108,6 +127,11 @@ pub struct CreateCommon {
     pub c_m: u64,
     pub fee_bps: u16,
     pub committee: Pubkey,
+    pub members: Vec<Pubkey>,
+    pub m: u8,
+    pub authorized_reporter: Pubkey,
+    pub report_window_secs: i64,
+    pub challenge_secs: i64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]

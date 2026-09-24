@@ -32,7 +32,7 @@ The curve evolves in a fixed order and is never rewritten by an oracle in the mi
 
 1. **Initialized at creation.** Write the prior $f_0(x)$ (uniform, or a parameterized family chosen by the creator). At this point $\theta(x)=0$, so the quoted price is the prior.
 2. **Updated continuously during trading.** Each interval buy or sell only changes the state $\theta(x)$, then LMSR produces a new $f(x)$. Buying an interval raises density on that stretch; the rest is renormalized downward.
-3. **Frozen after close.** Trading stops and $f(x)$ no longer changes. The oracle or committee only reports the realized outcome $x^*$; it does not go back and rewrite the distribution.
+3. **Frozen after close.** Trading stops and $f(x)$ no longer changes. The committee only reports the realized outcome $x^*$; it does not go back and rewrite the distribution.
 
 Users buy an arbitrary interval $I=[a,b]$. Contract payoff is:
 
@@ -71,7 +71,7 @@ A board’s lifecycle follows the path below. During the trading period the risk
 ③ Trade (LMSR: buying the same outcome makes it more expensive + fees; LPs quote at the same time)
 ④ At close_ts, cut off orders and freeze f / P
 ⑤ Wait for the event
-⑥ The committee (or an authorized reporter) writes the outcome on-chain; Pyth / sports APIs are evidence only and never write themselves
+⑥ The committee (or an authorized reporter) writes the outcome on-chain. No oracle writes $x^*$.
 ⑦ Payout
       ├─ Own funds cover L              → full payout, then split surplus
       ├─ Own funds fall short, but L ≤ C_max → draw Risk LP, still full payout
@@ -104,7 +104,7 @@ During the trading period $L_{\max}$ may exceed available funds. **Orders are no
 
 **⑤ Wait for the event.** Football waits for full time; CPI waits for the official print; a price board waits until `observe_ts`; a binary event waits until the deadline or an early occurrence.
 
-**⑥ Submit the result.** The chain does not grow $x^*$ by itself. A `submit_result` transaction must write the settlement value into the market account. The reporter is a committee member or an authorized bot. The payload is a score, a published print, a winner, a price, or YES/NO — not “which line won”. Pyth and sports APIs are only evidence that this transaction may attach; see section 10. No payout before finalization.
+**⑥ Submit the result.** The chain does not grow $x^*$ by itself. A `submit_result` transaction must write the settlement value into the market account. The reporter is a committee member or an authorized bot. The payload is a score, a published print, a winner, a price, or YES/NO — not “which line won”. An optional `evidence_hash` may be stored; the program does not parse it. No payout before finalization.
 
 **⑦ Payout.** This protocol has no futures-style liquidation. Settlement only compares face-value liability $L=E(x^*)$ with payable capital $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$. $R_{\mathrm{net}}$ already deducts fees and premiums payable.
 
@@ -251,7 +251,7 @@ In v1.1 the risk auction is a **continuous capital-top-up mechanism**, not a har
 The person who **writes the final outcome $x^*$ as an on-chain transaction**. Without that transaction, no feed can enter the contract.
 
 - A committee member or authorized reporting bot calls `submit_result`
-- May attach evidence (the Pyth account read at that moment, a data-source hash)
+- May attach an opaque `evidence_hash` (the program does not parse it)
 - Finalization happens only after the challenge window or after a vote passes
 
 ---
@@ -279,7 +279,7 @@ The next trade continues to rewrite f(x)
 Close: freeze f(x) and positions, wait only for x*
 ```
 
-$f(x)$ **is not specified by an oracle and is not rewritten at settlement**. The oracle only supplies $x^*$, used to compute $L=E(x^*)$. Price discovery comes entirely from trading.
+$f(x)$ **is not specified by an oracle and is not rewritten at settlement**. The committee only supplies $x^*$, used to compute $L=E(x^*)$. Price discovery comes entirely from trading.
 
 ### 4.1 Market State
 
@@ -550,7 +550,7 @@ After truncation, divide by $\sum_{i,j}P_0(i,j)$ so the 121 cells sum to 1. `uni
 | `risk_lock_ts` | Moment risk capital stops being accepted; must satisfy `close_ts ≤ risk_lock_ts ≤` before finalization |
 | `report_window` | Post-match report / challenge window |
 
-Football $x^*$ is an integer pair $(x^*,y^*)$, not a Pyth scalar. See 10.6.
+Football $x^*$ is an integer pair $(x^*,y^*)$. See 10.6.
 
 #### 4.6.3 Preset Contracts (“multiple prediction markets” on one board)
 
@@ -849,7 +849,7 @@ resolution:  committee, Congress certification / specified wire service (pick on
 
 ### 4.10 How a Same-Day BTC Price Market Is Created
 
-The distribution is **one-dimensional lognormal** ($\log X\sim\mathcal{N}(\mu,\sigma^2)$). It is in the same continuous family as CPI, but supported on $X>0$; a log axis is recommended for the grid. Do not use a football score table, and do not use a symmetric Gaussian that can generate negative prices. One board corresponds to one price convention at one timestamp, e.g. “BTC/USD at 2026-04-12 00:00 UTC”. Settlement is the committee reporting the price under that convention. Pyth may only be evidence on the reporting transaction itself: no reservation, no replay, no pricing by our formula.
+The distribution is **one-dimensional lognormal** ($\log X\sim\mathcal{N}(\mu,\sigma^2)$). It is in the same continuous family as CPI, but supported on $X>0$; a log axis is recommended for the grid. Do not use a football score table, and do not use a symmetric Gaussian that can generate negative prices. One board corresponds to one price convention at one timestamp, e.g. “BTC/USD at 2026-04-12 00:00 UTC”. Settlement is the committee reporting the price under that convention. The contract stores the number; it does not fetch or recompute a feed.
 
 #### 4.10.1 Creation Parameters
 
@@ -859,7 +859,7 @@ A same-day price listing calls `create_lognormal_market` and writes:
 | --- | --- | --- |
 | `symbol` | `BTC-USD` / `ETH-USD`, etc. | Required |
 | `observe_ts` | Observation timestamp | Required, including timezone |
-| `price_rule` | Human-readable, verifiable pricing convention | E.g. Coinbase last @ observe_ts; or a live Pyth snapshot |
+| `price_rule` | Human-readable, verifiable pricing convention | E.g. Coinbase last at `observe_ts` |
 | `twap_window` | TWAP only, e.g. 300s before close | Optional |
 | `x_min` / `x_max` | Price domain, e.g. $[10k,250k]$ | Must cover a reasonable tail |
 | `n_grid` | Grid count | $256\sim 1024$ |
@@ -868,7 +868,6 @@ A same-day price listing calls `create_lognormal_market` and writes:
 | `mu` / `sigma` | On $x$ or $\log x$ | Spot at listing time can be $\mu$ |
 | `beta` / `C_M` | Liquidity and seed capital | Required |
 | `resolution_source` | `committee` | Required |
-| `pyth_feed_id` | Optional, for live evidence | Not automatic settlement |
 | `close_ts` | Defaults to `observe_ts` | Observation is the cutoff |
 
 Lognormal prior:
@@ -893,7 +892,7 @@ Then truncate on $[x_{\min},x_{\max}]$, project onto the log grid, and renormali
 
 ```text
 1. Only one board per symbol + observe_ts + price_rule
-2. Write Ω, grid, prior, price_rule, committee, optional Pyth feed, C_M
+2. Write Ω, grid, prior, price_rule, committee, C_M
 3. Generate f_0, θ = 0
 4. Open interval / above-K templates
 5. Inject C_M, open the Risk Auction order book
@@ -902,7 +901,7 @@ Then truncate on $[x_{\min},x_{\max}]$, project onto the log grid, and renormali
 
 #### 4.10.4 Finalization and Void
 
-Inside the report window, `submit_result(price)`. If the same transaction attaches a valid Pyth snapshot, the proposed price must equal the snapshot. After missing the live window, committee members transcribe by `price_rule`. After clamp onto $\Omega$, drop into the nearest grid. Disputes follow the convention written at listing, not someone’s screen price.
+Inside the report window, the committee (or an authorized reporter) calls `submit_result(price)` using the `price_rule` locked at listing. After clamp onto $\Omega$, drop into the nearest grid. Disputes follow the convention written at listing, not someone’s screen price.
 
 Creation example:
 
@@ -915,7 +914,6 @@ grid:        log, N=512
 prior:       lognormal(μ=log(spot), σ=0.25)   # widen σ with time to expiry
 templates:   custom intervals + above 80k/100k/120k
 price_rule:  Coinbase BTC-USD last at observe_ts
-             (Pyth snapshot may be attached as evidence; Pyth does not auto-settle)
 resolution:  committee
 ```
 
@@ -1478,26 +1476,19 @@ A Risk LP’s Premium is the consideration for underwriting. It is paid in the t
 
 $x^*$ does not appear on-chain by itself. A Solana program can only write an account inside some transaction. Without `submit_result`, a football score, CPI print, election, or December 1 BTC price cannot enter settlement.
 
-Therefore **the only on-chain path is the committee (or an authorized reporter) submitting the settlement value**. Pyth, sports APIs, and statistics-bureau pages are evidence, not settlers.
+Therefore **the only on-chain path is the committee (or an authorized reporter) submitting the settlement value**. External pages and APIs are off-chain references for the reporter; they never write $x^*$.
 
-### 10.1 Why Pyth Cannot “Settle Itself”
+### 10.1 Why the Committee Must Submit
 
-What Pyth provides on-chain is the **current** BTC/USD aggregate, a `publishTime`, and a confidence interval. It cannot:
-
-- Reserve “at 00:00 UTC on December 1, automatically write a price into our contract”
-- Later re-read “that day’s December 1 price”: after that moment, the on-chain feed only has the latest price
-- Price by our custom algorithm (specified-exchange average, a custom TWAP window, drop a source, etc.)
-
-So “same-day BTC price” is like CPI and elections: someone must submit the number on-chain. The only difference is whether the report can **also attach a live Pyth snapshot** as evidence.
+A Solana program cannot grow a football score, a CPI print, an election result, or “BTC at 00:00 on December 1” by itself. Those values exist off-chain. Someone must call `submit_result`.
 
 | Intended action | Actual procedure |
 | --- | --- |
-| BTC at 00:00 December 1 | Inside the report window a member/bot calls `submit_result(price)`; if the transaction happens near that moment, the same tx may read Pyth; the program checks `publishTime` is inside tolerance and treats that price as the proposal |
-| Missed that moment | On-chain Pyth is no longer that day’s price. The committee must transcribe and report by the convention written at listing (e.g. Coinbase midnight, or a Pyth history page) |
-| Our own TWAP / multi-venue average | Pyth will not compute it for us. The convention is written into market rules; the committee computes by the convention and reports one number |
-| Football / CPI / election / event | Pyth has no such feed. A score, print, winner, or YES/NO must be reported |
+| BTC at 00:00 December 1 | Inside the report window a member or authorized reporter calls `submit_result(price)` by the listing `price_rule` |
+| Custom TWAP / multi-venue average | Written into `price_rule` at listing; the committee computes it and reports one number. The contract stores the scalar; it does not re-run the algorithm |
+| Football / CPI / election / event | A score, print, winner, or YES/NO must be reported the same way |
 
-Sports data sources are the same: there is no “Sportradar automatically writes our PDA”. An authorized bot reads the API and then calls the same `submit_result`.
+There is no “data source automatically writes our PDA”. An authorized bot may read an API and then call the same `submit_result`; it is still a reporter, not a second settlement channel.
 
 ### 10.2 On-Chain Instructions (shared by all markets)
 
@@ -1528,28 +1519,18 @@ Reporting “home won” or “above 100k holds” is invalid. Line win/loss is 
 
 Each board binds a Resolver: the creator’s roster, or the protocol’s public committee. Optimistic report + challenge:
 
-1. A member or authorized reporter submits `value` and posts a bond. On a price board, if a valid Pyth snapshot is attached, the proposed price must equal that snapshot (program-enforced), so nobody can say “Pyth” while handwriting another number.
+1. A member or authorized reporter submits `value` and posts a bond. The payload is the settlement value under the listing convention, not a feed account.
 2. If nobody objects inside the challenge window, `finalize` locks it.
 3. If someone objects and posts a bond, enter an $M/N$ vote; price/macro may use the median inside a tolerance $\varepsilon$.
 4. If the vote fails, extend the report window; if it still fails, `RESOLUTION_FAILED`.
 
 An authorized bot (sports feed, price keeper) is only “a member who may propose first”. Disputes still return to the same committee; no separate settlement channel is opened.
 
-### 10.4 How a Price Board Uses Pyth (evidence only)
+### 10.4 How a Price Board Is Reported
 
-Listing may fill `pyth_feed_id`, `observe_ts`, `max_publish_skew`. This does not hand settlement authority to Pyth.
+Listing locks `price_rule` and `observe_ts`. The committee (or an authorized reporter) computes the scalar from that text and calls `submit_result(price)`. `price_rule` must be verifiable, e.g. “Coinbase BTC-USD last at `observe_ts`” or “arithmetic mean of Binance + Coinbase 1-minute averages”.
 
-**Live evidence (optional):** the report transaction occurs inside `[observe_ts, observe_ts+Δ]`, and the instruction also reads the Pyth price account. The program checks:
-
-- Feed id matches
-- `publishTime ∈ [observe_ts - skew, observe_ts + skew]`
-- Confidence interval and publisher count meet the bar
-
-If they pass, that price becomes the proposal and still goes through the challenge window. After $\Delta$, this path closes — reading Pyth later is no longer “that day’s price”.
-
-**Missed window, or the algorithm is not Pyth spot:** the committee computes from the `price_rule` text and reports a number by hand. `price_rule` must be locked at listing and verifiable, e.g. “Coinbase BTC-USD last at `observe_ts`” or “arithmetic mean of Binance + Coinbase 1-minute averages”. The contract only stores the number; it does not re-run the algorithm.
-
-Do not write `price_rule` as “let Pyth compute by our on-chain formula”. The chain has no such capability.
+The contract stores the number. It does not fetch a feed, re-run a formula, or treat any oracle as the settler. The challenge window still applies.
 
 ### 10.5 Report Failure ≠ Insufficient Funds
 
@@ -1564,7 +1545,7 @@ If the report window + challenge window ends still without a valid $x^*$: auto-e
 
 ### 10.6 Football Score Finalization
 
-Football must be submitted as a score by a reporter; Pyth has no such data. An authorized sports bot only calls `submit_result` on someone’s behalf. Submit:
+Football must be submitted as a score by a reporter. An authorized sports bot only calls `submit_result` on someone’s behalf. Submit:
 
 - `home_score` / `away_score`: non-negative integers
 - Consistent with the creation-time `score_scope` (default regulation only)
@@ -1581,7 +1562,7 @@ Reporting “home” is invalid; a score must be reported. 1X2 is derived from t
 | Election winner (4.9) | `winner_id` | $L=E_{\mathrm{winner}}$ |
 | Election top $n$ (4.9) | $n$ ids | $L=$ that combination atom’s exposure |
 | Election vote share (4.9) | Share vector | The share cell it falls into |
-| BTC daily price (4.10) | Committee-reported price (may attach a live Pyth snapshot) | Nearest grid after clamp |
+| BTC daily price (4.10) | Committee-reported price by `price_rule` | Nearest grid after clamp |
 | Binary event (4.11) | YES or NO | $L=E_{\mathrm{YES}}$ or $E_{\mathrm{NO}}$ |
 
 Elections must not report a poll. Binary events must not finalize YES early because it “looks about to happen”. Macro must match the creation-time `series_id` + `print_rule`.
@@ -1874,13 +1855,13 @@ Implementation must follow the conventions below. There is no remaining fork of 
 | Surplus allocation | Split to Risk LP and the platform only when $\rho=1$, $\alpha_R+\alpha_P=1$ |
 | Fill price | Pure probability $p_I$; haircut is displayed, not quoted |
 | Low coverage | Strong warning; orders still allowed |
-| Resolution source | Always `submit_result` on-chain; committee finalizes; Pyth / sports APIs are evidence only |
+| Resolution source | Always committee `submit_result` on-chain; no oracle writes $x^*$ |
 | Committee | Each board names a roster or cites the public committee; optimistic report + challenge + $M/N$ |
 | PDF representation | Grid or discrete atoms; no parameterized AMM |
 | Football | One `score_scope` per match, one Skellam board; 1X2 / AH / totals / score are set projections on shared $\theta$; `buy_skellam_set`; report a score pair |
 | CPI | Listing recipe on `create_gaussian_market`; first official print |
 | Election | Winner, `TOP_N`, and vote-share boards: `create_dirichlet_market` + `layout`; all three must be completed |
-| Daily price | Listing recipe on `create_lognormal_market`; committee reports by `price_rule`; Pyth is live evidence only |
+| Daily price | Listing recipe on `create_lognormal_market`; committee reports by `price_rule` |
 | Binary event | `create_bernoulli_market`; YES/NO; YES may finalize early before the deadline |
 | Distribution family | On-chain create is by family (`skellam` / `gaussian` / `lognormal` / `dirichlet` / `bernoulli`); listing names are metadata; trading does not switch families |
 | Risk auction | Book opens at listing; published layers, lowest unit premium first; `risk_lock_ts` required and not earlier than `close_ts` |
