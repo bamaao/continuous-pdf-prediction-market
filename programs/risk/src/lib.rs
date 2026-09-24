@@ -343,7 +343,7 @@ pub struct OpenBook<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(owner = market::ID)]
-    pub market: Account<'info, Market>,
+    pub market: Box<Account<'info, Market>>,
     #[account(
         init,
         payer = payer,
@@ -351,7 +351,7 @@ pub struct OpenBook<'info> {
         seeds = [BOOK_SEED, market.key().as_ref()],
         bump
     )]
-    pub book: Account<'info, RiskBook>,
+    pub book: Box<Account<'info, RiskBook>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -361,9 +361,9 @@ pub struct QuoteLayer<'info> {
     #[account(mut)]
     pub lp: Signer<'info>,
     #[account(owner = market::ID)]
-    pub market: Account<'info, Market>,
+    pub market: Box<Account<'info, Market>>,
     #[account(mut, seeds = [BOOK_SEED, market.key().as_ref()], bump = book.bump)]
-    pub book: Account<'info, RiskBook>,
+    pub book: Box<Account<'info, RiskBook>>,
     #[account(
         init_if_needed,
         payer = lp,
@@ -371,7 +371,7 @@ pub struct QuoteLayer<'info> {
         seeds = [LAYER_SEED, market.key().as_ref(), &[layer_id]],
         bump
     )]
-    pub layer: Account<'info, Layer>,
+    pub layer: Box<Account<'info, Layer>>,
     #[account(
         init,
         payer = lp,
@@ -379,7 +379,7 @@ pub struct QuoteLayer<'info> {
         seeds = [QUOTE_SEED, market.key().as_ref(), lp.key().as_ref(), &[layer_id]],
         bump
     )]
-    pub quote: Account<'info, Quote>,
+    pub quote: Box<Account<'info, Quote>>,
     #[account(
         init_if_needed,
         payer = lp,
@@ -387,7 +387,7 @@ pub struct QuoteLayer<'info> {
         seeds = [SEAT_SEED, market.key().as_ref(), lp.key().as_ref()],
         bump
     )]
-    pub seat: Account<'info, LpSeat>,
+    pub seat: Box<Account<'info, LpSeat>>,
     #[account(
         mut,
         seeds = [vault::USER_SEED, lp.key().as_ref()],
@@ -395,7 +395,7 @@ pub struct QuoteLayer<'info> {
         seeds::program = vault::ID,
         constraint = user_vault.owner == lp.key() @ RiskError::NotOwner
     )]
-    pub user_vault: Account<'info, vault::UserVault>,
+    pub user_vault: Box<Account<'info, vault::UserVault>>,
     pub vault_program: Program<'info, vault::program::Vault>,
     pub system_program: Program<'info, System>,
 }
@@ -403,15 +403,15 @@ pub struct QuoteLayer<'info> {
 #[derive(Accounts)]
 pub struct FillNext<'info> {
     #[account(owner = market::ID)]
-    pub market: Account<'info, Market>,
+    pub market: Box<Account<'info, Market>>,
     #[account(mut, seeds = [BOOK_SEED, market.key().as_ref()], bump = book.bump)]
-    pub book: Account<'info, RiskBook>,
+    pub book: Box<Account<'info, RiskBook>>,
     #[account(mut, seeds = [LAYER_SEED, market.key().as_ref(), &[layer.layer_id]], bump = layer.bump)]
-    pub layer: Account<'info, Layer>,
+    pub layer: Box<Account<'info, Layer>>,
     #[account(mut)]
-    pub quote: Account<'info, Quote>,
+    pub quote: Box<Account<'info, Quote>>,
     #[account(mut, seeds = [SEAT_SEED, market.key().as_ref(), quote.lp.as_ref()], bump = seat.bump)]
-    pub seat: Account<'info, LpSeat>,
+    pub seat: Box<Account<'info, LpSeat>>,
 }
 
 #[derive(Accounts)]
@@ -422,13 +422,13 @@ pub struct CancelUnfilled<'info> {
         seeds = [QUOTE_SEED, quote.market.as_ref(), lp.key().as_ref(), &[quote.layer_id]],
         bump = quote.bump
     )]
-    pub quote: Account<'info, Quote>,
+    pub quote: Box<Account<'info, Quote>>,
     #[account(
         mut,
         seeds = [LAYER_SEED, quote.market.as_ref(), &[quote.layer_id]],
         bump = layer.bump
     )]
-    pub layer: Account<'info, Layer>,
+    pub layer: Box<Account<'info, Layer>>,
     #[account(
         mut,
         seeds = [vault::USER_SEED, lp.key().as_ref()],
@@ -436,7 +436,7 @@ pub struct CancelUnfilled<'info> {
         seeds::program = vault::ID,
         constraint = user_vault.owner == lp.key() @ RiskError::NotOwner
     )]
-    pub user_vault: Account<'info, vault::UserVault>,
+    pub user_vault: Box<Account<'info, vault::UserVault>>,
     pub vault_program: Program<'info, vault::program::Vault>,
 }
 

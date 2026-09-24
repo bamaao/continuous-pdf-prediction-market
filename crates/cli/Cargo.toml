@@ -1,0 +1,18 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Localnet CLI: create / deposit / buy-set / risk bid / resolve / settle. FR-CLI-01."
+
+[[bin]]
+name = "cpm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+client = { path = "../client" }
+solana-client = "2.2"
+solana-sdk = "2.2"

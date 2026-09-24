@@ -1,0 +1,18 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "IDL-equivalent instruction builders. Discriminators come from the program crates only."
+
+[dependencies]
+anchor-lang = "0.32.1"
+anchor-spl = "0.32.1"
+market = { path = "../../programs/market", default-features = false, features = ["no-entrypoint"] }
+math = { path = "../math" }
+resolution = { path = "../../programs/resolution", default-features = false, features = ["no-entrypoint"] }
+risk = { path = "../../programs/risk", default-features = false, features = ["no-entrypoint"] }
+solana-sdk = "2.2"
+spl-associated-token-account = "6"
+spl-token = "7"
+vault = { path = "../../programs/vault", default-features = false, features = ["no-entrypoint"] }
