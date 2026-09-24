@@ -81,6 +81,24 @@ pub mod vault {
         )?;
         Ok(())
     }
+
+    /// Lock unused margin so it cannot be withdrawn. Used by risk quotes (FR-RSK-03).
+    pub fn reserve(ctx: Context<MutUser>, amount: u64) -> Result<()> {
+        require!(amount > 0, VaultError::ZeroAmount);
+        require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
+        let user = &mut ctx.accounts.user;
+        user.reserved = accounting::reserve(user.available, user.reserved, amount)?;
+        Ok(())
+    }
+
+    /// Unlock reserved margin. Owner only. Settlement draw is a later instruction.
+    pub fn release(ctx: Context<MutUser>, amount: u64) -> Result<()> {
+        require!(amount > 0, VaultError::ZeroAmount);
+        require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
+        let user = &mut ctx.accounts.user;
+        user.reserved = accounting::release(user.reserved, amount)?;
+        Ok(())
+    }
 }
 
 pub mod accounting {
@@ -99,6 +117,22 @@ pub mod accounting {
             .ok_or(error!(VaultError::InsufficientAvailable))?;
         require!(free >= amount, VaultError::InsufficientAvailable);
         available
+            .checked_sub(amount)
+            .ok_or(error!(VaultError::InsufficientAvailable))
+    }
+
+    pub fn reserve(available: u64, reserved: u64, amount: u64) -> Result<u64> {
+        let free = available
+            .checked_sub(reserved)
+            .ok_or(error!(VaultError::InsufficientAvailable))?;
+        require!(free >= amount, VaultError::InsufficientAvailable);
+        reserved
+            .checked_add(amount)
+            .ok_or(error!(VaultError::Overflow))
+    }
+
+    pub fn release(reserved: u64, amount: u64) -> Result<u64> {
+        reserved
             .checked_sub(amount)
             .ok_or(error!(VaultError::InsufficientAvailable))
     }
@@ -190,6 +224,18 @@ pub struct Withdraw<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct MutUser<'info> {
+    pub owner: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, owner.key().as_ref()],
+        bump = user.bump,
+        has_one = owner @ VaultError::NotOwner
+    )]
+    pub user: Account<'info, UserVault>,
+}
+
 #[account]
 pub struct VaultConfig {
     pub usdc_mint: Pubkey,
@@ -263,5 +309,14 @@ mod tests {
     #[test]
     fn no_overdraft() {
         assert!(debit_available(10, 0, 11).is_err());
+    }
+
+    #[test]
+    fn reserve_then_cannot_withdraw_that_slice() {
+        let r = reserve(100, 0, 40).unwrap();
+        assert_eq!(r, 40);
+        assert!(debit_available(100, r, 70).is_err());
+        assert_eq!(debit_available(100, r, 60).unwrap(), 40);
+        assert_eq!(release(r, 40).unwrap(), 0);
     }
 }

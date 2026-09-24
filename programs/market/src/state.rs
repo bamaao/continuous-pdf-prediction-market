@@ -50,6 +50,9 @@ pub struct Market {
     pub risk_lock_ts: i64,
     pub report_window_secs: i64,
     pub challenge_secs: i64,
+    pub n_layers: u8,
+    pub gamma_bps: u16,
+    pub d_unit: u64,
     pub beta: i128,
     pub c_m: u64,
     pub fees_accrued: u64,
@@ -132,6 +135,9 @@ pub struct CreateCommon {
     pub authorized_reporter: Pubkey,
     pub report_window_secs: i64,
     pub challenge_secs: i64,
+    pub n_layers: u8,
+    pub d_unit: u64,
+    pub gamma_bps: u16,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]

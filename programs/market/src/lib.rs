@@ -260,6 +260,7 @@ fn open_board(
     require!(now < common.close_ts, MarketError::BadClock);
     require!(common.close_ts <= common.risk_lock_ts, MarketError::BadClock);
     lock_roster(common)?;
+    lock_layers(common)?;
 
     let market = &mut ctx.accounts.market;
     market.family = family as u8;
@@ -281,6 +282,9 @@ fn open_board(
     market.risk_lock_ts = common.risk_lock_ts;
     market.report_window_secs = common.report_window_secs;
     market.challenge_secs = common.challenge_secs;
+    market.n_layers = common.n_layers;
+    market.d_unit = common.d_unit;
+    market.gamma_bps = if common.gamma_bps == 0 { 1_000 } else { common.gamma_bps };
     market.beta = common.beta;
     market.c_m = common.c_m;
     market.fees_accrued = 0;
@@ -552,6 +556,13 @@ fn lock_roster(common: &CreateCommon) -> Result<()> {
     Ok(())
 }
 
+fn lock_layers(common: &CreateCommon) -> Result<()> {
+    require!(common.n_layers >= 1 && common.n_layers <= 8, MarketError::BadLayers);
+    require!(common.d_unit > 0, MarketError::BadCapital);
+    require!(common.gamma_bps <= 10_000, MarketError::BadFee);
+    Ok(())
+}
+
 #[derive(Accounts)]
 #[instruction(id_hash: [u8; 32], n: u16)]
 pub struct CreateBoard<'info> {
@@ -684,6 +695,8 @@ pub enum MarketError {
     Overflow,
     #[msg("committee roster or M/N is illegal")]
     BadCommittee,
+    #[msg("n_layers / D_unit / gamma at listing is illegal")]
+    BadLayers,
     #[msg("signer is not the creator or a roster member")]
     NotResolver,
 }
@@ -745,6 +758,9 @@ mod tests {
             authorized_reporter: Pubkey::default(),
             report_window_secs: 60,
             challenge_secs: 30,
+            n_layers: 3,
+            d_unit: 10_000,
+            gamma_bps: 1_000,
         };
         assert!(lock_roster(&common).is_ok());
         common.members = vec![b];
@@ -752,5 +768,39 @@ mod tests {
         common.members = vec![a, a];
         common.committee = a;
         assert!(lock_roster(&common).is_err());
+    }
+
+    #[test]
+    fn layers_are_locked_at_create() {
+        use super::{lock_layers, CreateCommon};
+        use anchor_lang::prelude::Pubkey;
+        let a = Pubkey::new_from_array([1u8; 32]);
+        let mut common = CreateCommon {
+            id_hash: [0; 32],
+            n: 2,
+            close_ts: 10,
+            risk_lock_ts: 20,
+            beta: 1,
+            c_m: 1,
+            fee_bps: 0,
+            committee: a,
+            members: vec![a],
+            m: 1,
+            authorized_reporter: Pubkey::default(),
+            report_window_secs: 60,
+            challenge_secs: 30,
+            n_layers: 3,
+            d_unit: 10_000,
+            gamma_bps: 1_000,
+        };
+        assert!(lock_layers(&common).is_ok());
+        common.n_layers = 0;
+        assert!(lock_layers(&common).is_err());
+        common.n_layers = 3;
+        common.d_unit = 0;
+        assert!(lock_layers(&common).is_err());
+        common.d_unit = 10_000;
+        common.gamma_bps = 10_001;
+        assert!(lock_layers(&common).is_err());
     }
 }
