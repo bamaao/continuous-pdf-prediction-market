@@ -11,6 +11,7 @@ name = "vault"
 
 [features]
 default = []
+devnet = []
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 no-entrypoint = []
 cpi = ["no-entrypoint"]
