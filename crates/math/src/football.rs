@@ -73,6 +73,51 @@ pub fn mask_away_handicap(k_max: u32, halves: i32) -> Vec<bool> {
     map_cells(k_max, |i, j| 2 * (j as i32 - i as i32) + halves > 0)
 }
 
+/// Expand a typed Skellam ticket to the LMSR set(s) written at fill.
+/// Ordinary lines are one set. Quarter lines are two half-stake sets.
+pub fn skellam_masks(kind: u8, a: i16, b: i16, k_max: u32) -> Option<Vec<Vec<bool>>> {
+    Some(match kind {
+        0 => vec![mask_home(k_max)],
+        1 => vec![mask_draw(k_max)],
+        2 => vec![mask_away(k_max)],
+        3 => vec![mask_over(k_max, a as i32)],
+        4 => vec![mask_under(k_max, a as i32)],
+        5 => vec![mask_btts_yes(k_max)],
+        6 => vec![mask_btts_no(k_max)],
+        7 => vec![mask_exact(k_max, a as u32, b as u32)],
+        8 => vec![mask_home_handicap(k_max, a as i32)],
+        9 => vec![mask_away_handicap(k_max, a as i32)],
+        10 => {
+            if a % 2 == 0 {
+                return None;
+            }
+            let (x, y) = quarter_to_halves(a as i32);
+            vec![mask_home_handicap(k_max, x), mask_home_handicap(k_max, y)]
+        }
+        11 => {
+            if a % 2 == 0 {
+                return None;
+            }
+            let (x, y) = quarter_to_halves(a as i32);
+            vec![mask_away_handicap(k_max, x), mask_away_handicap(k_max, y)]
+        }
+        _ => return None,
+    })
+}
+
+/// `(parts_hit, parts_total)` of a typed ticket at `cell`.
+/// Fill writes $q/\mathrm{total}$ onto each part; settle must credit the same face.
+pub fn skellam_hit_parts(kind: u8, a: i16, b: i16, k_max: u32, cell: usize) -> Option<(u32, u32)> {
+    let masks = skellam_masks(kind, a, b, k_max)?;
+    let n = masks.first()?.len();
+    if cell >= n {
+        return None;
+    }
+    let total = masks.len() as u32;
+    let hit = masks.iter().filter(|m| m[cell]).count() as u32;
+    Some((hit, total))
+}
+
 /// Quarter line in quarter-goals (odd): -3 = -0.75 → (-1.0, -0.5) half-lines.
 pub fn quarter_to_halves(quarters: i32) -> (i32, i32) {
     assert!(quarters % 2 != 0, "quarter line must be odd quarters");
@@ -119,7 +164,9 @@ pub fn cost_quarter(state: &LmsrState, first: &[bool], second: &[bool], q: Q64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lmsr::implied_probs;
     use crate::prior::independent_poisson_2d;
+    use crate::settle::{ticket_face, usdc};
 
     fn book() -> LmsrState {
         LmsrState::new(
@@ -261,6 +308,36 @@ mod tests {
             .saturating_add(set_prob(&s, &mask_draw(K_MAX)))
             .saturating_add(set_prob(&s, &mask_away(K_MAX)));
         assert!(p.approx_eq(Q64::ONE, 1 << 38), "sum {}", p.raw());
+    }
+
+    #[test]
+    fn e_at_outcome_equals_sum_of_ticket_faces() {
+        let mut s = book();
+        let k = K_MAX;
+        // Home q=2, over 2.5 q=1, exact 2-1 q=1, home -0.75 q=2.
+        lmsr_update(&mut s, &mask_home(k), Q64::from_int(2));
+        lmsr_update(&mut s, &mask_over(k, 5), Q64::ONE);
+        lmsr_update(&mut s, &mask_exact(k, 2, 1), Q64::ONE);
+        let (h0, h1) = quarter_to_halves(-3);
+        lmsr_update_quarter(
+            &mut s,
+            &mask_home_handicap(k, h0),
+            &mask_home_handicap(k, h1),
+            Q64::from_int(2),
+        );
+        let cell = cell(2, 1, k);
+        let mut face = 0u64;
+        for (kind, a, b, q) in [(0, 0, 0, 2u64), (3, 5, 0, 1), (7, 2, 1, 1), (10, -3, 0, 2)] {
+            let (hit, tot) = skellam_hit_parts(kind, a, b, k, cell).unwrap();
+            face += ticket_face(q, hit, tot);
+        }
+        assert_eq!(usdc(s.exposure[cell]), face);
+        // 2-1: home + over + exact + half of -0.75 = 2+1+1+1.
+        assert_eq!(face, 5);
+        let p = implied_probs(&s);
+        let sum = p.iter().copied().fold(Q64::ZERO, Q64::saturating_add);
+        assert!(sum.approx_eq(Q64::ONE, 1 << 38), "pdf {}", sum.raw());
+        assert_ne!(usdc(s.exposure[cell]), usdc(p[cell]), "E is not the PDF");
     }
 
     #[test]

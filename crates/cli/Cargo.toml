@@ -14,5 +14,6 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 client = { path = "../client" }
+quote = { path = "../services/quote" }
 solana-client = "2.2"
 solana-sdk = "2.2"

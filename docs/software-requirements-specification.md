@@ -5,7 +5,7 @@
 | Item | Content |
 | --- | --- |
 | Document | SRS |
-| Version | 1.2 |
+| Version | 1.3 |
 | Status | Baseline for implementation |
 | Audience | Engineers, QA, reviewers |
 | Normative sources | `product-specification.md` (product rules), `system-architecture.md`, `technical-architecture.md` |
@@ -70,14 +70,17 @@ Identity is a Solana pubkey. There is no password account.
 
 | Term | Meaning |
 | --- | --- |
-| $f(x)$ / $P$ | Market PDF or discrete mass; $\int f=1$ or $\sum P=1$ |
-| $\theta$ | LMSR state; buy $S$ of size $q$ does $\theta_k\leftarrow\theta_k+q$ on $k\in S$ |
-| $q$ / shares | Fill size. Credits $q$ shares on set $S$. Settlement pays $\rho\cdot q$ USDC if $x^*$ hits |
-| $C_S(q)$ | LMSR cost of buying $q$ shares of set $S$ (not the share count) |
+| $f(x)$ / $P$ / $p_k$ | Implied PDF from $p0,\theta,\beta$; $\sum p_k=1$. **Not** $E$ |
+| $\theta$ | LMSR state; each fill **leg** does $\theta_k\leftarrow\theta_k+q_\ell$ on $k\in S_\ell$ |
+| $S$ | Frozen atom set at fill (mask or `skellam_masks`). Settlement SHALL NOT re-integrate a UI interval |
+| $q$ / shares | Ticket size minted at fill. One share’s **face** is $1$ USDC if it hits ($\rho=1$), not the USDC paid to buy it |
+| $p_S$ | Current LMSR probability of $S$. Marginal price of an infinitesimal share. **Not** the payout |
+| face | $q\cdot n_{\mathrm{hit}}/n_{\mathrm{parts}}$ at atom $c=\mathrm{cell}(x^*)$ |
+| $C_S(q)$ | USDC cost to **buy** $q$ shares of $S$. For small $q$, $\approx p_S q$. Not the share count |
 | $\phi$ | Platform fee rate; fee $=\phi\cdot C_S(q)$ |
-| $E(x)$ | Face exposure at $x$ |
+| $E(x)$ | Running sum of faces on atom $x$; `grid.exposure` |
 | $L_{\max}$ | $\sup_x E(x)$ (display / auction signal only) |
-| $L$ | Settlement liability $E(x^*)$ |
+| $L$ | $E(c)$ at $c=\mathrm{cell}(x^*)$ only — not $\sum_k E_k$ |
 | $C_M$ | Optional market capital injected at listing; may be $0$ |
 | $C_R^{\mathrm{final}}$ | Locked, drawable Risk LP capacity at settlement; may be $0$ |
 | $C_P^{\mathrm{pool}}$ | Single protocol USDC vault for the platform adjustment fund |
@@ -130,12 +133,12 @@ Identity is a Solana pubkey. There is no password account.
 | ID | Requirement | Verify |
 | --- | --- | --- |
 | FR-TRD-01 | `buy_set` / `sell_set` / `buy_skellam_set` / `sell_skellam_set` SHALL execute only on ER while the market is delegated and `now < close_ts`. L1 is allowed only before Delegate (tests). | Status + clock |
-| FR-TRD-02 | Fill price SHALL be the LMSR pure probability $p_S$ / $C_S(q)$. Coverage / $\hat\rho$ SHALL be displayed and SHALL NOT be baked into the quote. | Quote vs chain cost |
+| FR-TRD-02 | On **every** family and line, fill price SHALL be LMSR $p_S$ / $C_S(q)$. A fill of $q$ SHALL mint $q$ shares (ordinary face $1$ USDC each if $c\in S$ and $\rho=1$). $p_S$ SHALL NOT be the payout and SHALL NOT rescale the share count. Quarter AH is the only split-face case (FR-SET-09). Coverage / $\hat\rho$ SHALL be displayed and SHALL NOT be baked into the quote. | CPI / 1X2 / YES: $p_S=0.7$, $q=1$ costs $\approx 0.7$, hit pays $1$ if $\rho=1$ |
 | FR-TRD-03 | Buying the same $S$ again SHALL raise $p_S$ and $C_S$ (LMSR). | Monotonicity test |
 | FR-TRD-04 | Each fill SHALL charge fee $\phi\cdot C_S(q)$ to the platform. Fees SHALL NOT enter this board’s $C_{\max}$ or $R_{\mathrm{net}}$. Fees MAY later be swept into $C_P$ for other boards. | Vault ledgers |
 | FR-TRD-05 | The system SHALL NOT reject a valid order because $L'_{\max}>C_M+C_R$. | Case $L_{\max}$ huge, balance OK |
 | FR-TRD-06 | The system SHALL reject only: insufficient USDC available, illegal set / $q$, market not TRADING, Session unauthorized, or nonce replay. | Negative tests |
-| FR-TRD-07 | After a fill the system SHALL update $\theta$, $E$, $L_{\max}$, and broadcast the new PDF. | Event + indexer |
+| FR-TRD-07 | After a fill the system SHALL update $\theta$, $E$, $L_{\max}$, and broadcast the new **implied PDF** $p_k=\mathrm{implied\_probs}(p0,\theta,\beta)$, not $E$. | Event + indexer |
 | FR-TRD-08 | Low coverage SHALL trigger a strong UI warning and SHALL still allow the order. | UI + chain accept |
 | FR-TRD-09 | A fill is complete only when FR-DUR-01 holds. Until then the client SHALL show `pending` and retry the same `nonce`. | Idempotency |
 | FR-TRD-10 | Quote Engine preview SHALL be read-only and SHALL NOT be the ledger. | Preview ≠ settle |
@@ -164,14 +167,16 @@ Identity is a Solana pubkey. There is no password account.
 | FR-RES-03 | Failed vote SHALL extend or `RESOLUTION_FAILED`. Failed finalization SHALL refund users, return LP collateral, and return unused premium. | Refund balances |
 | FR-RES-04 | Football SHALL report a score pair; CPI the first official print; election the defined winner / TOP_N set / shares; price the `price_rule` scalar; binary YES or NO. | Type-specific accounts |
 | FR-RES-05 | `evidence_hash` SHALL be an opaque digest. The program SHALL NOT parse oracles, price feeds, or sports APIs. | No feed accounts on ixs |
-| FR-SET-01 | Settlement SHALL use $L=E(x^*)$, not $L_{\max}$. | Fixture $E\neq L_{\max}$ |
+| FR-SET-01 | Settlement SHALL use $L=E(c)$ with $c=\mathrm{cell}(x^*)$, not $L_{\max}$ and not $\sum_k E_k$. | Fixture $E\neq L_{\max}$; one-cell read |
 | FR-SET-02 | $C_{\max}$ SHALL equal $R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. $C_M$, $C_R$, and $C_P^{\mathrm{alloc}}$ MAY each be $0$. | Ledger identity |
-| FR-SET-03 | $\rho=\min(1,C_{\max}/L)$ (or $\rho=1$ if $L=0$). Every winner SHALL receive $\rho\cdot q$. FIFO or entry-order haircuts SHALL NOT be used. | All winners same $\rho$ |
+| FR-SET-03 | $\rho=\min(1,C_{\max}/L)$ (or $\rho=1$ if $L=0$). Every ticket SHALL receive $\lfloor\rho\cdot\mathrm{face}\rfloor$. FIFO or entry-order haircuts SHALL NOT be used. | All winners same $\rho$ |
 | FR-SET-04 | Surplus $S=\max(R_{\mathrm{net}}+C_M-L,0)$ SHALL be paid only if $\rho=1$. If $C_R^{\mathrm{final}}>0$, split $\alpha_R+\alpha_P=1$. If $C_R^{\mathrm{final}}=0$, all $S$ SHALL go to the platform. If $\rho<1$ then $S=0$. | Surplus cases |
-| FR-SET-05 | Dust from $\lfloor\rho q\rfloor$ SHALL go to reserves, not to a preferred user. | Remainder account |
+| FR-SET-05 | Dust from $\lfloor\rho\cdot\mathrm{face}\rfloor$ SHALL go to reserves, not to a preferred user. | Remainder account |
 | FR-SET-06 | There SHALL be no `admin_withdraw`. Outflows are: user unused margin, settlement payout, LP draw, $C_P$ allocation, surplus split, VOID / failed-resolution refunds. | Instruction whitelist |
 | FR-SET-07 | There SHALL be one platform adjustment fund pool $C_P^{\mathrm{pool}}$ (one USDC vault). Draw order SHALL be $R_{\mathrm{net}}$, then $C_M$, then $C_R$ by leftover shortfall, then $C_P^{\mathrm{alloc}}=\min((L-R_{\mathrm{net}}-C_M-C_R)^+,C_P^{\mathrm{board}},C_P^{\mathrm{pool}})$, which SHALL debit the pool. Boards SHALL NOT hold a private $C_P$ balance. The pool SHALL NOT be an unlimited guarantee. | Pool balance + two-board contention |
 | FR-SET-08 | If $L\le R_{\mathrm{net}}+C_M$, Risk LP $H$ SHALL be $0$ and $C_P$ SHALL NOT be drawn. | Own-funds fixture |
+| FR-SET-09 | Ticket face SHALL be $q\cdot n_{\mathrm{hit}}/n_{\mathrm{parts}}$. Ordinary sets: one part. Quarter lines: two parts of $q/2$. Fill and settle SHALL use the same `skellam_masks`. A quarter OR-mask paying $\rho\cdot q$ is forbidden. | Half-win $q/2$; $E(c)=\sum\mathrm{face}$ |
+| FR-SET-10 | The displayed market distribution SHALL be $p_k$ from $p0,\theta,\beta$ (`implied_probs`). $E$ SHALL NOT be shown as the PDF. `submit_result` SHALL NOT rewrite $p$ or $E$. | PDF sums to 1; $E\neq p$ fixture |
 
 ### 4.6 Durability and recovery
 
@@ -273,11 +278,13 @@ Identity is a Solana pubkey. There is no password account.
 | --- | --- |
 | INV-01 | $\sum_k p_k=1$ (or $\int f=1$) after every fill |
 | INV-02 | Buying $S$ does not decrease $p_S$ |
-| INV-03 | If $\rho=1$, winners are paid face $q$; else $\sum$ paid $=\lfloor\rho\cdot$ faces$\rfloor$ with dust to reserves |
+| INV-03 | If $\rho=1$, winners are paid ticket face; else $\sum$ paid $=\lfloor\rho\cdot$ faces$\rfloor$ with dust to reserves |
 | INV-04 | $\sum$ USDC paid to winners $\le C_{\max}$ |
 | INV-05 | Vault token balance equals the accounting sum |
 | INV-06 | Same $\rho$ for every winner on a board |
 | INV-07 | Fees never sit in the user payout numerator |
+| INV-08 | After any mix of fills, $\sum_j\mathrm{face}_j(c)=E(c)$ |
+| INV-09 | $p_k$ is not $E_k$; $\sum p_k=1$ |
 
 ---
 
@@ -288,6 +295,7 @@ The system SHALL NOT:
 | ID | Forbidden |
 | --- | --- |
 | XX-01 | Bake expected $\rho$ into LMSR price |
+| XX-13 | Treat $E$ as the PDF; sum $E$ across atoms as $L$; pay $\rho\cdot q$ on a quarter OR-mask |
 | XX-02 | Haircut by arrival time / FIFO |
 | XX-03 | Hard-reject trading because $L_{\max}\le C_M+C_R$ fails |
 | XX-04 | Let one LP lock underwrite multiple boards |

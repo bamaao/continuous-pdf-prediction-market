@@ -416,39 +416,8 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, is_buy: bool) ->
 }
 
 fn expand_skellam(contract: SkellamContract, k_max: u32) -> Result<Vec<Vec<bool>>> {
-    use math::football as fb;
-    Ok(match contract {
-        SkellamContract::Home => vec![fb::mask_home(k_max)],
-        SkellamContract::Draw => vec![fb::mask_draw(k_max)],
-        SkellamContract::Away => vec![fb::mask_away(k_max)],
-        SkellamContract::TotalsOver { halves } => vec![fb::mask_over(k_max, halves as i32)],
-        SkellamContract::TotalsUnder { halves } => vec![fb::mask_under(k_max, halves as i32)],
-        SkellamContract::BttsYes => vec![fb::mask_btts_yes(k_max)],
-        SkellamContract::BttsNo => vec![fb::mask_btts_no(k_max)],
-        SkellamContract::Exact { home, away } => vec![fb::mask_exact(k_max, home as u32, away as u32)],
-        SkellamContract::HomeHandicap { halves } => {
-            vec![fb::mask_home_handicap(k_max, halves as i32)]
-        }
-        SkellamContract::AwayHandicap { halves } => {
-            vec![fb::mask_away_handicap(k_max, halves as i32)]
-        }
-        SkellamContract::HomeHandicapQuarter { quarters } => {
-            require!(quarters % 2 != 0, MarketError::BadMask);
-            let (a, b) = fb::quarter_to_halves(quarters as i32);
-            vec![
-                fb::mask_home_handicap(k_max, a),
-                fb::mask_home_handicap(k_max, b),
-            ]
-        }
-        SkellamContract::AwayHandicapQuarter { quarters } => {
-            require!(quarters % 2 != 0, MarketError::BadMask);
-            let (a, b) = fb::quarter_to_halves(quarters as i32);
-            vec![
-                fb::mask_away_handicap(k_max, a),
-                fb::mask_away_handicap(k_max, b),
-            ]
-        }
-    })
+    let (kind, a, b) = contract.ticket_key();
+    math::football::skellam_masks(kind, a, b, k_max).ok_or_else(|| error!(MarketError::BadMask))
 }
 
 fn apply_lmsr(

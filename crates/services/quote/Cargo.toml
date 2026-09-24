@@ -1,0 +1,9 @@
+[package]
+name = "quote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-memory LMSR quote book. Same crates/math as the chain. Not the ledger."
+
+[dependencies]
+math = { path = "../../math" }

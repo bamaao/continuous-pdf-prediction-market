@@ -45,6 +45,18 @@ fn partition(state: &LmsrState) -> Q64 {
     z
 }
 
+/// Implied atom masses $p_k$ after trading. This is the PDF, not $E(x)$.
+pub fn implied_probs(state: &LmsrState) -> Vec<Q64> {
+    let z = partition(state);
+    (0..state.n())
+        .map(|i| {
+            weight(state.p0[i], state.theta[i], state.beta)
+                .checked_div(z)
+                .unwrap_or(Q64::ZERO)
+        })
+        .collect()
+}
+
 /// Probability mass of a set `S` (true = in the set).
 pub fn interval_prob(state: &LmsrState, in_set: &[bool]) -> Q64 {
     assert_eq!(in_set.len(), state.n());

@@ -1,0 +1,35 @@
+[package]
+name = "readpath"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 4 read path: indexer projections + Market API HTTP/WSS. Not the ledger."
+
+[[bin]]
+name = "indexer"
+path = "src/bin/indexer.rs"
+
+[[bin]]
+name = "market-api"
+path = "src/bin/market-api.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+client = { path = "../../client" }
+futures-util = "0.3"
+math = { path = "../../math" }
+quote = { path = "../quote" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+solana-client = "2.2"
+solana-sdk = "2.2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+math = { path = "../../math" }
+tokio-tungstenite = "0.26"
+tower = { version = "0.5", features = ["util"] }

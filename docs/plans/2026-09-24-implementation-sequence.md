@@ -92,12 +92,14 @@ SRS: FR-CLI-01. IDL-generated; no second discriminator.
 
 ## Phase 4 — Read path
 
-- Indexer (`yellowstone-grpc` or websocket on local)
-- Postgres projections (not the ledger)
-- Quote Engine (memory grid, `crates/math`)
-- Market API (Axum)
+- Indexer: local RPC poll (`crates/services/readpath` `indexer`); Yellowstone later
+- Postgres projections optional (`DATABASE_URL` + `infra/docker-compose.readpath.yml`); memory store is the local cache. Not the ledger.
+- Quote Engine (`crates/services/quote`, `crates/math` only)
+- Market API (`market-api`): `GET /v1/health`, `/v1/markets`, `/v1/markets/{pk}/quote`, `/pdf`, `/ws`
 
 **Done when:** HTTP/WSS can show $p_S$, $C_S$, coverage, $\hat\rho$ matching the last on-chain $\theta$.
+
+Local check: `scripts/phase4-readpath.sh` compares `GET /v1/markets/:id/quote` to `cpm market quote` on the same fill.
 
 ---
 

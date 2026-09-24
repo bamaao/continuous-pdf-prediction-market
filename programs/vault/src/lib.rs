@@ -155,15 +155,20 @@ pub mod vault {
 
     pub fn payout(ctx: Context<Payout>, set_mask: Vec<u8>) -> Result<()> {
         let board = &ctx.accounts.board;
-        let hits = settle::mask_hits(&set_mask, ctx.accounts.grid.n as usize, board.cell as usize)?;
         require!(
             ctx.accounts.position.set_hash == settle::set_hash(&set_mask),
             VaultError::BadMask
         );
+        let face = settle::mask_face(
+            ctx.accounts.position.q,
+            &set_mask,
+            ctx.accounts.grid.n as usize,
+            board.cell as usize,
+        )?;
         let paid = settle::pay_winner_clean(
             &mut ctx.accounts.board,
             &ctx.accounts.position,
-            hits,
+            face,
             &mut ctx.accounts.user,
         )?;
         ctx.accounts.claim.position = ctx.accounts.position.key();
@@ -178,11 +183,18 @@ pub mod vault {
             ctx.accounts.position.set_hash == settle::skellam_ticket(kind, a, b),
             VaultError::BadMask
         );
-        let hits = settle::skellam_hits(kind, a, b, ctx.accounts.record.k_max, board.cell as usize)?;
+        let face = settle::skellam_face(
+            ctx.accounts.position.q,
+            kind,
+            a,
+            b,
+            ctx.accounts.record.k_max,
+            board.cell as usize,
+        )?;
         let paid = settle::pay_winner_clean(
             &mut ctx.accounts.board,
             &ctx.accounts.position,
-            hits,
+            face,
             &mut ctx.accounts.user,
         )?;
         ctx.accounts.claim.position = ctx.accounts.position.key();

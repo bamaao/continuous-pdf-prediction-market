@@ -2,7 +2,7 @@
 //! from the on-chain crates — no second discriminator table.
 
 use anchor_lang::solana_program::instruction::Instruction;
-use anchor_lang::{InstructionData, ToAccountMetas};
+use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::system_program;
 
@@ -63,6 +63,26 @@ pub fn position_pda(market: &Pubkey, owner: &Pubkey, set_hash: &[u8; 32]) -> Pub
 
 pub fn record_pda(market: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[resolution::RES_SEED, market.as_ref()], &resolution::ID).0
+}
+
+pub fn decode_market(data: &[u8]) -> Result<market::state::Market, String> {
+    let mut cur = data;
+    market::state::Market::try_deserialize(&mut cur).map_err(|e| e.to_string())
+}
+
+pub fn decode_grid(data: &[u8]) -> Result<market::state::Grid, String> {
+    let mut cur = data;
+    market::state::Grid::try_deserialize(&mut cur).map_err(|e| e.to_string())
+}
+
+pub fn decode_board(data: &[u8]) -> Result<vault::Board, String> {
+    let mut cur = data;
+    vault::Board::try_deserialize(&mut cur).map_err(|e| e.to_string())
+}
+
+pub fn decode_risk_book(data: &[u8]) -> Result<risk::RiskBook, String> {
+    let mut cur = data;
+    risk::RiskBook::try_deserialize(&mut cur).map_err(|e| e.to_string())
 }
 
 pub fn risk_book(market: &Pubkey) -> Pubkey {

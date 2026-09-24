@@ -9,7 +9,9 @@ use crate::{accounting, VaultError};
 use anchor_lang::prelude::*;
 use math::football;
 use math::outcome::outcome_cell;
-use math::settle::{c_max, layer_loss, payout_floor, r_net, recovery_rate, surplus, surplus_parts, usdc};
+use math::settle::{
+    c_max, layer_loss, payout_floor, r_net, recovery_rate, surplus, surplus_parts, ticket_face, usdc,
+};
 use math::Q64;
 
 pub const BOARD_IDLE: u8 = 0;
@@ -178,17 +180,16 @@ fn rho_dust(rho_raw: i128, q: u64, _pay: u64) -> u64 {
 pub fn pay_winner_clean(
     board: &mut Board,
     pos: &Position,
-    hits: bool,
+    face_usdc: u64,
     user: &mut crate::UserVault,
 ) -> Result<u64> {
     require!(board.phase == BOARD_SETTLED, VaultError::NotFinalized);
     require!(pos.market == board.market, VaultError::WrongBoard);
-    if !hits || pos.q <= 0 {
+    if face_usdc == 0 {
         return Ok(0);
     }
-    let q = usdc(Q64::from_raw(pos.q));
-    let pay = payout_floor(Q64::from_raw(board.rho_raw), q);
-    board.dust = board.dust.saturating_add(rho_dust(board.rho_raw, q, pay));
+    let pay = payout_floor(Q64::from_raw(board.rho_raw), face_usdc);
+    board.dust = board.dust.saturating_add(rho_dust(board.rho_raw, face_usdc, pay));
     if pay > 0 {
         user.available = accounting::credit(user.available, pay)?;
         board.paid_users = board.paid_users.saturating_add(pay);
@@ -345,35 +346,15 @@ pub fn mask_hits(mask: &[u8], n: usize, cell: usize) -> Result<bool> {
     Ok(mask[cell / 8] & (1 << (cell % 8)) != 0)
 }
 
-pub fn skellam_hits(kind: u8, a: i16, b: i16, k_max: u8, cell: usize) -> Result<bool> {
+pub fn mask_face(q_raw: i128, mask: &[u8], n: usize, cell: usize) -> Result<u64> {
+    let hits = mask_hits(mask, n, cell)?;
+    Ok(ticket_face(usdc(Q64::from_raw(q_raw)), u32::from(hits), 1))
+}
+
+pub fn skellam_face(q_raw: i128, kind: u8, a: i16, b: i16, k_max: u8, cell: usize) -> Result<u64> {
     let k = if k_max == 0 { 10 } else { k_max as u32 };
-    let mask = match kind {
-        0 => football::mask_home(k),
-        1 => football::mask_draw(k),
-        2 => football::mask_away(k),
-        3 => football::mask_over(k, a as i32),
-        4 => football::mask_under(k, a as i32),
-        5 => football::mask_btts_yes(k),
-        6 => football::mask_btts_no(k),
-        7 => football::mask_exact(k, a as u32, b as u32),
-        8 => football::mask_home_handicap(k, a as i32),
-        9 => football::mask_away_handicap(k, a as i32),
-        10 => {
-            let (x, y) = football::quarter_to_halves(a as i32);
-            let m1 = football::mask_home_handicap(k, x);
-            let m2 = football::mask_home_handicap(k, y);
-            m1.into_iter().zip(m2).map(|(p, q)| p || q).collect()
-        }
-        11 => {
-            let (x, y) = football::quarter_to_halves(a as i32);
-            let m1 = football::mask_away_handicap(k, x);
-            let m2 = football::mask_away_handicap(k, y);
-            m1.into_iter().zip(m2).map(|(p, q)| p || q).collect()
-        }
-        _ => return err!(VaultError::BadMask),
-    };
-    require!(cell < mask.len(), VaultError::BadOutcome);
-    Ok(mask[cell])
+    let (hit, tot) = football::skellam_hit_parts(kind, a, b, k, cell).ok_or(VaultError::BadMask)?;
+    Ok(ticket_face(usdc(Q64::from_raw(q_raw)), hit, tot))
 }
 
 #[cfg(test)]
@@ -477,11 +458,26 @@ mod tests {
         pb.q = Q64::from_int(40).raw();
         let mut ua = user(0, 0);
         let mut ub = user(0, 0);
-        let pa_pay = pay_winner_clean(&mut b, &pa, true, &mut ua).unwrap();
-        let pb_pay = pay_winner_clean(&mut b, &pb, true, &mut ub).unwrap();
+        let pa_pay = pay_winner_clean(&mut b, &pa, 60, &mut ua).unwrap();
+        let pb_pay = pay_winner_clean(&mut b, &pb, 40, &mut ub).unwrap();
         assert_eq!(ua.available + ub.available, pa_pay + pb_pay);
         assert!(pa_pay + pb_pay <= 90);
         assert!(pa_pay > pb_pay);
+    }
+
+    #[test]
+    fn quarter_ticket_face_matches_exposure_write() {
+        let q = Q64::from_int(100).raw();
+        let k = 10;
+        // 2-1: only the -0.5 half of home -0.75 hits → q/2.
+        let half = skellam_face(q, 10, -3, 0, k, math::football::cell(2, 1, k as u32)).unwrap();
+        assert_eq!(half, 50);
+        // 2-0: both halves hit → q.
+        let full = skellam_face(q, 10, -3, 0, k, math::football::cell(2, 0, k as u32)).unwrap();
+        assert_eq!(full, 100);
+        // 0-0: miss.
+        let miss = skellam_face(q, 10, -3, 0, k, math::football::cell(0, 0, k as u32)).unwrap();
+        assert_eq!(miss, 0);
     }
 
     #[test]

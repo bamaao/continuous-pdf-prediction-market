@@ -4,6 +4,8 @@ members = [
     "crates/math",
     "crates/client",
     "crates/cli",
+    "crates/services/quote",
+    "crates/services/readpath",
     "programs/vault",
     "programs/market",
     "programs/resolution",

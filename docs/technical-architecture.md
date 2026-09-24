@@ -4,8 +4,8 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.1 |
-| Corresponding product | `product-specification.md` v1.0 |
+| Version | 1.2 |
+| Corresponding product | `product-specification.md` v1.3 |
 | Corresponding system | `system-architecture.md` |
 
 This document answers: which frameworks, which middleware, and how the core algorithms are implemented.
@@ -329,15 +329,22 @@ $$
 \hat\rho_S=\min_{k\in S}\min\bigl(1,C_{\max}/E_k\bigr)
 $$
 
-At settlement:
+At settlement (product §8.1 — do not mix $p$, $E$, and ticket face):
 
 $$
-L=E(x^*),\quad
+c=\mathrm{cell}(x^*),\quad
+L=E(c)=\texttt{grid.exposure}[c],\quad
 C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}},\quad
 \rho=\min(1,C_{\max}/L)
 $$
 
-Payout: winning positions $\lfloor\rho\cdot q\rfloor$; dust goes to the reserve. **FIFO is forbidden.**
+Implied PDF (quotes / `cpm market pdf`), never used as $L$:
+
+$$
+p_k=\mathrm{implied\_probs}(p0,\theta,\beta)_k
+$$
+
+Payout: $\lfloor\rho\cdot\mathrm{face}\rfloor$ with $\mathrm{face}=\mathrm{ticket\_face}(q,n_{\mathrm{hit}},n_{\mathrm{parts}})$. Ordinary sets: one part. Quarter lines: same `skellam_masks` as fill; one of two legs $\Rightarrow q/2$. Dust goes to the reserve. **FIFO is forbidden.** $L$ is one cell, not $\sum_k E_k$.
 
 ### 6.5 Risk-auction matching
 

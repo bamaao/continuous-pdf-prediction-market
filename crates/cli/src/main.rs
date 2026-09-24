@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use clap::{Parser, Subcommand};
-use client::math::Q64;
+use client::math::{usdc, Q64};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
@@ -59,7 +59,7 @@ enum Cmd {
     Settle(SettleCmd),
     /// Keeper is Phase 5/8. Prints the intended loop only.
     Keeper,
-    /// Indexer is Phase 4. Prints RPC slot only.
+    /// RPC slot, plus Market API health when `MARKET_API` is set.
     IndexStatus,
 }
 
@@ -134,6 +134,16 @@ enum MarketCmd {
     },
     /// L1 stand-in for close / undelegate (ER lands later).
     Close { market: String },
+    /// Dump the trading-implied PDF $p_k$ and face $E_k$ (they are not the same).
+    Pdf { market: String },
+    /// On-chain θ → same $p_S$ / $C_S$ / coverage / $\hat\rho$ as Market API.
+    Quote {
+        market: String,
+        #[arg(long, default_value = "01")]
+        mask: String,
+        #[arg(long, default_value_t = 1)]
+        shares: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -212,6 +222,46 @@ fn parse_mask(hex: &str) -> Result<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&h[i..i + 2], 16).context("mask hex"))
         .collect()
+}
+
+fn load_book(rpc: &RpcClient, market: &Pubkey) -> Result<(quote::Book, u16)> {
+    let mkt = client::decode_market(&rpc.get_account(market).context("market")?.data)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let grid = client::decode_grid(&rpc.get_account(&client::grid_pda(market)).context("grid")?.data)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let mut trading_revenue = mkt.trading_revenue;
+    let mut c_m = mkt.c_m;
+    let mut premium_payable = 0u64;
+    if let Ok(bacc) = rpc.get_account(&client::board(market)) {
+        if let Ok(b) = client::decode_board(&bacc.data) {
+            trading_revenue = b.trading_revenue;
+            if b.c_m_locked > 0 {
+                c_m = b.c_m_locked;
+            }
+            premium_payable = b.premium_payable;
+        }
+    }
+    let c_r = rpc
+        .get_account(&client::risk_book(market))
+        .ok()
+        .and_then(|a| client::decode_risk_book(&a.data).ok())
+        .map(|b| b.c_r)
+        .unwrap_or(0);
+    let slot = rpc.get_slot().unwrap_or(0);
+    Ok((
+        quote::Book::from_grid(
+            mkt.beta,
+            &grid.p0,
+            &grid.theta,
+            &grid.exposure,
+            trading_revenue,
+            premium_payable,
+            c_m,
+            c_r,
+            slot,
+        ),
+        mkt.n,
+    ))
 }
 
 fn default_keypair() -> PathBuf {
@@ -502,6 +552,47 @@ fn main() -> Result<()> {
             let sig = send(&opt.url, &kp, client::halt(me, market))?;
             println!("ok {sig} halted (undelegate is ER, later)");
         }
+        Cmd::Market(MarketCmd::Pdf { market }) => {
+            let market = Pubkey::from_str(&market)?;
+            let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let (book, _) = load_book(&rpc, &market)?;
+            let p = book.pdf();
+            println!(
+                "market={market} n={} beta_int={}  # p_bps is implied PDF; e is face E(x), not p",
+                book.n(),
+                usdc(book.state.beta)
+            );
+            for i in 0..p.len() {
+                println!(
+                    "cell={i} p_bps={} e={}",
+                    quote::q_bps(p[i]),
+                    usdc(book.state.exposure[i])
+                );
+            }
+        }
+        Cmd::Market(MarketCmd::Quote { market, mask, shares }) => {
+            let market = Pubkey::from_str(&market)?;
+            let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let (book, n) = load_book(&rpc, &market)?;
+            let bytes = parse_mask(&mask)?;
+            let in_set = quote::decode_mask(&bytes, n as usize).map_err(|e| anyhow::anyhow!(e))?;
+            let q = if shares > 0 { shares } else { 1 };
+            let v = book.view(&in_set, Q64::from_int(q));
+            println!(
+                "market={market} slot={} n={} p_s_raw={} p_s_bps={} c_s_raw={} c_s_usdc={} coverage_bps={} rho_hat_bps={} l_max_usdc={} c_max_usdc={} r_net={}",
+                v.slot,
+                v.n,
+                v.p_s.raw(),
+                quote::q_bps(v.p_s),
+                v.c_s.raw(),
+                usdc(v.c_s),
+                quote::q_bps(v.coverage),
+                quote::q_bps(v.rho_hat),
+                v.l_max_usdc,
+                v.c_max_usdc,
+                v.r_net
+            );
+        }
         Cmd::Trade(TradeCmd::BuySet { market, mask, shares }) => {
             let market = Pubkey::from_str(&market)?;
             let set_mask = parse_mask(&mask)?;
@@ -590,7 +681,7 @@ fn main() -> Result<()> {
         Cmd::IndexStatus => {
             let rpc = RpcClient::new(opt.url);
             let slot = rpc.get_slot().context("rpc")?;
-            println!("rpc_ok slot={slot} (projections are Phase 4)");
+            println!("rpc_ok slot={slot}");
         }
     }
     Ok(())

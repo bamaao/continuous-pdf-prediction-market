@@ -2,8 +2,8 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.0 |
-| Product counterpart | `product-specification.md` v1.0 |
+| Version | 1.1 |
+| Product counterpart | `product-specification.md` v1.3 |
 | Scope | Web / PWA / CLI, business services, network, chain, server resource allocation |
 
 This document only answers “which clients and machines make up the system, and how requests flow.” Frameworks and algorithms are in `technical-architecture.md`.
@@ -55,7 +55,7 @@ For traders, Risk LPs, and market browsing. In the browser:
 | Module | Responsibility |
 | --- | --- |
 | Market lobby | List football / CPI / elections / daily price / binary events by type |
-| Trading board | Interval pick, preset lines, coverage ratio, PDF / score heatmap |
+| Trading board | Interval pick, preset lines, coverage; **implied PDF** $p_k$ / score heatmap (not $E$); see product §8.1 |
 | Wallet | See below: connect → SIWS → deposit → open Session → in-play orders without extra prompts |
 | Risk auction | Layers, rates, collateral, current $L_{\max}$ |
 | Positions and payout | Holdings, estimated $\hat\rho$, settlement records |

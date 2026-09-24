@@ -42,6 +42,19 @@ pub fn usdc(q: Q64) -> u64 {
     }
 }
 
+/// Face USDC of one ticket at $x^*$.
+/// Ordinary set: `parts_total=1`, hit → $q$, miss → $0$.
+/// Quarter line: `parts_total=2`, both legs → $q$, one leg → $q/2$.
+pub fn ticket_face(q_usdc: u64, parts_hit: u32, parts_total: u32) -> u64 {
+    if q_usdc == 0 || parts_hit == 0 || parts_total == 0 {
+        return 0;
+    }
+    if parts_hit >= parts_total {
+        return q_usdc;
+    }
+    ((q_usdc as u128) * (parts_hit as u128) / (parts_total as u128)) as u64
+}
+
 /// $R_{\mathrm{net}}=$ trading revenue minus premium payable. Fees never enter.
 pub fn r_net(trading_revenue: u64, premium_payable: u64) -> u64 {
     trading_revenue.saturating_sub(premium_payable)
@@ -157,6 +170,15 @@ mod tests {
             Q64::from_ratio(1, 2),
         ));
         assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn ticket_face_quarter_is_half_or_full() {
+        assert_eq!(ticket_face(100, 0, 2), 0);
+        assert_eq!(ticket_face(100, 1, 2), 50);
+        assert_eq!(ticket_face(100, 2, 2), 100);
+        assert_eq!(ticket_face(60, 1, 1), 60);
+        assert_eq!(ticket_face(60, 0, 1), 0);
     }
 
     #[test]

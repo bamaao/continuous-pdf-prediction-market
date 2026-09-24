@@ -4,9 +4,9 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.2 |
+| Version | 1.3 |
 | Status | Product specification (features are written as fully delivered; no MVP / later-phase split) |
-| Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(x^*)$. If $L>C_{\max}$, one global pro-rata $\rho$ (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. Trading is the primary payout source; $C_M$ and $C_R$ are optional. Fees go to the platform and do not enter this board’s pool; they may be swept into the protocol adjustment fund $C_P$ for later shortfalls. Price is pure probability; coverage is displayed only. Markets are created by **distribution family** (Skellam, Gaussian, lognormal, Dirichlet, Bernoulli) — not by product category. Football scores are Skellam. $x^*$ only via `submit_result`. |
+| Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(c)$ at $c=\mathrm{cell}(x^*)$ (product §8.1). Do not mix implied PDF $p_k$, exposure $E$, and ticket face. If $L>C_{\max}$, one global pro-rata $\rho$ on **face** (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. Trading is the primary payout source; $C_M$ and $C_R$ are optional. Fees go to the platform and do not enter this board’s $C_{\max}$; they may be swept into $C_P$. Price is pure probability; coverage is displayed only. Markets are created by **distribution family**. Football is Skellam. $x^*$ only via `submit_result`. |
 
 ---
 
@@ -474,25 +474,32 @@ The same outcome gets more expensive the more it is bought. Suppose at open $p_S
 
 User actually pays $=C_S(q)+\phi\cdot C_S(q)$. $\phi$ is the protocol fee rate, locked at market creation.
 
+**Share unit (locked).** One share is a claim on **1 USDC of face** if the bought set contains $x^*$, else $0$. The USDC spent at fill is the LMSR cost, not the face.
+
+Example — CPI board, user buys the print interval $[0.3,0.4]$ (mapped to atom set $S$). Current $p_S=0.7$:
+
+- A **tiny** buy of $1$ share costs about $0.7$ USDC (marginal price $P_S(0)=p_S$). A **large** $q$ costs the closed form $C_S(q)$, so average USDC per share is $C_S(q)/q\ge p_S$ (impact). Plus fee $\phi C_S(q)$.
+- The ticket is credited **$q$ shares**, not “$0.7q$ shares”.
+- If the official CPI print maps into $S$: face $=q$ USDC, paid $\lfloor\rho\cdot q\rfloor$. If $C_{\max}$ covers $L$, $\rho=1$ and $q$ shares pay $q$ USDC (profit $\approx q-C_S(q)$ before fee).
+- If the print misses $S$: face $=0$; the $C_S(q)$ already paid stays in the pot (it is $R_{\mathrm{net}}$).
+
+Do not redeem “the $0.7$ you paid” and do not treat $p_S$ as the payout. $p_S$ is only the **price of a share**.
+
+**This is the same rule on every board and every line** — not a CPI special case. Home / draw / away, handicap, totals, BTTS, exact score, election winner / TOP_N / vote-share band, BTC interval, YES/NO, custom mask: each is some $S$, quoted at $p_S$, minted as $q$ shares, paid $\lfloor\rho\cdot\mathrm{face}\rfloor$ if $c\in S$ (quarter AH is the only split-face exception, section 8.1.5). Section 8.1.
+
 ### 4.5 Positions, Shares, and Liabilities
 
 A fill of size $q$ on interval (or set) $I$ **credits $q$ shares** on that ticket. $q$ is the claim unit, not the USDC paid at fill (that USDC is $C_I(q)+\phi\cdot C_I(q)$).
 
-A position is $(I_j,q_j)$: $q_j$ shares on $I_j$. Face-value payoff is $q_j$ if $x^*\in I_j$, else $0$. All positions stack into an exposure curve:
+A position is $(S_j,q_j)$: $q_j$ shares on a **frozen atom set** $S_j$ (section 8.1). Ordinary face is $q_j$ if $x^*\in S_j$, else $0$. Quarter lines split into two legs of $q_j/2$. All **legs** stack into an exposure curve:
 
 $$
-E(x)=\sum_j q_j 1_{I_j}(x)
+E(x)=\sum_{\ell} q_\ell\,1_{S_\ell}(x)
 $$
 
-If the final outcome is $X=x$, the face-value total payout the market faces is $L(x)=E(x)$.
+If the final outcome maps to atom $c$, the market owes $L=E(c)$ — not $\sum_x E(x)$ and not $\sum_j q_j$ over tickets that merely “look like winners”. $L_{\max}=\sup_x E(x)$ is a trading-period monitor only.
 
-Theoretical maximum payout (a trading-period monitor, not the settlement formula):
-
-$$
-L_{\max}=\sup_x E(x)
-$$
-
-On a football board, exposure lives on score cells: $E(i,j)$. $L_{\max}=\max_{i,j}E(i,j)$, and settlement uses $L=E(x^*,y^*)$. Listing steps are in 4.6.
+On a football board, exposure lives on score cells: $E(i,j)$. Settlement uses $L=E(x^*,y^*)$. The implied PDF $p_{ij}$ is a different object (section 8.1). Listing steps are in 4.6.
 
 ### 4.6 How a Skellam (Football Score) Board Is Created
 
@@ -1309,21 +1316,157 @@ The only remaining hard rule:
 
 ## 8. Settlement Payout and Haircut Ratio
 
-### 8.1 Pay by Shares on the Realized Outcome
+### 8.1 Core calculation rules (normative)
 
-Users do not redeem “the dollars they paid in”. They redeem **shares**.
+These identities are the settlement kernel. Programs, Quote, WASM, and the CLI SHALL use `crates/math` (`implied_probs`, `ticket_face`, `skellam_masks`, `outcome_cell`). A second implementation is forbidden.
 
-1. At fill, buying $q$ of set $I$ mints $q$ shares on that ticket.
-2. After $x^*$ is finalized, a ticket hits if and only if $x^*\in I$. A miss is $0$ and is not in the haircut.
-3. Hitting shares are paid in USDC at one global rate $\rho$ (section 8.3).
+#### 8.1.0 One share
 
-Face-value liability is the sum of hitting shares:
+| | At buy | At settlement if $c\in S$ | If $c\notin S$ |
+| --- | --- | --- | --- |
+| User pays | $C_S(q)+\phi C_S(q)$ USDC | — | — |
+| User receives | $q$ shares on frozen $S$ | $\lfloor\rho\cdot\mathrm{face}\rfloor$ USDC, ordinary $\mathrm{face}=q$ | $0$ |
+| Quote | $p_S=\sum_{k\in S}p_k$ (pure probability) | $p$ is frozen; not used to pay | — |
+
+Worked CPI ticket: $S=$ cells for print in $[0.3,0.4]$, $p_S=0.7$, user buys $q=10$ shares.
+
+- Cash out: $C_S(10)+\phi C_S(10)$. If $q/\beta$ is small, $C_S(10)\approx 7$ USDC, **not** “10 shares × 1 USDC now”.
+- Position: $10$ shares on $S$ (the $0.7$ does not scale the share count).
+- Official print $0.35$ → $c\in S$ → face $10$. If $\rho=1$, pay $10$ USDC. If $\rho=0.8$, pay $8$ USDC.
+- Official print $0.50$ → miss → pay $0$.
+
+$p_S$ is how much **one infinitesimal share costs**. Face is how much **one share pays if it hits**. Those are different numbers except in the degenerate case $p_S=1$.
+
+The same arithmetic applies to every family and every template (only the definition of $S$ and of $c$ changes):
+
+| Board / line | $S$ | Hit when | Tiny 1-share cost | $\rho=1$ payout for $q$ shares |
+| --- | --- | --- | --- | --- |
+| CPI / Gaussian interval $[a,b]$ | nodes in $[a,b]$ | print maps into $S$ | $\approx p_S$ | $q$ USDC |
+| Lognormal / BTC interval | log-grid nodes in the band | $x^*\in S$ | $\approx p_S$ | $q$ USDC |
+| Bernoulli YES or NO | that one atom | YES or NO | $\approx p_{\mathrm{YES}}$ or $p_{\mathrm{NO}}$ | $q$ USDC |
+| Dirichlet winner / TOP_N / share band | those atoms | reported atom $\in S$ | $\approx p_S$ | $q$ USDC |
+| Football 1X2 / totals / BTTS / exact / half AH | `skellam_masks` | score cell $\in S$ | $\approx p_S$ | $q$ USDC |
+| Football quarter AH | two half-line sets | 2 / 1 / 0 legs hit | $\approx C_{S_1}(\tfrac12)+C_{S_2}(\tfrac12)$ for $q=1$ | $q$ / $q/2$ / $0$ |
+| Custom mask | the bits | $c\in S$ | $\approx p_S$ | $q$ USDC |
+
+#### 8.1.1 Three objects (do not mix)
+
+| Object | Symbol | Stored as | Meaning | Used for |
+| --- | --- | --- | --- | --- |
+| Implied PDF | $p_k$ | derived from `p0`, $\theta$, $\beta$ | Trading-implied probability | Quotes, heat map, $p_S$ |
+| Face exposure | $E_k$ | `grid.exposure[k]` | Sum of ticket **faces** that include atom $k$ | $L$, $L_{\max}$, coverage |
+| Ticket face | $\mathrm{face}_j$ | computed at claim | How many share-units this ticket is owed at $c$ | $\lfloor\rho\cdot\mathrm{face}_j\rfloor$ |
+
+$p$ is a distribution: $\sum_k p_k=1$. $E$ is **not** a distribution. Buying $S$ raises both $\theta$ (hence $p_S$) and $E$ on $S$, but $p$ is renormalized and $E$ is not. Displaying $E$ as “the market PDF” is a product error.
+
+Committee `submit_result` writes $x^*$ only. It SHALL NOT rewrite $p0$, $\theta$, or $E$.
+
+#### 8.1.2 A buy is a frozen atom set
+
+The UI may show a continuous interval $[a,b]$ or a named line (home, over 2.5). At fill the client/program maps that intent to a set $S$ of grid atoms:
+
+- 1-D Gaussian / lognormal: bitmask of nodes (same nodes `outcome_cell` / `interval_index` will use)
+- Dirichlet atoms / Bernoulli: bitmask of those atoms
+- Football typed line: `skellam_masks(kind,a,b,k_{\max})` — one set, or two sets for a quarter line
+- Custom union: `buy_set` bitmask
+
+The position stores $(S,q)$ (or a typed key that expands to the same masks). Settlement SHALL NOT re-integrate $[a,b]$ and SHALL NOT invent a new $S$.
+
+#### 8.1.3 Fill update (every LMSR leg)
+
+For each set $S_\ell$ written by the fill, with size $q_\ell$ ($q_\ell=q$ for an ordinary ticket; $q_\ell=q/2$ for each quarter leg):
 
 $$
-L=E(x^*)=\sum_j q_j\,1_{I_j}(x^*)
+\theta_k\leftarrow\theta_k+q_\ell,\qquad E_k\leftarrow E_k+q_\ell \quad\text{for all }k\in S_\ell.
 $$
 
-If $C_{\max}\ge L$, each hitting share pays $1$ USDC ($\rho=1$). If $C_{\max}<L$, compute one ratio and pay that ratio on every hitting share — never FIFO, never “who claimed first”.
+Cost $C_{S}(q_\ell)$ uses the **current** $p_S$ (after earlier legs in the same quarter fill). Fee $\phi C$ is recorded separately and never enters $R_{\mathrm{net}}$ or $E$.
+
+Writing $q_\ell$ onto **every** atom in $S_\ell$ does not multiply liability by $|S_\ell|$. Only one atom realizes. The write makes $E(c)$ already contain this ticket’s face no matter which atom in $S_\ell$ is $c$.
+
+#### 8.1.4 Map $x^*$ to one atom
+
+$$
+c=\mathrm{cell}(x^*)
+$$
+
+| Family | $x^*$ reported as | $c$ |
+| --- | --- | --- |
+| Skellam | score $(i^*,j^*)$ | $(i^*\wedge k_{\max},\; j^*\wedge k_{\max})$ on the $11\times 11$ table |
+| Gaussian | scalar | nearest listing node in $[x_{\min},x_{\max}]$ |
+| Lognormal | positive scalar | nearest node on the log grid |
+| Dirichlet (atom / TOP_N) | winner or combination id | that atom index |
+| Bernoulli | YES $=1$ / NO $=0$ | that atom |
+
+Overflow scores share the $k_{\max}$ bucket (locked). Vote-share simplex vectors (`kind=3`) are not a single cell; they SHALL use a defined layout mapper or VOID — they SHALL NOT be forced through `outcome_cell` as if they were an atom id.
+
+#### 8.1.5 Ticket face at $c$
+
+$$
+\mathrm{face}=\mathrm{ticket\_face}(q,\; n_{\mathrm{hit}},\; n_{\mathrm{parts}})
+=q\cdot n_{\mathrm{hit}}/n_{\mathrm{parts}}
+$$
+
+(integer USDC; $q$ is the ticket’s share count).
+
+| Ticket | $n_{\mathrm{parts}}$ | $n_{\mathrm{hit}}$ | face |
+| --- | --- | --- | --- |
+| Ordinary set / 1X2 / totals / half AH / exact / custom mask | $1$ | $1$ if $c\in S$, else $0$ | $q$ or $0$ |
+| Quarter AH (two adjacent half-lines) | $2$ | how many of the two sets contain $c$ | $q$, $q/2$, or $0$ |
+
+Integer AH push ($2(i-j)+\mathrm{halves}=0$) is **not** in $S$: face $0$. The LMSR cost already sits in the pot; there is no stake refund.
+
+`payout` / `payout_skellam` SHALL pay $\lfloor\rho\cdot\mathrm{face}\rfloor$, not $\lfloor\rho\cdot q\rfloor$ on an OR of quarter masks. Fill and settle SHALL expand typed lines with the same `skellam_masks`.
+
+#### 8.1.6 Winning-share total $L$
+
+$$
+L=E(c)=\sum_{\ell} q_\ell\,1_{S_\ell}(c)=\texttt{usdc}(\texttt{grid.exposure}[c])
+$$
+
+This **is** the sum of winning faces. Implementation reads the pre-aggregated cell; it SHALL NOT scan all position accounts to form $L$, and it SHALL NOT compute $\sum_k E_k$.
+
+Overlapping tickets that contain $c$ all count (home $q=2$, over 2.5 $q=1$, exact 2-1 $q=1$, home $-0.75$ $q=2$ with only the $-0.5$ leg hitting 2-1 $\Rightarrow L=2+1+1+1=5$).
+
+Identity that tests SHALL keep: after any mix of fills, $\sum_j \mathrm{face}_j(c)=E(c)$.
+
+$$
+L_{\max}=\sup_k E_k
+$$
+
+is display / auction only. $\rho$ uses $L$, not $L_{\max}$.
+
+#### 8.1.7 Implied PDF (trading distribution)
+
+$$
+Z=\sum_k p0_k\,e^{\theta_k/\beta},\qquad
+p_k=\frac{p0_k\,e^{\theta_k/\beta}}{Z},\qquad
+p_S=\sum_{k\in S}p_k.
+$$
+
+This is the distribution “from trading data”. It is **not** a histogram of fill counts and **not** $E$. Inspect on-chain with `p0`+$\theta$+$\beta$ via `implied_probs` (CLI: `cpm market pdf`). Football shows the $11\times 11$ table, then sums $p$ on each template $S$ for line prices. After close, $\theta$ is frozen; $p$ no longer moves.
+
+#### 8.1.8 $\rho$ and redeem
+
+$$
+C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}},\qquad
+\rho=\min\bigl(1,C_{\max}/L\bigr)
+$$
+
+($\rho=1$ if $L=0$). Each ticket receives $\lfloor\rho\cdot\mathrm{face}\rfloor$ USDC. Misses are $0$ and are not in the haircut. One global $\rho$; never FIFO. Dust stays in reserves.
+
+If $C_{\max}\ge L$, each unit of face pays $1$ USDC.
+
+#### 8.1.9 Forbidden
+
+| SHALL NOT | Why |
+| --- | --- |
+| Re-integrate the UI interval at settle | $S$ was frozen at fill |
+| Treat $E$ as the PDF | $E$ is not normalized; $\rho$ would be wrong if used as $p$ |
+| Sum $E$ across atoms to get $L$ | A set ticket would be counted $\|S\|$ times |
+| Sum `position.q` of “OR-hits” to get $L$ | Quarter tickets would be counted as full $q$ after a half-win |
+| Pay $\rho\cdot q$ on a quarter OR-mask | Diverges from $E(c)$ |
+| Bake $\rho$ or coverage into $p_S$ / $C_S$ | Price is pure probability |
 
 ### 8.2 Maximum Payable $C_{\max}$
 
@@ -1352,7 +1495,7 @@ $$
 \rho=\min\left(1,\;\frac{C_{\max}}{L}\right)
 $$
 
-USDC paid to a hitting ticket is $\rho\cdot q_j$ (share count times the ratio). All winners use the same $\rho$. Dust is $\lfloor\rho q_j\rfloor$; remainder stays in reserves.
+USDC paid to a ticket is $\rho\cdot\mathrm{face}_j$ (section 8.1.5), not automatically $\rho\cdot q_j$. All winners use the same $\rho$. Dust is $\lfloor\rho\cdot\mathrm{face}_j\rfloor$; remainder stays in reserves.
 
 ### 8.4 First-Come-First-Served Is Forbidden
 
