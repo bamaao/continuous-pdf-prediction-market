@@ -1,0 +1,20 @@
+[package]
+name = "vault"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L1 USDC vault: deposit, withdraw unused margin. Never Delegates. No admin_withdraw."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vault"
+
+[features]
+default = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+no-entrypoint = []
+cpi = ["no-entrypoint"]
+
+[dependencies]
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+anchor-spl = "0.32.1"
