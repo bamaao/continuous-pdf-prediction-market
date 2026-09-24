@@ -4,7 +4,7 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.0 |
+| Version | 1.1 |
 | Corresponding product | `product-specification.md` v1.0 |
 | Corresponding system | `system-architecture.md` |
 
@@ -154,7 +154,7 @@ The Trading Gateway **forwards but does not sign**: it assembles the ER transact
 The protocol **recognizes only one mint**: Circle’s official mainnet SPL USDC. Not a “stablecoin basket,” not SOL, no in-protocol FX.
 
 - The user must have an ATA for that mint; if missing, `createAssociatedTokenAccount` before deposit
-- `vault.deposit` / Risk lock-collateral: Anchor constraint `mint == USDC_MINT`; other coins are rejected
+- `USDC_MINT` is Circle’s official SPL mint on that cluster (mainnet `EPjFWdd5…`). `initialize` does not accept a deployer-chosen mint. `vault.deposit` / Risk lock-collateral: `mint == USDC_MINT`; other coins are rejected
 - Protocol Vault: one USDC Token Account per funds domain (user-margin pool, fees, each book’s Risk Vault)
 - Deposit confirmation: wait for L1 finalized before increasing the ER available-balance mirror; unconfirmed funds grant no trading quota
 - The client may link to an external DEX; that is a jump, **not** a Vault CPI
@@ -230,13 +230,17 @@ Four programs, one workspace, each with its own program id, calling one another 
 
 ```text
 programs/
-  market/          create_*, delegate, buy_set, sell_set, commit
+  market/          create_{skellam,gaussian,lognormal,dirichlet,bernoulli},
+                   buy_set, sell_set, buy_skellam_set, sell_skellam_set,
+                   delegate, commit
   risk/            layers, bid, fill, lock
   vault/           deposit, withdraw, fee, payout, draw_lp, settle
   resolution/      submit_result, challenge, vote, finalize
 ```
 
-- `buy_set` / `sell_set` only on **ER** (`is_delegated=true`); `#[session_auth_or]`: a valid Session or the main wallet itself
+Create is **by family**. Listing recipes (CPI, election, BTC) are `topic` / `tag` metadata. Do not add product-named create ixs.
+
+- `buy_set` / `sell_set` / `buy_skellam_set` / `sell_skellam_set` only on **ER** (`is_delegated=true`); `#[session_auth_or]`: a valid Session or the main wallet itself. L1 is the pre-Delegate test path.
 - `vault` / `resolution` **never Delegate**, and **never accept Session** as authority
 - `risk.bid` lock-collateral: main wallet; Session is rejected
 - Close trading: Keeper main wallet `commit` + `undelegate`, writing $\theta$, $E$, $L_{\max}$, `trades_root` back to L1
@@ -250,14 +254,15 @@ Every handler hard-codes Anchor constraints: signer, PDA seeds, mint, vault toke
 
 ### 6.1 Distribution containers (forked by underlying)
 
-| Family | State | What is bought |
-| --- | --- | --- |
-| Gaussian / log-normal | 1-D `theta[N]`, $N\le 1024$ | Interval $[a,b]$ |
-| Poisson / Skellam football | 2-D `theta[K+1][K+1]` | Cell set $S$ |
-| Dirichlet categorical | `theta[K]` or $\binom{K}{n}$ | Atoms or unions |
-| Bernoulli | `theta_yes`, `theta_no` | YES / NO |
+| Family | Create ix | State | What is bought |
+| --- | --- | --- | --- |
+| Gaussian | `create_gaussian_market` | 1-D `theta[N]`, $N\le 1024$ | Interval $[a,b]$ |
+| Lognormal | `create_lognormal_market` | 1-D log grid | Interval $[a,b]$ |
+| Skellam / 2D score | `create_skellam_market` | 2-D `theta[K+1][K+1]` | Cell set $S$ (1X2, AH, totals, score) |
+| Dirichlet | `create_dirichlet_market` | atoms / $C(K,n)$ / simplex (`layout`) | Atoms or unions |
+| Bernoulli | `create_bernoulli_market` | `theta_yes`, `theta_no` | YES / NO |
 
-The family is locked at creation; trading does not switch containers.
+The family is locked at creation; trading does not switch containers. Football lines share one $\theta$; they are not extra families.
 
 ### 6.2 Prior $P_0$ / $f_0$
 
@@ -288,16 +293,26 @@ $$
 P_S(q)=\frac{p_S e^{q/\beta}}{1-p_S+p_S e^{q/\beta}}
 $$
 
-Steps (ER `buy_set`):
+Steps (ER `buy_set` / `buy_skellam_set`):
 
-1. Validate $S$, balance ≥ $C+\phi C$
-2. Compute $p_S$, $C_S(q)$
-3. For $k\in S$: $\theta_k\leftarrow\theta_k+q$, $E_k\leftarrow E_k+q$
-4. Update $L_{\max}=\max E_k$ (or football $\max_{ij}E_{ij}$)
-5. Debit $C$; fee $\phi C$ recorded as payable to the platform (settlement-time or real-time transfer to the L1 fee account; pick one implementation but keep a single accounting convention)
-6. Emit event: new $p$, new $L_{\max}$
+1. Resolve $S$: typed Skellam template → mask via `crates/math::football`; or caller bitmask
+2. Validate $S$, balance ≥ $C+\phi C$
+3. Compute $p_S$, $C_S(q)$ in `crates/math` (one LMSR)
+4. For $k\in S$: $\theta_k\leftarrow\theta_k+q$, $E_k\leftarrow E_k+q$
+5. Update $L_{\max}=\max E_k$ (football: $\max_{ij}E_{ij}$)
+6. Debit $C$; fee $\phi C$ recorded as payable to the platform (settlement-time or real-time transfer to the L1 fee account; pick one implementation but keep a single accounting convention)
+7. Emit event: new $p$, new $L_{\max}$
 
 Repeated buys of the same $S$ raise $p_S$ and raise $C$. That is the algorithm, not a manual markup.
+
+Football-specific (SHALL):
+
+- `buy_skellam_set` is the only typed path; it MUST call the same `lmsr_update` as `buy_set`
+- Buying home MUST raise exact-score prices that sit in $\{i>j\}$
+- A later totals or handicap fill MUST add $q$ on the intersection cells
+- Quarter line: two sequential half-fills of $q/2$ on the same book; fee is the sum
+- After mixed fills, $p_{\mathrm{1}}+p_{\mathrm{X}}+p_{\mathrm{2}}=1$
+- Masks and LMSR live in `crates/math`. Quote / WASM / programs call that crate only
 
 Engineering:
 

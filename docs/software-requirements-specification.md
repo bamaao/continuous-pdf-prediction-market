@@ -5,7 +5,7 @@
 | Item | Content |
 | --- | --- |
 | Document | SRS |
-| Version | 1.0 |
+| Version | 1.1 |
 | Status | Baseline for implementation |
 | Audience | Engineers, QA, reviewers |
 | Normative sources | `product-specification.md` (product rules), `system-architecture.md`, `technical-architecture.md` |
@@ -27,7 +27,7 @@ Specify verifiable requirements for a continuous-PDF prediction market: traders 
 
 ### 1.2 In scope
 
-- Five listing types: football (one board per `score_scope`), CPI / macro, election (winner, `TOP_N`, vote share), daily price, binary YES/NO
+- Five distribution families: Skellam (football scores), Gaussian, lognormal, Dirichlet, Bernoulli. Listing names are metadata, not create instructions.
 - LMSR trading on MagicBlock ER; funds and settlement on Solana L1
 - Risk-capital auction in parallel with trading
 - Soft solvency and pro-rata settlement
@@ -98,13 +98,14 @@ Identity is a Solana pubkey. There is no password account.
 | FR-MKT-02 | The system SHALL NOT change the distribution family after creation. | Trade / admin ix cannot rewrite family |
 | FR-MKT-03 | At creation $\theta=0$. Displayed prices SHALL equal the prior $f_0$ / $P_0$. | Quote vs stored `p0_mass` |
 | FR-MKT-04 | $f_0$ / $P_0$ SHALL be written once and SHALL NOT be rewritten by oracles or operators. | No ix mutates `p0_mass` after create |
-| FR-MKT-05 | Football: one match `score_scope` SHALL be one board sharing a 2D score PDF. Derived books (1X2, totals, spreads, exact score) SHALL be set projections, not separate $\theta$ stores. | Shared `theta[i][j]`; set masks |
+| FR-MKT-05 | Football: one match `score_scope` SHALL be one Skellam board sharing a 2D score PDF. Derived books (1X2, totals, spreads, exact score) SHALL be set projections, not separate $\theta$ stores. | Shared `theta[i][j]`; `buy_skellam_set` |
 | FR-MKT-06 | Football SHALL trade pre-match and in-play until `close_ts` (default: that scope’s full-time whistle). Kickoff SHALL NOT close the book. | Clock vs `close_ts` only |
-| FR-MKT-07 | CPI / macro SHALL use `create_macro_market`, Gaussian family, first official print as $x^*$. | Create + resolve path |
-| FR-MKT-08 | Election SHALL implement winner, `TOP_N`, and vote-share boards. | Three create paths + resolve |
-| FR-MKT-09 | Daily price SHALL use `create_price_market`, lognormal family, committee report per `price_rule`. | Create + `price_rule` + resolve |
-| FR-MKT-10 | Binary events SHALL be YES/NO; YES MAY finalize early only when the defined event has occurred, not because it “looks likely”. | Early-YES guard |
+| FR-MKT-07 | CPI / macro listings SHALL call `create_gaussian_market`. $x^*$ is the first official print. | Create + resolve path |
+| FR-MKT-08 | Election winner, `TOP_N`, and vote-share SHALL all use `create_dirichlet_market` with `layout` atoms / top-$n$ / simplex. There SHALL NOT be a separate vote-share family. | Three layouts + resolve |
+| FR-MKT-09 | Daily price listings SHALL call `create_lognormal_market` and lock `price_rule`. | Create + `price_rule` + resolve |
+| FR-MKT-10 | Binary events SHALL use `create_bernoulli_market` (YES/NO). YES MAY finalize early only when the defined event has occurred, not because it “looks likely”. | Early-YES guard |
 | FR-MKT-11 | Listing SHALL open that board’s risk-auction book immediately. | Auction book exists after create |
+| FR-MKT-12 | On-chain create SHALL be the five family instructions only: `create_skellam_market`, `create_gaussian_market`, `create_lognormal_market`, `create_dirichlet_market`, `create_bernoulli_market`. Listing names are metadata. | IDL whitelist |
 
 ### 4.2 Wallet, deposit, session
 
@@ -114,8 +115,8 @@ Identity is a Solana pubkey. There is no password account.
 | FR-WAL-02 | After connect, the client SHALL run SIWS; the BFF MAY issue a JWT for query / push only. JWT SHALL NOT authorize on-chain spends. | JWT cannot `buy_set` |
 | FR-WAL-03 | The user SHALL `vault.deposit` USDC on L1 with the **main wallet** before trading. Unconfirmed deposits SHALL NOT increase ER spendable balance. | Balance after finalized deposit only |
 | FR-WAL-04 | Opening, renewing, or revoking a Session SHALL require the main wallet. | Session ix signer |
-| FR-WAL-05 | A Session SHALL encode expiry, remaining USDC, allowed instructions (`buy_set` / `sell_set` only), and an optional market whitelist. | On-chain session account |
-| FR-WAL-06 | In-board `buy_set` / `sell_set` SHALL be signed by the Session. Withdraw, create, inject $C_M$, risk `bid`, and resolution SHALL require the main wallet (or KMS for keepers / reporters). | Negative tests |
+| FR-WAL-05 | A Session SHALL encode expiry, remaining USDC, allowed instructions (`buy_set` / `sell_set` / `buy_skellam_set` / `sell_skellam_set` only), and an optional market whitelist. | On-chain session account |
+| FR-WAL-06 | In-board set buys and sells SHALL be signed by the Session. Withdraw, create, inject $C_M$, risk `bid`, and resolution SHALL require the main wallet (or KMS for keepers / reporters). | Negative tests |
 | FR-WAL-07 | The UI SHALL expose revoke-session separately from disconnect-wallet. Disconnecting SHALL NOT be treated as on-chain revoke. | UX + chain state |
 | FR-WAL-08 | The system SHALL NOT store mnemonic phrases. Session secrets SHALL NOT be stored in plaintext `localStorage`. | Review + scanner |
 | FR-WAL-09 | Trading Gateway SHALL forward signed ER txs and SHALL NOT hold Session private keys. | Code review |
@@ -124,7 +125,7 @@ Identity is a Solana pubkey. There is no password account.
 
 | ID | Requirement | Verify |
 | --- | --- | --- |
-| FR-TRD-01 | `buy_set` / `sell_set` SHALL execute only on ER while the market is delegated and `now < close_ts`. | Status + clock |
+| FR-TRD-01 | `buy_set` / `sell_set` / `buy_skellam_set` / `sell_skellam_set` SHALL execute only on ER while the market is delegated and `now < close_ts`. L1 is allowed only before Delegate (tests). | Status + clock |
 | FR-TRD-02 | Fill price SHALL be the LMSR pure probability $p_S$ / $C_S(q)$. Coverage / $\hat\rho$ SHALL be displayed and SHALL NOT be baked into the quote. | Quote vs chain cost |
 | FR-TRD-03 | Buying the same $S$ again SHALL raise $p_S$ and $C_S$ (LMSR). | Monotonicity test |
 | FR-TRD-04 | Each fill SHALL charge fee $\phi\cdot C_S(q)$ to the platform. Fees SHALL NOT enter the payout pool or $R_{\mathrm{net}}$ as user capital. | Vault ledgers |
@@ -134,6 +135,7 @@ Identity is a Solana pubkey. There is no password account.
 | FR-TRD-08 | Low coverage SHALL trigger a strong UI warning and SHALL still allow the order. | UI + chain accept |
 | FR-TRD-09 | A fill is complete only when FR-DUR-01 holds. Until then the client SHALL show `pending` and retry the same `nonce`. | Idempotency |
 | FR-TRD-10 | Quote Engine preview SHALL be read-only and SHALL NOT be the ledger. | Preview ≠ settle |
+| FR-TRD-11 | Skellam fills SHALL use one shared $\theta_{ij}$. Typed lines SHALL go through `buy_skellam_set` (expand $S$, then `crates/math::lmsr_update`). Custom unions MAY use `buy_set`. $L_{\max}$ SHALL be $\max_{ij}E_{ij}$. Quarter lines SHALL be two half-fills of $q/2$ on the same book. Programs SHALL NOT implement a second LMSR. | Home buy raises exact 2-1; over + AH stack on intersection; $p_{1}+p_{X}+p_{2}=1$ |
 
 ### 4.4 Risk auction
 

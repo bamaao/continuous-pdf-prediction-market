@@ -4,9 +4,9 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.0 |
+| Version | 1.1 |
 | Status | Product specification (features are written as fully delivered; no MVP / later-phase split) |
-| Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(x^*)$. If $L>C_{\max}$, one global pro-rata $\rho$ (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$. Fees never enter the payout pool. Price is pure probability; coverage is displayed only. Five market types and the risk auction are specified in full. $x^*$ only via `submit_result`. |
+| Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(x^*)$. If $L>C_{\max}$, one global pro-rata $\rho$ (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$. Fees never enter the payout pool. Price is pure probability; coverage is displayed only. Markets are created by **distribution family** (Skellam, Gaussian, lognormal, Dirichlet, Bernoulli) — not by product category. Football scores are Skellam. $x^*$ only via `submit_result`. |
 
 ---
 
@@ -81,13 +81,13 @@ A board’s lifecycle follows the path below. During the trading period the risk
 
 **① Choose the probability-distribution type.** Identify the underlying first, then lock the family. It cannot be swapped later.
 
-| Event | Distribution family |
-| --- | --- |
-| Football score | Two-dimensional Poisson / Skellam |
-| CPI, inflation, etc. | One-dimensional Gaussian |
-| Who wins / top $n$ in an election | Dirichlet → categorical |
-| Same-day BTC price | Lognormal |
-| Whether it occurs by a deadline | Binary Dirichlet / Bernoulli |
+| Distribution family | Create instruction | Example underlyings (metadata only) |
+| --- | --- | --- |
+| Skellam (2D score grid) | `create_skellam_market` | Football / other scores; 1X2 and totals are projections |
+| Gaussian | `create_gaussian_market` | CPI, inflation, other 1-D prints |
+| Lognormal | `create_lognormal_market` | Same-day BTC / ETH price |
+| Dirichlet | `create_dirichlet_market` | Election winner, `TOP_N`, vote share (`layout`) |
+| Bernoulli | `create_bernoulli_market` | Deadline YES / NO |
 
 **② Initialize and create the market.** Write prior parameters (e.g. $\lambda_H,\lambda_A$ or $\mu,\sigma$ or $\alpha_i$), the grid or atoms, $\beta$, $C_M$, the resolution source, and `close_ts`. At this point $\theta=0$, so board prices equal $f_0$ / $P_0$. Creating the market also opens that board’s risk auction book.
 
@@ -482,7 +482,7 @@ $$
 
 On a football board, exposure lives on score cells: $E(i,j)$. $L_{\max}=\max_{i,j}E(i,j)$, and settlement uses $L=E(x^*,y^*)$. Listing steps are in 4.6.
 
-### 4.6 How a Football Market Is Created
+### 4.6 How a Skellam (Football Score) Board Is Created
 
 A match calls the create instruction once and produces **one board**. 1X2, handicap, totals, and correct score are preset contracts on that board; they do not each call `create_market`.
 
@@ -494,7 +494,7 @@ Trading covers pre-match and in-play: fills are allowed from listing until `clos
 
 #### 4.6.2 Creation Parameters
 
-`create_football_market` writes the following fields in one shot.
+`create_skellam_market` writes the following fields in one shot. The listing name “football” is not an instruction.
 
 **Match identity**
 
@@ -567,10 +567,40 @@ Creation opens a set of templates. Each template is only a name for a set $S$; i
 
 Handicap settlement:
 
-- **Integer / half** ($h\in\mathbb{Z}$ or $h=\cdot.5$): a single set. Home handicap $h$ wins if and only if $i-j>h$ ($-1.5$ means $i-j\ge 2$).
-- **Quarter** (e.g. $-0.75$): one notional position $q$ splits into two adjacent half-line positions of $q/2$ each. E.g. home $-0.75$ = $q/2$ of $-0.5$ + $q/2$ of $-1.0$. Both win → credit $q$; one wins → credit $q/2$; both lose → $0$. On-chain this is still two `buy_set` calls; the frontend synthesizes one handicap ticket; the fee is the sum of the two $C_S$.
+- **Integer / half** (line in half-goals, e.g. $-3=-1.5$): a single set. Home handicap wins iff $2(i-j)+\mathrm{halves}>0$. Integer push ($=0$) is not in $S$. Home $-1.5$ is $i-j\ge 2$, a subset of home.
+- **Quarter** (e.g. $-0.75$): one notional position $q$ splits into two adjacent half-line fills of $q/2$ each. E.g. home $-0.75$ = $q/2$ of $-1.0$ then $q/2$ of $-0.5$ on the **same** $\theta$. Both win → credit $q$; one wins → credit $q/2$; both lose → $0$. The fee is $C_{S_1}(q/2)+C_{S_2}(q/2)$ after the first half has already moved the book. On-chain this is `buy_skellam_set(HomeHandicapQuarter)` (one ticket, two LMSR updates), not a second market.
 
-The frontend renders these templates as multiple lines; on-chain there is only `buy_set(S, q)`. Buying “home” is $S=\{(i,j):i>j\}$.
+The frontend renders these templates as multiple lines. They are not separate pots and do not have separate $\theta$.
+
+#### 4.6.3.1 Shared-board LMSR (normative)
+
+There is one $11\times 11$ state: $p0_{ij}$, $\theta_{ij}$, $E_{ij}$. Every football fill — 1X2, handicap, totals, BTTS, exact score, or a custom union — is the same LMSR on a cell set $S$:
+
+$$
+Z=\sum_{i,j}p0_{ij}\,e^{\theta_{ij}/\beta},\qquad
+p_S=\frac{\sum_{(i,j)\in S}p0_{ij}\,e^{\theta_{ij}/\beta}}{Z}
+$$
+
+$$
+C_S(q)=\beta\ln\bigl((1-p_S)+p_S e^{q/\beta}\bigr)
+$$
+
+Then only cells in $S$ update: $\theta_{ij}\leftarrow\theta_{ij}+q$, $E_{ij}\leftarrow E_{ij}+q$. $L_{\max}=\max_{ij}E_{ij}$ (cell max, not “per product line”).
+
+Consequences that implementation SHALL preserve:
+
+- Buying home ($S=\{i>j\}$) raises $p_{\mathrm{home}}$ and also raises exact 2-1, because $(2,1)\in S$.
+- Buying over 2.5 and then home $-1.5$ **stacks** $q$ on the intersection (e.g. 3-0 gets both fills); disjoint cells get only one.
+- After any mix of lines, $p_{\mathrm{home}}+p_{\mathrm{draw}}+p_{\mathrm{away}}=1$ still holds (one partition of the same table).
+- Numerics live in `crates/math` (`football` masks + `lmsr_update`). Programs SHALL NOT reimplement a second LMSR.
+
+On-chain:
+
+| Intent | Instruction |
+| --- | --- |
+| Typed line (1X2, totals, AH, BTTS, exact, quarter) | `buy_skellam_set` / `sell_skellam_set` — expand the template to $S$, then `lmsr_update` |
+| Custom cell union | `buy_set` / `sell_set` with a 121-bit mask, same LMSR |
+| Non-Skellam family | `buy_set` / `sell_set` only |
 
 #### 4.6.4 Listing Steps
 
@@ -670,14 +700,15 @@ Therefore market creation must first pick the correct `prior_family` and state c
 
 After initialization, trading still only changes $\theta$. **It will not turn a Gaussian board into a Dirichlet board.** The family is locked at creation.
 
-| Type | Instruction | Finalization |
-| --- | --- | --- |
-| Football | `create_football_market` | Score pair $(x^*,y^*)$ |
-| CPI / macro | `create_macro_market` | Official published value |
-| Election winner / top $n$ | `create_election_market` | Winner or top-$n$ combination |
-| Election vote share | `create_vote_share_market` | Certified vote-share vector |
-| BTC and other daily prices | `create_price_market` | Price reported by the committee |
-| Binary event | `create_binary_event_market` | YES / NO |
+**On-chain create is by distribution family, not by listing name.** CPI, an election, a BTC board, and a deadline event are metadata (`topic` / `tag`) on the matching family instruction. Implementers SHALL NOT add `create_macro_market` / `create_election_market` / `create_price_market` as extra program entrypoints.
+
+| Family | Instruction | Listing examples (metadata only) | Finalization |
+| --- | --- | --- | --- |
+| Skellam / 2D score | `create_skellam_market` | One football `score_scope` | Score pair $(x^*,y^*)$ |
+| Gaussian | `create_gaussian_market` | CPI / macro print | Official first print |
+| Lognormal | `create_lognormal_market` | Same-day BTC / ETH price | Committee price by `price_rule` |
+| Dirichlet | `create_dirichlet_market` | Election winner, `TOP_N`, vote share (`layout`) | Winner / top-$n$ set / share vector |
+| Bernoulli | `create_bernoulli_market` | Deadline YES/NO | YES or NO |
 
 ### 4.8 How a CPI / Macro Numeric Market Is Created
 
@@ -685,7 +716,7 @@ The distribution is a **one-dimensional Gaussian** (truncated on $\Omega$), not 
 
 #### 4.8.1 Creation Parameters
 
-`create_macro_market` writes:
+A CPI / macro listing calls `create_gaussian_market` and writes:
 
 | Field | Description | Rule |
 | --- | --- | --- |
@@ -756,7 +787,7 @@ The distribution is **Categorical under a Dirichlet prior**. State lives on a $K
 
 #### 4.9.1 Creation Parameters
 
-`create_election_market` writes:
+An election winner / `TOP_N` listing calls `create_dirichlet_market` (`layout` = atoms or top-$n$ combinations) and writes:
 
 | Field | Description | Rule |
 | --- | --- | --- |
@@ -788,7 +819,7 @@ $$
 
 Do not make “A wins” and “B wins” two unrelated YES/NO boards, or $P(A)+P(B)$ can exceed 1. One winner board shares one simplex.
 
-**Vote share** uses `create_vote_share_market`: candidate shares $(s_1,\ldots,s_K)$, $\sum s_i=1$, Dirichlet prior, outcome space a grid on the simplex (one share coordinate per candidate, truncated and normalized). Buying “A’s share $\in[a,b]$” is that band. Winner-board and vote-share-board funds are independent; both resolve from the same certified tally. The winner is derived from shares via `contest_rule`; the vote-share board pays the shares themselves. Both boards must be fully implemented; they are not half-finished versions of one board.
+**Vote share** is the same family: `create_dirichlet_market` with `layout` = simplex. Candidate shares $(s_1,\ldots,s_K)$, $\sum s_i=1$, outcome space a grid on the simplex. Buying “A’s share $\in[a,b]$” is that band. Winner-board and vote-share-board funds are independent; both resolve from the same certified tally. The winner is derived from shares via `contest_rule`; the vote-share board pays the shares themselves. Both boards must be fully implemented; they are not half-finished versions of one board. They are **not** a fourth on-chain family.
 
 #### 4.9.3 Listing Steps
 
@@ -822,7 +853,7 @@ The distribution is **one-dimensional lognormal** ($\log X\sim\mathcal{N}(\mu,\s
 
 #### 4.10.1 Creation Parameters
 
-`create_price_market` writes:
+A same-day price listing calls `create_lognormal_market` and writes:
 
 | Field | Description | Rule |
 | --- | --- | --- |
@@ -894,7 +925,7 @@ The distribution is **Bernoulli / binary Dirichlet**: only $p$ and $1-p$. It is 
 
 #### 4.11.1 Creation Parameters
 
-`create_binary_event_market` writes:
+A deadline event listing calls `create_bernoulli_market` and writes:
 
 | Field | Description | Rule |
 | --- | --- | --- |
@@ -1846,12 +1877,12 @@ Implementation must follow the conventions below. There is no remaining fork of 
 | Resolution source | Always `submit_result` on-chain; committee finalizes; Pyth / sports APIs are evidence only |
 | Committee | Each board names a roster or cites the public committee; optimistic report + challenge + $M/N$ |
 | PDF representation | Grid or discrete atoms; no parameterized AMM |
-| Football | One `score_scope` per match, one board; pre-match + in-play; integer / half / quarter lines; report a score pair |
-| CPI | `create_macro_market`; Gaussian; first official print |
-| Election | Winner board, `TOP_N` board, and vote-share board must all be completed |
-| Daily price | `create_price_market`; lognormal; committee reports by `price_rule`; Pyth is live evidence only |
-| Binary event | YES/NO; YES may finalize early before the deadline |
-| Distribution family | Locked by underlying at creation; trading does not switch families |
+| Football | One `score_scope` per match, one Skellam board; 1X2 / AH / totals / score are set projections on shared $\theta$; `buy_skellam_set`; report a score pair |
+| CPI | Listing recipe on `create_gaussian_market`; first official print |
+| Election | Winner, `TOP_N`, and vote-share boards: `create_dirichlet_market` + `layout`; all three must be completed |
+| Daily price | Listing recipe on `create_lognormal_market`; committee reports by `price_rule`; Pyth is live evidence only |
+| Binary event | `create_bernoulli_market`; YES/NO; YES may finalize early before the deadline |
+| Distribution family | On-chain create is by family (`skellam` / `gaussian` / `lognormal` / `dirichlet` / `bernoulli`); listing names are metadata; trading does not switch families |
 | Risk auction | Book opens at listing; published layers, lowest unit premium first; `risk_lock_ts` required and not earlier than `close_ts` |
 | Finalization failure | Refund user funds, return LP collateral, return unused premium |
 | Chain | Solana + MagicBlock ER |

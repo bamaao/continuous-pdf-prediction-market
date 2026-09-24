@@ -70,7 +70,7 @@ Implement, with tests first:
 Order inside this phase (each has tests):
 
 1. **`vault`** — `deposit` / `withdraw` unused; mint constraint USDC; no Session; no `admin_withdraw` (FR-WAL-03, FR-SET-06, CR-05, CR-08)
-2. **`market`** — `create_*` for all five families; store `p0_mass`, $\beta$, timestamps; grid buffer; `buy_set` / `sell_set` calling `crates/math` (may run on L1 in tests before Delegate)
+2. **`market`** — `create_{skellam,gaussian,lognormal,dirichlet,bernoulli}` only (listing names are metadata); store `p0_mass`, $\beta$, timestamps; grid buffer; `buy_set` / `buy_skellam_set` calling `crates/math` (L1 before Delegate). Football: one 2D $\theta$, typed lines expand to $S$ (FR-MKT-05, FR-TRD-11, FR-MKT-12)
 3. **`resolution`** — `submit_result`, challenge, $M/N$, finalize, `RESOLUTION_FAILED` refunds (FR-RES-*)
 4. **`risk`** — published layers, bid, lock $\ge D$, lowest premium (FR-RSK-*)
 5. **`vault.settle`** — $L=E(x^*)$, global $\rho$, surplus only if $\rho=1$ (FR-SET-*)
