@@ -22,3 +22,5 @@ Diagrams: `docs/business-flow.png`, `docs/system-arch.png`, `docs/tech-arch.png`
 - Solvency: do not reject when $L_{\max}$ is high; settle $L=E(x^*)$; one global $\rho$.
 
 Suggested repo layout is in `docs/technical-architecture.md` section 9.
+
+Implementation order: [docs/plans/2026-09-24-implementation-sequence.md](docs/plans/2026-09-24-implementation-sequence.md). Math crate first; Next.js last.

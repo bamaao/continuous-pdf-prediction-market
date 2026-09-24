@@ -1,0 +1,11 @@
+[package]
+name = "math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Q64.64 LMSR, priors, rho, and risk-layer math shared by chain, Quote, and WASM"
+
+[lib]
+name = "math"
+
+[dependencies]
