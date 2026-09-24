@@ -1888,5 +1888,6 @@ The following capabilities are explicitly not built, and are not written as “m
 
 ## 18. Related documents
 
-1. `system-architecture.md` / `system-arch.png` — Web / PWA / CLI / services / network / machines
-2. `technical-architecture.md` / `tech-arch.png` — frameworks, middleware, LMSR and settlement algorithms
+1. `software-requirements-specification.md` — numbered SHALL / SHALL NOT for implementation and QA
+2. `system-architecture.md` / `system-arch.png` — Web / PWA / CLI / services / network / machines
+3. `technical-architecture.md` / `tech-arch.png` — frameworks, middleware, LMSR and settlement algorithms
