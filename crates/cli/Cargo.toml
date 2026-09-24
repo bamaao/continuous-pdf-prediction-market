@@ -11,9 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = { version = "0.22", features = ["std"] }
 clap = { version = "4", features = ["derive"] }
+ureq = { version = "2", default-features = false, features = ["json"] }
+bincode = "1"
 client = { path = "../client" }
 quote = { path = "../services/quote" }
+serde_json = "1"
 solana-client = "2.2"
 solana-sdk = "2.2"

@@ -125,14 +125,11 @@ pub mod vault {
     }
 
     /// Debit trader unused margin: $C_S$ into the pot, fee aside (not in $C_{\max}$).
+    /// The market PDA must sign (CPI). The user owner is not a signer — Session
+    /// may authorize the fill; this instruction still never treats a Session as vault authority.
     pub fn credit_trade(ctx: Context<CreditTrade>, cost: u64, fee: u64) -> Result<()> {
-        let board = &mut ctx.accounts.board;
-        if board.market == Pubkey::default() {
-            board.market = ctx.accounts.market_key.key();
-            board.bump = ctx.bumps.board;
-        }
-        require!(board.market == ctx.accounts.market_key.key(), VaultError::WrongBoard);
-        settle::credit_trade_inner(board, &mut ctx.accounts.user, cost, fee)
+        require!(ctx.accounts.board.market == ctx.accounts.market.key(), VaultError::WrongBoard);
+        settle::credit_trade_inner(&mut ctx.accounts.board, &mut ctx.accounts.user, cost, fee)
     }
 
     /// After `finalize`, lock $L=E(x^*)$, $C_{\max}$, one $\rho$.
@@ -414,26 +411,24 @@ pub struct FundCm<'info> {
 
 #[derive(Accounts)]
 pub struct CreditTrade<'info> {
-    #[account(mut)]
-    pub owner: Signer<'info>,
-    /// CHECK: board seed.
-    pub market_key: UncheckedAccount<'info>,
+    /// Market PDA. Only the market program can sign this (CPI seeds).
+    pub market: Signer<'info>,
+    /// CHECK: main wallet that owns the user vault. Not a signer.
+    pub owner: UncheckedAccount<'info>,
     #[account(
-        init_if_needed,
-        payer = owner,
-        space = Board::SIZE,
-        seeds = [BOARD_SEED, market_key.key().as_ref()],
-        bump
+        mut,
+        seeds = [BOARD_SEED, market.key().as_ref()],
+        bump = board.bump,
+        constraint = board.market == market.key() @ VaultError::WrongBoard
     )]
     pub board: Account<'info, Board>,
     #[account(
         mut,
         seeds = [USER_SEED, owner.key().as_ref()],
         bump = user.bump,
-        has_one = owner @ VaultError::NotOwner
+        constraint = user.owner == owner.key() @ VaultError::NotOwner
     )]
     pub user: Account<'info, UserVault>,
-    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]

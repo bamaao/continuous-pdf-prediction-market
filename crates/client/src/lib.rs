@@ -80,6 +80,11 @@ pub fn decode_board(data: &[u8]) -> Result<vault::Board, String> {
     vault::Board::try_deserialize(&mut cur).map_err(|e| e.to_string())
 }
 
+pub fn decode_nonce(data: &[u8]) -> Result<market::session::FillNonce, String> {
+    let mut cur = data;
+    market::session::FillNonce::try_deserialize(&mut cur).map_err(|e| e.to_string())
+}
+
 pub fn decode_risk_book(data: &[u8]) -> Result<risk::RiskBook, String> {
     let mut cur = data;
     risk::RiskBook::try_deserialize(&mut cur).map_err(|e| e.to_string())
@@ -87,6 +92,18 @@ pub fn decode_risk_book(data: &[u8]) -> Result<risk::RiskBook, String> {
 
 pub fn risk_book(market: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[risk::BOOK_SEED, market.as_ref()], &risk::ID).0
+}
+
+pub fn session_pda(owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[market::session::SESSION_SEED, owner.as_ref()], &market::ID).0
+}
+
+pub fn nonce_pda(owner: &Pubkey, market: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[market::session::NONCE_SEED, owner.as_ref(), market.as_ref()],
+        &market::ID,
+    )
+    .0
 }
 
 pub fn initialize_vault(payer: Pubkey) -> Instruction {
@@ -123,6 +140,78 @@ pub fn deposit(owner: Pubkey, amount: u64) -> Instruction {
         }
         .to_account_metas(None),
         data: vault::instruction::Deposit { amount }.data(),
+    }
+}
+
+pub fn withdraw(owner: Pubkey, amount: u64) -> Instruction {
+    let config = vault_config();
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::Withdraw {
+            owner,
+            config,
+            vault_ata: ata(&config),
+            user_ata: ata(&owner),
+            user: user_vault(&owner),
+            token_program: anchor_spl::token::ID,
+        }
+        .to_account_metas(None),
+        data: vault::instruction::Withdraw { amount }.data(),
+    }
+}
+
+pub fn open_session(
+    owner: Pubkey,
+    authority: Pubkey,
+    expires_ts: i64,
+    remaining_usdc: u64,
+    allowed_ix: u8,
+    whitelist: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::OpenSession {
+            owner,
+            session: session_pda(&owner),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::OpenSession {
+            authority,
+            expires_ts,
+            remaining_usdc,
+            allowed_ix,
+            whitelist,
+        }
+        .data(),
+    }
+}
+
+pub fn renew_session(owner: Pubkey, expires_ts: i64, remaining_usdc: u64) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::MutSession {
+            owner,
+            session: session_pda(&owner),
+        }
+        .to_account_metas(None),
+        data: market::instruction::RenewSession {
+            expires_ts,
+            remaining_usdc,
+        }
+        .data(),
+    }
+}
+
+pub fn revoke_session(owner: Pubkey) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::MutSession {
+            owner,
+            session: session_pda(&owner),
+        }
+        .to_account_metas(None),
+        data: market::instruction::RevokeSession {}.data(),
     }
 }
 
@@ -222,41 +311,69 @@ pub fn pack_local_usdc_mint(mint_authority: &Pubkey) -> Vec<u8> {
     data
 }
 
-pub fn buy_set(owner: Pubkey, market: Pubkey, set_mask: Vec<u8>, q_raw: i128) -> Instruction {
-    let set_h = market::ids::set_hash(&set_mask);
-    Instruction {
-        program_id: market::ID,
-        accounts: market::accounts::Trade {
-            owner,
-            market,
-            grid: grid_pda(&market),
-            position: position_pda(&market, &owner, &set_h),
-            board: board(&market),
-            user_vault: user_vault(&owner),
-            vault_program: vault::ID,
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-        data: market::instruction::BuySet { set_mask, q_raw }.data(),
-    }
+pub fn buy_set(owner: Pubkey, market: Pubkey, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Instruction {
+    trade_set(owner, owner, None, market, set_mask, q_raw, nonce, true)
 }
 
-pub fn sell_set(owner: Pubkey, market: Pubkey, set_mask: Vec<u8>, q_raw: i128) -> Instruction {
+pub fn buy_set_session(
+    owner: Pubkey,
+    trader: Pubkey,
+    market: Pubkey,
+    set_mask: Vec<u8>,
+    q_raw: i128,
+    nonce: u64,
+) -> Instruction {
+    trade_set(owner, trader, Some(session_pda(&owner)), market, set_mask, q_raw, nonce, true)
+}
+
+pub fn sell_set(owner: Pubkey, market: Pubkey, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Instruction {
+    trade_set(owner, owner, None, market, set_mask, q_raw, nonce, false)
+}
+
+pub fn sell_set_session(
+    owner: Pubkey,
+    trader: Pubkey,
+    market: Pubkey,
+    set_mask: Vec<u8>,
+    q_raw: i128,
+    nonce: u64,
+) -> Instruction {
+    trade_set(owner, trader, Some(session_pda(&owner)), market, set_mask, q_raw, nonce, false)
+}
+
+fn trade_set(
+    owner: Pubkey,
+    trader: Pubkey,
+    session: Option<Pubkey>,
+    market: Pubkey,
+    set_mask: Vec<u8>,
+    q_raw: i128,
+    nonce: u64,
+    is_buy: bool,
+) -> Instruction {
     let set_h = market::ids::set_hash(&set_mask);
+    let accounts = market::accounts::Trade {
+        trader,
+        owner,
+        session,
+        market,
+        grid: grid_pda(&market),
+        position: position_pda(&market, &owner, &set_h),
+        board: board(&market),
+        user_vault: user_vault(&owner),
+        nonce_acc: nonce_pda(&owner, &market),
+        vault_program: vault::ID,
+        system_program: system_program::ID,
+    }
+    .to_account_metas(None);
     Instruction {
         program_id: market::ID,
-        accounts: market::accounts::Trade {
-            owner,
-            market,
-            grid: grid_pda(&market),
-            position: position_pda(&market, &owner, &set_h),
-            board: board(&market),
-            user_vault: user_vault(&owner),
-            vault_program: vault::ID,
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-        data: market::instruction::SellSet { set_mask, q_raw }.data(),
+        accounts,
+        data: if is_buy {
+            market::instruction::BuySet { set_mask, q_raw, nonce }.data()
+        } else {
+            market::instruction::SellSet { set_mask, q_raw, nonce }.data()
+        },
     }
 }
 

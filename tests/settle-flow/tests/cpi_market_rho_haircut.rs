@@ -286,12 +286,23 @@ async fn deposit_create_cpi_buy_submit_settle_same_rho() {
             vec![Instruction {
                 program_id: market::ID,
                 accounts: market::accounts::Trade {
+                    trader: trader.pubkey(),
                     owner: trader.pubkey(),
+                    session: None,
                     market: market_pda,
                     grid: grid_pda,
                     position: pos,
                     board,
                     user_vault: uv,
+                    nonce_acc: Pubkey::find_program_address(
+                        &[
+                            market::session::NONCE_SEED,
+                            trader.pubkey().as_ref(),
+                            market_pda.as_ref(),
+                        ],
+                        &market::ID,
+                    )
+                    .0,
                     vault_program: vault::ID,
                     system_program: system_program::ID,
                 }
@@ -299,6 +310,7 @@ async fn deposit_create_cpi_buy_submit_settle_same_rho() {
                 data: market::instruction::BuySet {
                     set_mask: set_mask.clone(),
                     q_raw: q(qty),
+                    nonce: 1,
                 }
                 .data(),
             }],

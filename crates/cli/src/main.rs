@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use clap::{Parser, Subcommand};
 use client::math::{usdc, Q64};
 use solana_client::rpc_client::RpcClient;
@@ -47,6 +48,11 @@ enum Cmd {
         #[arg(long)]
         account: PathBuf,
     },
+    Withdraw {
+        amount: u64,
+    },
+    #[command(subcommand)]
+    Session(SessionCmd),
     #[command(subcommand)]
     Market(MarketCmd),
     #[command(subcommand)]
@@ -147,6 +153,27 @@ enum MarketCmd {
 }
 
 #[derive(Subcommand)]
+enum SessionCmd {
+    Open {
+        #[arg(long)]
+        authority: PathBuf,
+        #[arg(long, default_value_t = 2)]
+        hours: i64,
+        #[arg(long)]
+        usdc: u64,
+        #[arg(long)]
+        market: Option<String>,
+    },
+    Renew {
+        #[arg(long, default_value_t = 2)]
+        hours: i64,
+        #[arg(long)]
+        usdc: u64,
+    },
+    Revoke,
+}
+
+#[derive(Subcommand)]
 enum TradeCmd {
     BuySet {
         market: String,
@@ -154,11 +181,23 @@ enum TradeCmd {
         mask: String,
         /// Integer shares (Q64 integer part).
         shares: i64,
+        #[arg(long, default_value_t = 0)]
+        nonce: u64,
+        #[arg(long)]
+        session: Option<PathBuf>,
+        #[arg(long)]
+        gateway: Option<String>,
     },
     SellSet {
         market: String,
         mask: String,
         shares: i64,
+        #[arg(long, default_value_t = 0)]
+        nonce: u64,
+        #[arg(long)]
+        session: Option<PathBuf>,
+        #[arg(long)]
+        gateway: Option<String>,
     },
 }
 
@@ -329,6 +368,130 @@ fn common(
     }
 }
 
+fn next_nonce(rpc: &RpcClient, owner: &Pubkey, market: &Pubkey, explicit: u64) -> Result<u64> {
+    if explicit > 0 {
+        return Ok(explicit);
+    }
+    let acc = match rpc.get_account(&client::nonce_pda(owner, market)) {
+        Ok(a) => a,
+        Err(_) => return Ok(1),
+    };
+    match client::decode_nonce(&acc.data) {
+        Ok(n) => Ok(n.last.saturating_add(1)),
+        Err(_) => Ok(1),
+    }
+}
+
+fn send_via_gateway(
+    gateway: &str,
+    url: &str,
+    payer: &Keypair,
+    ix: solana_sdk::instruction::Instruction,
+    extra: &[&Keypair],
+    owner: Pubkey,
+    market: Pubkey,
+    nonce: u64,
+) -> Result<String> {
+    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let bh = rpc.get_latest_blockhash()?;
+    let cu = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+    let mut signers: Vec<&Keypair> = vec![payer];
+    for s in extra {
+        if s.pubkey() != payer.pubkey() {
+            signers.push(*s);
+        }
+    }
+    let tx = Transaction::new_signed_with_payer(&[cu, ix], Some(&payer.pubkey()), &signers, bh);
+    let tx_b64 = B64.encode(bincode::serialize(&tx)?);
+    let body = serde_json::json!({
+        "tx_b64": tx_b64,
+        "owner": owner.to_string(),
+        "market": market.to_string(),
+        "nonce": nonce,
+    });
+    let endpoint = format!("{}/v1/submit", gateway.trim_end_matches('/'));
+    let resp: serde_json::Value = match ureq::post(&endpoint).send_json(body) {
+        Ok(r) => r.into_json()?,
+        Err(ureq::Error::Status(code, r)) => {
+            let t = r.into_string().unwrap_or_default();
+            anyhow::bail!("gateway {code}: {t}");
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status == "confirmed" {
+        return Ok(resp.get("sig").and_then(|v| v.as_str()).unwrap_or("").to_string());
+    }
+    if status != "pending" {
+        anyhow::bail!("gateway {resp}");
+    }
+    eprintln!("pending nonce={nonce}");
+    let receipt_url = format!(
+        "{}/v1/receipt?owner={owner}&market={market}&nonce={nonce}",
+        gateway.trim_end_matches('/')
+    );
+    for _ in 0..150 {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let rec: serde_json::Value = match ureq::get(&receipt_url).call() {
+            Ok(r) => r.into_json()?,
+            Err(_) => continue,
+        };
+        match rec.get("status").and_then(|v| v.as_str()).unwrap_or("") {
+            "confirmed" => {
+                return Ok(rec.get("sig").and_then(|v| v.as_str()).unwrap_or("").to_string());
+            }
+            "failed" => anyhow::bail!("gateway receipt failed: {rec}"),
+            _ => {}
+        }
+    }
+    anyhow::bail!("gateway receipt still pending after timeout nonce={nonce}")
+}
+
+fn trade_cmd(
+    url: &str,
+    owner_kp: &Keypair,
+    owner: Pubkey,
+    market: String,
+    mask: String,
+    shares: i64,
+    nonce: u64,
+    session: Option<PathBuf>,
+    gateway: Option<String>,
+    is_buy: bool,
+) -> Result<()> {
+    let market = Pubkey::from_str(&market)?;
+    let set_mask = parse_mask(&mask)?;
+    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let nonce = next_nonce(&rpc, &owner, &market, nonce)?;
+    let q = Q64::from_int(shares).raw();
+    let (ix, payer_owned, extras): (solana_sdk::instruction::Instruction, Option<Keypair>, Vec<Keypair>) =
+        if let Some(path) = session {
+            let sk = read_keypair_file(&path).map_err(|e| anyhow::anyhow!("session {path:?}: {e}"))?;
+            let ix = if is_buy {
+                client::buy_set_session(owner, sk.pubkey(), market, set_mask, q, nonce)
+            } else {
+                client::sell_set_session(owner, sk.pubkey(), market, set_mask, q, nonce)
+            };
+            (ix, Some(sk), vec![])
+        } else {
+            let ix = if is_buy {
+                client::buy_set(owner, market, set_mask, q, nonce)
+            } else {
+                client::sell_set(owner, market, set_mask, q, nonce)
+            };
+            (ix, None, vec![])
+        };
+    let payer = payer_owned.as_ref().unwrap_or(owner_kp);
+    let extra_refs: Vec<&Keypair> = extras.iter().collect();
+    let sig = if let Some(gw) = gateway {
+        send_via_gateway(&gw, url, payer, ix, &extra_refs, owner, market, nonce)?
+    } else {
+        send_ixs(url, payer, vec![ix], &extra_refs)?
+    };
+    println!("ok {sig} shares={shares} nonce={nonce} trader={}", payer.pubkey());
+    Ok(())
+}
+
 fn send(url: &str, payer: &Keypair, ix: solana_sdk::instruction::Instruction) -> Result<String> {
     send_ixs(url, payer, vec![ix], &[])
 }
@@ -375,6 +538,45 @@ fn main() -> Result<()> {
         Cmd::Deposit { amount } => {
             let sig = send(&opt.url, &kp, client::deposit(me, amount))?;
             println!("ok {sig} user={}", client::user_vault(&me));
+        }
+        Cmd::Withdraw { amount } => {
+            let sig = send(&opt.url, &kp, client::withdraw(me, amount))?;
+            println!("ok {sig} user={}", client::user_vault(&me));
+        }
+        Cmd::Session(SessionCmd::Open { authority, hours, usdc, market }) => {
+            let auth = read_keypair_file(&authority).map_err(|e| anyhow::anyhow!("session key {authority:?}: {e}"))?;
+            let expires = wall_unix() + hours.saturating_mul(3600).max(60);
+            let whitelist = market
+                .as_deref()
+                .map(Pubkey::from_str)
+                .transpose()?
+                .unwrap_or_default();
+            let sig = send(
+                &opt.url,
+                &kp,
+                client::open_session(
+                    me,
+                    auth.pubkey(),
+                    expires,
+                    usdc,
+                    client::market::session::IX_ALL_TRADES,
+                    whitelist,
+                ),
+            )?;
+            println!(
+                "ok {sig} session={} authority={} expires_ts={expires} remaining={usdc}",
+                client::session_pda(&me),
+                auth.pubkey()
+            );
+        }
+        Cmd::Session(SessionCmd::Renew { hours, usdc }) => {
+            let expires = wall_unix() + hours.saturating_mul(3600).max(60);
+            let sig = send(&opt.url, &kp, client::renew_session(me, expires, usdc))?;
+            println!("ok {sig} session={} expires_ts={expires} remaining={usdc}", client::session_pda(&me));
+        }
+        Cmd::Session(SessionCmd::Revoke) => {
+            let sig = send(&opt.url, &kp, client::revoke_session(me))?;
+            println!("ok {sig} revoked session={}", client::session_pda(&me));
         }
         Cmd::Faucet { amount, mint_authority } => {
             let auth_path = mint_authority.unwrap_or_else(default_mint_authority);
@@ -593,25 +795,11 @@ fn main() -> Result<()> {
                 v.r_net
             );
         }
-        Cmd::Trade(TradeCmd::BuySet { market, mask, shares }) => {
-            let market = Pubkey::from_str(&market)?;
-            let set_mask = parse_mask(&mask)?;
-            let sig = send(
-                &opt.url,
-                &kp,
-                client::buy_set(me, market, set_mask, Q64::from_int(shares).raw()),
-            )?;
-            println!("ok {sig} shares={shares}");
+        Cmd::Trade(TradeCmd::BuySet { market, mask, shares, nonce, session, gateway }) => {
+            trade_cmd(&opt.url, &kp, me, market, mask, shares, nonce, session, gateway, true)?;
         }
-        Cmd::Trade(TradeCmd::SellSet { market, mask, shares }) => {
-            let market = Pubkey::from_str(&market)?;
-            let set_mask = parse_mask(&mask)?;
-            let sig = send(
-                &opt.url,
-                &kp,
-                client::sell_set(me, market, set_mask, Q64::from_int(shares).raw()),
-            )?;
-            println!("ok {sig} shares={shares}");
+        Cmd::Trade(TradeCmd::SellSet { market, mask, shares, nonce, session, gateway }) => {
+            trade_cmd(&opt.url, &kp, me, market, mask, shares, nonce, session, gateway, false)?;
         }
         Cmd::Risk(RiskCmd::Open { market }) => {
             let market = Pubkey::from_str(&market)?;

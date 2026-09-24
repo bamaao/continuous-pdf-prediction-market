@@ -107,11 +107,15 @@ Local check: `scripts/phase4-readpath.sh` compares `GET /v1/markets/:id/quote` t
 
 SRS: FR-WAL-04–09, FR-TRD-09.
 
-- Session account + MagicBlock `session-keys` when ER is on; until then, test Session PDA on local
-- Gateway forwards client-signed txs; never stores keys
-- Nonce / pending / receipt
+- Session PDA on L1 (`market.open_session` / `renew` / `revoke`); MagicBlock `session-keys` when ER is on (Phase 7)
+- In-board `buy_set` / `sell_set` / Skellam fills: Session or main wallet. Vault / resolution / withdraw still main wallet only
+- Per-owner per-market `FillNonce`; same nonce retries are no-ops
+- Gateway (`trading-gateway`) forwards client-signed txs; never stores keys
+- Submit ACK is `pending` after a durable receipt write; confirm is background; same `nonce` retries (NFR-13–20, FR-TRD-09)
 
-**Done when:** Two buys with the same Session, then withdraw still requires main wallet.
+**Done when:** Two buys with the same Session, then withdraw still requires main wallet; gateway `pending` receipt survives a gateway process restart.
+
+Local check: `scripts/phase5-session.sh`
 
 ---
 

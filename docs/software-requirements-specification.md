@@ -5,7 +5,7 @@
 | Item | Content |
 | --- | --- |
 | Document | SRS |
-| Version | 1.3 |
+| Version | 1.4 |
 | Status | Baseline for implementation |
 | Audience | Engineers, QA, reviewers |
 | Normative sources | `product-specification.md` (product rules), `system-architecture.md`, `technical-architecture.md` |
@@ -90,6 +90,7 @@ Identity is a Solana pubkey. There is no password account.
 | $C_{\max}$ | $R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$ |
 | $\rho$ | $\min(1,C_{\max}/L)$; one value for every winner |
 | Receipted fill | ER (or L1) executed the ix, returned a signed receipt, and the receipt reached a replicated journal quorum |
+| Pending fill | Gateway accepted a signed tx, persisted a receipt, and has not yet confirmed it. Not a fill. |
 | Session | Time-limited, amount-limited delegated signer for `buy_set` / `sell_set` only |
 | USDC | Circle official SPL USDC mint on the target cluster |
 
@@ -126,7 +127,7 @@ Identity is a Solana pubkey. There is no password account.
 | FR-WAL-06 | In-board set buys and sells SHALL be signed by the Session. Withdraw, create, inject $C_M$, risk `bid`, and resolution SHALL require the main wallet (or KMS for keepers / reporters). | Negative tests |
 | FR-WAL-07 | The UI SHALL expose revoke-session separately from disconnect-wallet. Disconnecting SHALL NOT be treated as on-chain revoke. | UX + chain state |
 | FR-WAL-08 | The system SHALL NOT store mnemonic phrases. Session secrets SHALL NOT be stored in plaintext `localStorage`. | Review + scanner |
-| FR-WAL-09 | Trading Gateway SHALL forward signed ER txs and SHALL NOT hold Session private keys. | Code review |
+| FR-WAL-09 | Trading Gateway SHALL forward client-signed txs and SHALL NOT accept, log, or persist Session private keys, mnemonics, or keypair JSON. | Scanner + code review |
 
 ### 4.3 Trading (LMSR)
 
@@ -140,7 +141,7 @@ Identity is a Solana pubkey. There is no password account.
 | FR-TRD-06 | The system SHALL reject only: insufficient USDC available, illegal set / $q$, market not TRADING, Session unauthorized, or nonce replay. | Negative tests |
 | FR-TRD-07 | After a fill the system SHALL update $\theta$, $E$, $L_{\max}$, and broadcast the new **implied PDF** $p_k=\mathrm{implied\_probs}(p0,\theta,\beta)$, not $E$. | Event + indexer |
 | FR-TRD-08 | Low coverage SHALL trigger a strong UI warning and SHALL still allow the order. | UI + chain accept |
-| FR-TRD-09 | A fill is complete only when FR-DUR-01 holds. Until then the client SHALL show `pending` and retry the same `nonce`. | Idempotency |
+| FR-TRD-09 | A fill is complete only when the receipt is durable (L1: gateway receipt store ACK’d then confirmed; ER: FR-DUR-01 journal quorum). Until then the client SHALL show `pending` and retry the same `nonce`. Gateway SHALL persist the receipt **before** returning `pending` and SHALL NOT wait for RPC confirm before that ACK. | Submit returns `pending`; same nonce is idempotent; store survives process restart |
 | FR-TRD-10 | Quote Engine preview SHALL be read-only and SHALL NOT be the ledger. | Preview ≠ settle |
 | FR-TRD-11 | Skellam fills SHALL use one shared $\theta_{ij}$. Typed lines SHALL go through `buy_skellam_set` (expand $S$, then `crates/math::lmsr_update`). Custom unions MAY use `buy_set`. $L_{\max}$ SHALL be $\max_{ij}E_{ij}$. Quarter lines SHALL be two half-fills of $q/2$ on the same book. Programs SHALL NOT implement a second LMSR. | Home buy raises exact 2-1; over + AH stack on intersection; $p_{1}+p_{X}+p_{2}=1$ |
 
@@ -197,7 +198,7 @@ Identity is a Solana pubkey. There is no password account.
 | FR-UI-02 | Mobile SHALL be the same site (PWA / in-wallet browser / official TWA). | Same origin / build |
 | FR-UI-03 | The client SHALL show PDF (or 11×11 football heat), $p_S$, $C_S(q)$, coverage, $\hat\rho$, and fee separately. | UI review |
 | FR-UI-04 | Copy SHALL state that fills are public on-chain. The product SHALL NOT promise on-chain anonymity. | Copy review |
-| FR-CLI-01 | CLI SHALL support create-*, close/undelegate, buy-set, risk bid, resolve, keeper, index status. | Command list |
+| FR-CLI-01 | CLI SHALL support create-*, close/undelegate, buy-set, session open/renew/revoke, withdraw, risk bid, resolve, keeper, index status. Gateway buys SHALL poll `pending` then `confirmed` on the same `nonce`. | Command list |
 | FR-IDX-01 | Indexer SHALL follow ER + L1 and rebuild from the journal after lag. Reads SHALL be shed if lag exceeds the threshold. | Lag metric |
 | FR-NTF-01 | Notifications SHALL use Web Push / email / in-app, payload `market_id` only. | Push contract |
 
@@ -215,12 +216,14 @@ Identity is a Solana pubkey. There is no password account.
 | IR-06 | Object store | Committee evidence and append-only fill journal; L1 stores hashes / `trades_root` |
 | IR-07 | BFF / Market API | Metadata, positions, snapshots; no hot-path fill |
 | IR-08 | Quote WSS | PDF / book push, `<50` ms target |
-| IR-09 | Trading Gateway | Client-signed ER txs, `<10` ms ER execution excluding wallet UI |
+| IR-09 | Trading Gateway | Client-signed txs; ACK is `pending` (NFR-13). ER execution target remains NFR-01. Gateway is not a signer. |
 | IR-10 | IDL | One Anchor IDL for `packages/sdk` and `crates/client`; no hand-rolled discriminators |
 
 ---
 
 ## 6. Non-functional requirements
+
+Reliability (crash / replay), security (keys, session authority, payload bounds), and performance (ACK vs confirm) SHALL be treated as first-class requirements. NFR-* below are MUST, same as FR-*.
 
 | ID | Requirement | Target |
 | --- | --- | --- |
@@ -236,6 +239,14 @@ Identity is a Solana pubkey. There is no password account.
 | NFR-10 | Observability | ER latency, fill success, index lag, coverage, Vault balance, Keeper heartbeat |
 | NFR-11 | Availability (Keeper) | Active-standby; idempotent `close` |
 | NFR-12 | Precision | Same test vectors on chain, Quote, WASM |
+| NFR-13 | Gateway submit ACK | Return `pending` without waiting for RPC confirm. Target $<50$ ms after the signed tx is accepted (local disk write included; not ER fill time) |
+| NFR-14 | Gateway receipt durability | A receipt the gateway already ACK’d as `pending` SHALL survive a gateway process crash. The store is **not** the ledger (FR-DUR-04). RPO $=0$ for ACK’d receipts on that host |
+| NFR-15 | Gateway / Session secrets | The system SHALL NOT persist or log private keys, mnemonics, or Session secret material. A signed transaction MAY be stored only to re-forward the same `nonce`. Logs SHALL NOT print full `tx_b64` |
+| NFR-16 | Gateway idempotency | The same `(owner, market, nonce)` SHALL return the existing receipt. After `confirmed`, a new signed tx for that nonce SHALL NOT be forwarded again |
+| NFR-17 | Session is not a vault | `remaining_usdc` is a Session cap. The L1 user vault debit is authoritative. Session SHALL NOT authorize `withdraw`, `create_*`, `fund_cm`, risk `bid`, or resolution |
+| NFR-18 | Gateway rate limit | Submit SHALL be rate-limited per owner (default $20$ / $10$ s). Excess SHALL return HTTP $429$ |
+| NFR-19 | Gateway payload bound | Signed tx body SHALL be rejected above $4$ KiB. JSON body limit $16$ KiB |
+| NFR-20 | Confirm path vs hot path | RPC send / confirm SHALL run off the submit ACK path (background). Confirm latency SHALL NOT block the `pending` response |
 
 ---
 
@@ -269,6 +280,8 @@ Identity is a Solana pubkey. There is no password account.
 | DR-05 | Evidence objects: private bucket, L1 hash only. |
 | DR-06 | Logs MAY include truncated pubkey; SHALL NOT include raw email, phone, government id, or raw IP by default. |
 | DR-07 | A stolen index DB SHALL NOT enable an extra USDC transfer. |
+| DR-08 | Gateway receipt files SHALL NOT contain private keys or mnemonics. Signed tx bytes, if stored, are not spend authority. |
+| DR-09 | Gateway receipt directory SHALL be host-local and not world-readable by default. |
 
 ---
 
@@ -285,6 +298,7 @@ Identity is a Solana pubkey. There is no password account.
 | INV-07 | Fees never sit in the user payout numerator |
 | INV-08 | After any mix of fills, $\sum_j\mathrm{face}_j(c)=E(c)$ |
 | INV-09 | $p_k$ is not $E_k$; $\sum p_k=1$ |
+| INV-10 | Session is not vault authority: `withdraw` / `create_*` / `fund_cm` / `bid` / `submit_result` fail when signed only by Session |
 
 ---
 
@@ -307,6 +321,7 @@ The system SHALL NOT:
 | XX-10 | Use multi-collateral or a house stablecoin |
 | XX-11 | Build Flutter / RN / a store trading app or a “read-only store package” |
 | XX-12 | Use IAP / Play Billing or in-store circumvention copy |
+| XX-14 | Persist or log Session / user private keys, mnemonics, or keypair JSON in the gateway, BFF, or indexer |
 
 ---
 
@@ -321,6 +336,7 @@ A release is acceptable only if all of the following pass:
 5. FR-RES-01: no code path writes $x^*$ except `submit_result`.
 6. FR-WAL-03 / CR-08: non-USDC deposit rejected.
 7. Client is the Next.js app only; no store binaries in the release.
+8. FR-TRD-09 / NFR-13–16: gateway submit returns `pending` after a durable write; that receipt survives a gateway process restart; same `(owner, market, nonce)` is idempotent; no private keys in receipt files.
 
 ---
 
@@ -346,3 +362,5 @@ A release is acceptable only if all of the following pass:
 - New behavior requires an SRS ID and a product-spec update in the same change.
 - “Should we add X later?” without an SRS ID is not a requirement.
 - Stack changes (e.g. leaving Next.js or Anchor) require CR-* amendment and SDK updates in the same change.
+
+**v1.4:** Gateway `pending`-first durable receipts; NFR-13–20 (reliability, secrets, rate limit, ACK vs confirm); DR-08–09; FR-TRD-09 / FR-WAL-09 / FR-CLI-01 tightened; XX-14.

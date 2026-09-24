@@ -1,6 +1,6 @@
 //! Market program: create by distribution family, `p0` once, L1 `buy_set`/`sell_set`.
 //! Listing names (CPI, election, BTC) are metadata, not instructions.
-//! Session / Delegate land later. Buys debit the L1 vault pot.
+//! Session PDA authorizes in-board fills (FR-WAL-04–06). Delegate is Phase 7.
 
 use anchor_lang::prelude::*;
 use math::lmsr::{lmsr_update, LmsrState};
@@ -11,8 +11,13 @@ use vault::cpi::credit_trade;
 
 pub mod ids;
 pub mod mask;
+pub mod session;
 pub mod state;
 
+use session::{
+    check_trader, is_replay, require_next, FillNonce, Session, IX_BUY_SET, IX_BUY_SKELLAM, IX_SELL_SET,
+    IX_SELL_SKELLAM, IX_ALL_TRADES, NONCE_SEED, SESSION_LIVE, SESSION_REVOKED, SESSION_SEED,
+};
 use state::*;
 
 declare_id!("Market1111111111111111111111111111111111111");
@@ -162,13 +167,58 @@ pub mod market {
         )
     }
 
-    /// L1 path used before Delegate. Session is not accepted here.
-    pub fn buy_set(mut ctx: Context<Trade>, set_mask: Vec<u8>, q_raw: i128) -> Result<()> {
-        fill(&mut ctx, &set_mask, q_raw, true)
+    pub fn open_session(
+        ctx: Context<OpenSession>,
+        authority: Pubkey,
+        expires_ts: i64,
+        remaining_usdc: u64,
+        allowed_ix: u8,
+        whitelist: Pubkey,
+    ) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require!(authority != Pubkey::default(), MarketError::SessionUnauthorized);
+        require!(expires_ts > now, MarketError::BadClock);
+        require!(allowed_ix > 0 && allowed_ix & !IX_ALL_TRADES == 0, MarketError::SessionUnauthorized);
+        let s = &mut ctx.accounts.session;
+        if s.status == SESSION_LIVE && now < s.expires_ts {
+            return err!(MarketError::SessionLive);
+        }
+        s.owner = ctx.accounts.owner.key();
+        s.authority = authority;
+        s.expires_ts = expires_ts;
+        s.remaining_usdc = remaining_usdc;
+        s.allowed_ix = allowed_ix;
+        s.status = SESSION_LIVE;
+        s.bump = ctx.bumps.session;
+        s.whitelist = whitelist;
+        Ok(())
     }
 
-    pub fn sell_set(mut ctx: Context<Trade>, set_mask: Vec<u8>, q_raw: i128) -> Result<()> {
-        fill(&mut ctx, &set_mask, q_raw, false)
+    pub fn renew_session(ctx: Context<MutSession>, expires_ts: i64, remaining_usdc: u64) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require!(expires_ts > now, MarketError::BadClock);
+        let s = &mut ctx.accounts.session;
+        require!(s.status == SESSION_LIVE, MarketError::SessionUnauthorized);
+        s.expires_ts = expires_ts;
+        s.remaining_usdc = remaining_usdc;
+        Ok(())
+    }
+
+    pub fn revoke_session(ctx: Context<MutSession>) -> Result<()> {
+        let s = &mut ctx.accounts.session;
+        s.status = SESSION_REVOKED;
+        s.authority = Pubkey::default();
+        s.remaining_usdc = 0;
+        Ok(())
+    }
+
+    /// L1 path used before Delegate. Trader may be the owner or a live Session.
+    pub fn buy_set(mut ctx: Context<Trade>, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Result<()> {
+        fill(&mut ctx, &set_mask, q_raw, nonce, true)
+    }
+
+    pub fn sell_set(mut ctx: Context<Trade>, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Result<()> {
+        fill(&mut ctx, &set_mask, q_raw, nonce, false)
     }
 
     /// 1X2 / handicap / totals / exact score on the shared Skellam grid.
@@ -176,16 +226,18 @@ pub mod market {
         mut ctx: Context<TradeSkellam>,
         contract: SkellamContract,
         q_raw: i128,
+        nonce: u64,
     ) -> Result<()> {
-        fill_skellam(&mut ctx, contract, q_raw, true)
+        fill_skellam(&mut ctx, contract, q_raw, nonce, true)
     }
 
     pub fn sell_skellam_set(
         mut ctx: Context<TradeSkellam>,
         contract: SkellamContract,
         q_raw: i128,
+        nonce: u64,
     ) -> Result<()> {
-        fill_skellam(&mut ctx, contract, q_raw, false)
+        fill_skellam(&mut ctx, contract, q_raw, nonce, false)
     }
 
     /// Creator or roster member stops fills (early YES, VOID, or after close).
@@ -308,7 +360,7 @@ fn open_board(
     Ok(())
 }
 
-fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, is_buy: bool) -> Result<()> {
+fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: bool) -> Result<()> {
     require!(q_raw > 0, MarketError::ZeroQty);
     require!(
         ctx.accounts.market.status == Status::Trading as u8,
@@ -316,6 +368,22 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, is_buy: bool) ->
     );
     let now = Clock::get()?.unix_timestamp;
     require!(now < ctx.accounts.market.close_ts, MarketError::Closed);
+    let owner_key = ctx.accounts.owner.key();
+    let trader_key = ctx.accounts.trader.key();
+    let market_key = ctx.accounts.market.key();
+    let ix = if is_buy { IX_BUY_SET } else { IX_SELL_SET };
+    check_trader(
+        &trader_key,
+        &owner_key,
+        ctx.accounts.session.as_ref().map(|s| s.as_ref().as_ref()),
+        &market_key,
+        now,
+        ix,
+    )?;
+    if is_replay(&ctx.accounts.nonce_acc, nonce) {
+        return Ok(());
+    }
+    require_next(&ctx.accounts.nonce_acc, nonce)?;
     require!(
         ctx.accounts.grid.market == ctx.accounts.market.key(),
         MarketError::WrongGrid
@@ -355,8 +423,6 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, is_buy: bool) ->
         Q64::ZERO
     };
     let l_max = state.l_max().raw();
-    let market_key = ctx.accounts.market.key();
-    let owner_key = ctx.accounts.owner.key();
 
     ctx.accounts.grid.theta = state.theta.iter().map(|q| q.raw()).collect();
     ctx.accounts.grid.exposure = state.exposure.iter().map(|q| q.raw()).collect();
@@ -391,17 +457,30 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, is_buy: bool) ->
     }
 
     if is_buy && (cost_usdc > 0 || fee_usdc > 0) {
+        if trader_key != owner_key {
+            let s = ctx
+                .accounts
+                .session
+                .as_mut()
+                .ok_or_else(|| error!(MarketError::SessionUnauthorized))?;
+            let need = cost_usdc.saturating_add(fee_usdc);
+            require!(s.remaining_usdc >= need, MarketError::SessionUnauthorized);
+            s.remaining_usdc = s.remaining_usdc.saturating_sub(need);
+        }
         charge_vault(
             ctx.accounts.vault_program.to_account_info(),
             ctx.accounts.owner.to_account_info(),
             ctx.accounts.market.to_account_info(),
             ctx.accounts.board.to_account_info(),
             ctx.accounts.user_vault.to_account_info(),
-            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.market.id_hash,
+            ctx.accounts.market.bump,
             cost_usdc,
             fee_usdc,
         )?;
     }
+    ctx.accounts.nonce_acc.last = nonce;
+    ctx.accounts.nonce_acc.bump = ctx.bumps.nonce_acc;
 
     emit!(FillEvent {
         market: market_key,
@@ -458,6 +537,7 @@ fn fill_skellam(
     ctx: &mut Context<TradeSkellam>,
     contract: SkellamContract,
     q_raw: i128,
+    nonce: u64,
     is_buy: bool,
 ) -> Result<()> {
     require!(q_raw > 0, MarketError::ZeroQty);
@@ -469,10 +549,24 @@ fn fill_skellam(
         ctx.accounts.market.status == Status::Trading as u8,
         MarketError::NotTrading
     );
-    require!(
-        Clock::get()?.unix_timestamp < ctx.accounts.market.close_ts,
-        MarketError::Closed
-    );
+    let now = Clock::get()?.unix_timestamp;
+    require!(now < ctx.accounts.market.close_ts, MarketError::Closed);
+    let owner_key = ctx.accounts.owner.key();
+    let trader_key = ctx.accounts.trader.key();
+    let market_key = ctx.accounts.market.key();
+    let ix = if is_buy { IX_BUY_SKELLAM } else { IX_SELL_SKELLAM };
+    check_trader(
+        &trader_key,
+        &owner_key,
+        ctx.accounts.session.as_ref().map(|s| s.as_ref().as_ref()),
+        &market_key,
+        now,
+        ix,
+    )?;
+    if is_replay(&ctx.accounts.nonce_acc, nonce) {
+        return Ok(());
+    }
+    require_next(&ctx.accounts.nonce_acc, nonce)?;
     if !is_buy {
         require!(ctx.accounts.position.q >= q_raw, MarketError::NoInventory);
     }
@@ -500,8 +594,6 @@ fn fill_skellam(
         fee_sum = fee_sum.checked_add(f).ok_or(MarketError::Overflow)?;
     }
     let (kind, a, b) = contract.ticket_key();
-    let market_key = ctx.accounts.market.key();
-    let owner_key = ctx.accounts.owner.key();
     let l_max = ctx.accounts.market.l_max;
     let pos = &mut ctx.accounts.position;
     pos.market = market_key;
@@ -518,17 +610,30 @@ fn fill_skellam(
         pos.cost_paid = pos.cost_paid.saturating_sub(cost_usdc);
     }
     if is_buy && (cost_usdc > 0 || fee_usdc > 0) {
+        if trader_key != owner_key {
+            let s = ctx
+                .accounts
+                .session
+                .as_mut()
+                .ok_or_else(|| error!(MarketError::SessionUnauthorized))?;
+            let need = cost_usdc.saturating_add(fee_usdc);
+            require!(s.remaining_usdc >= need, MarketError::SessionUnauthorized);
+            s.remaining_usdc = s.remaining_usdc.saturating_sub(need);
+        }
         charge_vault(
             ctx.accounts.vault_program.to_account_info(),
             ctx.accounts.owner.to_account_info(),
             ctx.accounts.market.to_account_info(),
             ctx.accounts.board.to_account_info(),
             ctx.accounts.user_vault.to_account_info(),
-            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.market.id_hash,
+            ctx.accounts.market.bump,
             cost_usdc,
             fee_usdc,
         )?;
     }
+    ctx.accounts.nonce_acc.last = nonce;
+    ctx.accounts.nonce_acc.bump = ctx.bumps.nonce_acc;
     emit!(FillEvent {
         market: market_key,
         owner: owner_key,
@@ -576,20 +681,23 @@ fn charge_vault<'info>(
     market: AccountInfo<'info>,
     board: AccountInfo<'info>,
     user: AccountInfo<'info>,
-    system_program: AccountInfo<'info>,
+    id_hash: [u8; 32],
+    bump: u8,
     cost: u64,
     fee: u64,
 ) -> Result<()> {
+    let bump_seed = [bump];
+    let seeds: &[&[u8]] = &[MARKET_SEED, id_hash.as_ref(), &bump_seed];
     credit_trade(
-        CpiContext::new(
+        CpiContext::new_with_signer(
             vault_program,
             CreditTrade {
+                market,
                 owner,
-                market_key: market,
                 board,
                 user,
-                system_program,
             },
+            &[seeds],
         ),
         cost,
         fee,
@@ -628,10 +736,41 @@ pub struct CreateBoard<'info> {
 }
 
 #[derive(Accounts)]
+pub struct OpenSession<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    #[account(
+        init_if_needed,
+        payer = owner,
+        space = Session::SIZE,
+        seeds = [SESSION_SEED, owner.key().as_ref()],
+        bump
+    )]
+    pub session: Account<'info, Session>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct MutSession<'info> {
+    pub owner: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [SESSION_SEED, owner.key().as_ref()],
+        bump = session.bump,
+        constraint = session.owner == owner.key() @ MarketError::SessionUnauthorized
+    )]
+    pub session: Account<'info, Session>,
+}
+
+#[derive(Accounts)]
 #[instruction(set_mask: Vec<u8>)]
 pub struct Trade<'info> {
     #[account(mut)]
-    pub owner: Signer<'info>,
+    pub trader: Signer<'info>,
+    /// CHECK: main wallet. Position and vault seeds bind to this key.
+    pub owner: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub session: Option<Box<Account<'info, Session>>>,
     #[account(
         mut,
         seeds = [MARKET_SEED, market.id_hash.as_ref()],
@@ -646,7 +785,7 @@ pub struct Trade<'info> {
     pub grid: Box<Account<'info, Grid>>,
     #[account(
         init_if_needed,
-        payer = owner,
+        payer = trader,
         space = Position::SIZE,
         seeds = [POS_SEED, market.key().as_ref(), owner.key().as_ref(), ids::set_hash(&set_mask).as_ref()],
         bump
@@ -667,6 +806,14 @@ pub struct Trade<'info> {
         constraint = user_vault.owner == owner.key()
     )]
     pub user_vault: Box<Account<'info, vault::UserVault>>,
+    #[account(
+        init_if_needed,
+        payer = trader,
+        space = FillNonce::SIZE,
+        seeds = [NONCE_SEED, owner.key().as_ref(), market.key().as_ref()],
+        bump
+    )]
+    pub nonce_acc: Box<Account<'info, FillNonce>>,
     pub vault_program: Program<'info, vault::program::Vault>,
     pub system_program: Program<'info, System>,
 }
@@ -675,7 +822,11 @@ pub struct Trade<'info> {
 #[instruction(contract: SkellamContract)]
 pub struct TradeSkellam<'info> {
     #[account(mut)]
-    pub owner: Signer<'info>,
+    pub trader: Signer<'info>,
+    /// CHECK: main wallet. Position and vault seeds bind to this key.
+    pub owner: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub session: Option<Box<Account<'info, Session>>>,
     #[account(
         mut,
         seeds = [MARKET_SEED, market.id_hash.as_ref()],
@@ -690,7 +841,7 @@ pub struct TradeSkellam<'info> {
     pub grid: Box<Account<'info, Grid>>,
     #[account(
         init_if_needed,
-        payer = owner,
+        payer = trader,
         space = Position::SIZE,
         seeds = [
             POS_SEED,
@@ -716,6 +867,14 @@ pub struct TradeSkellam<'info> {
         constraint = user_vault.owner == owner.key()
     )]
     pub user_vault: Box<Account<'info, vault::UserVault>>,
+    #[account(
+        init_if_needed,
+        payer = trader,
+        space = FillNonce::SIZE,
+        seeds = [NONCE_SEED, owner.key().as_ref(), market.key().as_ref()],
+        bump
+    )]
+    pub nonce_acc: Box<Account<'info, FillNonce>>,
     pub vault_program: Program<'info, vault::program::Vault>,
     pub system_program: Program<'info, System>,
 }
@@ -771,6 +930,12 @@ pub enum MarketError {
     BadLayers,
     #[msg("signer is not the creator or a roster member")]
     NotResolver,
+    #[msg("session is missing, expired, revoked, or not allowed for this ix")]
+    SessionUnauthorized,
+    #[msg("a live session already exists; revoke or wait for expiry")]
+    SessionLive,
+    #[msg("nonce is not the next value (or a same-nonce retry of another fill)")]
+    NonceReplay,
 }
 
 #[cfg(test)]
