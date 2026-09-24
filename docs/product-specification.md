@@ -4,9 +4,9 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.1 |
+| Version | 1.2 |
 | Status | Product specification (features are written as fully delivered; no MVP / later-phase split) |
-| Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(x^*)$. If $L>C_{\max}$, one global pro-rata $\rho$ (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$. Fees never enter the payout pool. Price is pure probability; coverage is displayed only. Markets are created by **distribution family** (Skellam, Gaussian, lognormal, Dirichlet, Bernoulli) — not by product category. Football scores are Skellam. $x^*$ only via `submit_result`. |
+| Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(x^*)$. If $L>C_{\max}$, one global pro-rata $\rho$ (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. Trading is the primary payout source; $C_M$ and $C_R$ are optional. Fees go to the platform and do not enter this board’s pool; they may be swept into the protocol adjustment fund $C_P$ for later shortfalls. Price is pure probability; coverage is displayed only. Markets are created by **distribution family** (Skellam, Gaussian, lognormal, Dirichlet, Bernoulli) — not by product category. Football scores are Skellam. $x^*$ only via `submit_result`. |
 
 ---
 
@@ -67,16 +67,16 @@ A board’s lifecycle follows the path below. During the trading period the risk
 
 ```text
 ① Choose the distribution family
-② Initialize parameters and create the market (inject C_M, open the risk auction book)
-③ Trade (LMSR: buying the same outcome makes it more expensive + fees; LPs quote at the same time)
+② Initialize parameters and create the market (C_M may be 0; open the risk auction book)
+③ Trade (LMSR: buying the same outcome makes it more expensive + fees; LPs may quote at the same time)
 ④ At close_ts, cut off orders and freeze f / P
 ⑤ Wait for the event
 ⑥ The committee (or an authorized reporter) writes the outcome on-chain. No oracle writes $x^*$.
-⑦ Payout
-      ├─ Own funds cover L              → full payout, then split surplus
-      ├─ Own funds fall short, but L ≤ C_max → draw Risk LP, still full payout
+⑦ Payout (commercial stack: trading first, then optional C_M, optional C_R, then optional C_P)
+      ├─ Trading + C_M cover L          → full payout; risk capital not drawn
+      ├─ Those own funds fall short, but L ≤ C_max → draw Risk LP, then C_P if still short; still full payout
       └─ L > C_max                      → pay all winners at the same ratio ρ = C_max / L
-⑧ Only on full payout: surplus is split between risk capital and the platform
+⑧ Only on full payout: surplus is split. If risk capital filled this board, α_R / α_P; if no risk capital entered, residual goes to the platform (and may be swept into C_P).
 ```
 
 **① Choose the probability-distribution type.** Identify the underlying first, then lock the family. It cannot be swapped later.
@@ -106,13 +106,13 @@ During the trading period $L_{\max}$ may exceed available funds. **Orders are no
 
 **⑥ Submit the result.** The chain does not grow $x^*$ by itself. A `submit_result` transaction must write the settlement value into the market account. The reporter is a committee member or an authorized bot. The payload is a score, a published print, a winner, a price, or YES/NO — not “which line won”. An optional `evidence_hash` may be stored; the program does not parse it. No payout before finalization.
 
-**⑦ Payout.** This protocol has no futures-style liquidation. Settlement only compares face-value liability $L=E(x^*)$ with payable capital $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$. $R_{\mathrm{net}}$ already deducts fees and premiums payable.
+**⑦ Payout.** This protocol has no futures-style liquidation. Settlement only compares face-value liability $L=E(x^*)$ with payable capital $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. $R_{\mathrm{net}}$ is trading revenue; fees never entered it. $C_M$ and $C_R$ may both be zero; then the board pays from trading, plus any allocated platform adjustment $C_P$. The commercial stack is section 9.
 
 | Informal wording | Exact condition | What the user receives |
 | --- | --- | --- |
-| No liquidation, normal payout | $L \le R_{\mathrm{net}}+C_M$ | $\rho=1$; that Risk LP layer is not hit, or is hit only lightly |
-| Draw risk capital, still normal payout | $R_{\mathrm{net}}+C_M < L \le C_{\max}$ | Still $\rho=1$; draw Risk LP by layer |
-| Exceeds maximum payable risk capital | $L > C_{\max}$ | $\rho=C_{\max}/L$; all winners at the same ratio; first-come-first-served is forbidden |
+| Own funds cover (no risk draw) | $L \le R_{\mathrm{net}}+C_M$ | $\rho=1$; $H_i=0$; $C_P$ not drawn |
+| Draw risk / adjustment, still full | $R_{\mathrm{net}}+C_M < L \le C_{\max}$ | Still $\rho=1$; draw Risk LP by leftover shortfall, then $C_P$ if needed |
+| Exceeds maximum payable | $L > C_{\max}$ | $\rho=C_{\max}/L$; all winners at the same ratio; first-come-first-served is forbidden |
 
 Only the third case is a haircut. How $\rho$ is computed is in section 8.3: the denominator is the sum of face values that hit the realized outcome, not trading-period $L_{\max}$.
 
@@ -122,7 +122,7 @@ $$
 S=\max(R_{\mathrm{net}}+C_M-L,0)
 $$
 
-$S$ is split into two parts at the ratios locked at market creation: $\alpha_R S$ to this board’s Risk LPs (then split by each LP’s $\alpha_i$), $\alpha_P S$ to the platform, with $\alpha_R+\alpha_P=1$. When $\rho<1$, $S=0$; neither risk capital nor the platform takes surplus.
+If this board has filled risk capital ($C_R^{\mathrm{final}}>0$), $S$ is split at the listing lock: $\alpha_R S$ to those Risk LPs (then by each LP’s $\alpha_i$), $\alpha_P S$ to the platform, $\alpha_R+\alpha_P=1$. If no risk capital entered, $S_R=0$ and $S$ goes to the platform. When $\rho<1$, $S=0$. The platform may sweep $\phi$ and $S_P$ into $C_P$; that sweep is not a user or LP claim.
 
 ### 1.2 Business Flow Diagram
 
@@ -173,8 +173,8 @@ flowchart TB
 
   subgraph P5["⑤ Settlement and payout"]
     E1[Compute L = E x* and C_max] --> E2{Compare L with funds}
-    E2 -->|L ≤ own funds| E3[Full payout ρ=1<br/>compute surplus S]
-    E2 -->|Own funds short and L ≤ C_max| E4[Draw Risk LP<br/>still full ρ=1, compute S]
+    E2 -->|L ≤ R_net + C_M| E3[Full payout ρ=1<br/>H=0, C_P not drawn, compute S]
+    E2 -->|Need C_R and/or C_P, L ≤ C_max| E4[Draw Risk LP then C_P<br/>still full ρ=1]
     E2 -->|L > C_max| E5[ρ = C_max / L<br/>same ratio, S = 0]
     E3 --> E6[α_R to Risk LP<br/>α_P to the platform]
     E4 --> E6
@@ -214,7 +214,7 @@ One-sentence principle:
 
 ### 3.1 Trader
 
-Buys an interval contract $q\cdot 1_I(x)$. If the final outcome falls in $I$, face-value payoff is $q$; the amount actually received is $\rho\cdot q$, where $\rho$ is the settlement recovery rate; see section 8.
+Buys a probability interval $I$ and receives **shares** $q$ equal to the size bought. If $x^*\in I$, the claim is those shares; the USDC paid is $\rho\cdot q$ (section 8). Misses pay 0.
 
 Traders have no market-making obligation and do not provide risk capital.
 
@@ -253,6 +253,16 @@ The person who **writes the final outcome $x^*$ as an on-chain transaction**. Wi
 - A committee member or authorized reporting bot calls `submit_result`
 - May attach an opaque `evidence_hash` (the program does not parse it)
 - Finalization happens only after the challenge window or after a vote passes
+
+### 3.6 Platform
+
+The protocol operator of the fee pot, surplus share $S_P$, and the **platform adjustment fund pool** $C_P^{\mathrm{pool}}$.
+
+- Receives $\phi\cdot C_S(q)$ on every fill. That money is platform income. It does **not** enter this board’s $C_{\max}$.
+- Receives $S_P$ only when $\rho=1$.
+- Sweeps $\phi$ and $S_P$ into **one** protocol-level pool $C_P^{\mathrm{pool}}$. Boards do not hold their own $C_P$ balance.
+- A short board may draw $C_P^{\mathrm{alloc}}$ from that pool at settlement, never more than the pool and never more than the board cap.
+- The pool is a capped commercial reserve, not an unlimited guarantee and not a second LMSR price.
 
 ---
 
@@ -464,9 +474,11 @@ The same outcome gets more expensive the more it is bought. Suppose at open $p_S
 
 User actually pays $=C_S(q)+\phi\cdot C_S(q)$. $\phi$ is the protocol fee rate, locked at market creation.
 
-### 4.5 Positions and Liabilities
+### 4.5 Positions, Shares, and Liabilities
 
-A user position is recorded as $(I_j,q_j)$, with payoff $q_j 1_{I_j}(x)$. All positions stack into an exposure curve:
+A fill of size $q$ on interval (or set) $I$ **credits $q$ shares** on that ticket. $q$ is the claim unit, not the USDC paid at fill (that USDC is $C_I(q)+\phi\cdot C_I(q)$).
+
+A position is $(I_j,q_j)$: $q_j$ shares on $I_j$. Face-value payoff is $q_j$ if $x^*\in I_j$, else $0$. All positions stack into an exposure curve:
 
 $$
 E(x)=\sum_j q_j 1_{I_j}(x)
@@ -1237,13 +1249,13 @@ What a Risk LP sees on the board: layers, rates, current $L_{\max}$, an estimate
 #### 6.6.8 Business Loop (one board)
 
 ```text
-List → inject C_M → open layers 1..n
+List → optional C_M → open layers 1..n
    → prediction-side trading (does not check C_R)
-   → LPs quote continuously, lock collateral, get filled
+   → LPs may quote, lock collateral, get filled
    → close / risk_lock
    → finalize x* (or score / YES)
    → L = E(x*)
-   → first R_net + C_M, then draw C_R by layer
+   → R_net first, then C_M, then C_R by leftover shortfall, then C_P^alloc
    → ρ = min(1, C_max / L)
    → pay users at ρ → residual only then is shared
 ```
@@ -1297,33 +1309,42 @@ The only remaining hard rule:
 
 ## 8. Settlement Payout and Haircut Ratio
 
-### 8.1 Pay Only the Realized Outcome
+### 8.1 Pay by Shares on the Realized Outcome
 
-After the market closes and $x^*$ is finalized, face-value liability is:
+Users do not redeem “the dollars they paid in”. They redeem **shares**.
+
+1. At fill, buying $q$ of set $I$ mints $q$ shares on that ticket.
+2. After $x^*$ is finalized, a ticket hits if and only if $x^*\in I$. A miss is $0$ and is not in the haircut.
+3. Hitting shares are paid in USDC at one global rate $\rho$ (section 8.3).
+
+Face-value liability is the sum of hitting shares:
 
 $$
 L=E(x^*)=\sum_j q_j\,1_{I_j}(x^*)
 $$
 
-Positions that missed $x^*$ pay 0 and do not participate in the haircut allocation.
+If $C_{\max}\ge L$, each hitting share pays $1$ USDC ($\rho=1$). If $C_{\max}<L$, compute one ratio and pay that ratio on every hitting share — never FIFO, never “who claimed first”.
 
 ### 8.2 Maximum Payable $C_{\max}$
 
 Money actually available at settlement:
 
 $$
-C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}
+C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}+C_P^{\mathrm{alloc}}
 $$
 
 | Symbol | Meaning |
 | --- | --- |
-| $R_{\text{net}}$ | Net trading revenue: cost paid by users, minus protocol fees, premium already paid to Risk LPs, and incurred oracle / hedge costs |
-| $C_M$ | The market’s own reserve |
-| $C_R^{\text{final}}$ | Risk LP capital locked and drawable at settlement $\sum_i D_i$ |
+| $R_{\text{net}}$ | **Primary source.** Net trading revenue: contract cost paid by users. Fees never entered this term. Premia payable to Risk LPs are deducted. |
+| $C_M$ | Optional market reserve injected at listing. May be $0$. |
+| $C_R^{\text{final}}$ | Optional Risk LP capital locked and drawable at settlement $\sum_i D_i$. May be $0$ if nobody filled. |
+| $C_P^{\mathrm{alloc}}$ | Optional draw from the platform adjustment fund, capped per board and by the pool. May be $0$. |
 
-Money users have already paid the market must be used for payout first. Leaving $R_{\text{net}}$ out of the numerator would haircut users while the market sits on premium income.
+If there is no risk capital and no market reserve, payout is still due: $C_{\max}=R_{\mathrm{net}}+C_P^{\mathrm{alloc}}$. The main source is trading.
 
-$C_R^{\text{final}}$ is collateral actually locked at settlement. Risk LPs that top up after the trading period still count in the numerator if they finish locking before settlement; unlocked promises do not.
+Money users have already paid the market must be used for payout first. Leaving $R_{\text{net}}$ out of the numerator would haircut users while the market sits on trading income.
+
+$C_R^{\text{final}}$ is collateral actually locked at settlement. Unlocked promises do not count. $C_P^{\mathrm{alloc}}$ is defined in section 9.3; it is not the whole treasury.
 
 ### 8.3 Recovery Rate
 
@@ -1331,7 +1352,7 @@ $$
 \rho=\min\left(1,\;\frac{C_{\max}}{L}\right)
 $$
 
-Actual payout on a hitting position is $\rho\cdot q_j$. All winners share the same $\rho$.
+USDC paid to a hitting ticket is $\rho\cdot q_j$ (share count times the ratio). All winners use the same $\rho$. Dust is $\lfloor\rho q_j\rfloor$; remainder stays in reserves.
 
 ### 8.4 First-Come-First-Served Is Forbidden
 
@@ -1364,20 +1385,26 @@ This is a warning only. It is not the fill price and does not lock final $\rho$.
 ### 8.6 Capital Draw Order
 
 ```text
-R_net + C_M
+R_net  (trading; always first)
     │
-    ├─ Enough to pay L  → users paid in full; Risk LP H_i=0 on that layer, or by the layer formula
+    ├─ + optional C_M
+    │
+    ├─ Enough to pay L
+    │     → ρ = 1, H_i = 0, C_P not drawn
+    │     → surplus S = max(R_net + C_M − L, 0)
     │
     └─ Short
            │
            ▼
-     Draw Risk LP by layer, cap C_R_final
+     Draw Risk LP by layer, only the leftover shortfall, cap C_R_final
            │
-           ├─ C_max ≥ L → ρ = 1
-           └─ C_max < L → ρ = C_max / L, same ratio for everyone
+           ├─ Still short → draw C_P^alloc (section 9.3)
+           │
+           ├─ C_max ≥ L → ρ = 1, S = 0
+           └─ C_max < L → ρ = C_max / L, same ratio, S = 0
 ```
 
-Risk LPs pay at most $C_R^{\text{final}}$ and are not topped up because of later orders. After layers are exhausted, the remaining gap is shared by all winners.
+Risk LPs pay at most $C_R^{\text{final}}$ and are not topped up because of later orders. $C_P$ pays at most the allocated cap. After every locked source is exhausted, the remaining gap is shared by all winners.
 
 ### 8.7 Numeric Example
 
@@ -1386,8 +1413,9 @@ At expiry the cell of $x^*$ has face-value total payout $L=12{,}000{,}000$.
 - Net trading revenue $3{,}000{,}000$
 - Market reserve $2{,}000{,}000$
 - Locked Risk LP $5{,}000{,}000$
+- Platform adjustment allocated $0$
 
-Then $C_{\max}=10{,}000{,}000$, $\rho=1000/1200=5/6$.
+Then $C_{\max}=10{,}000{,}000$, $\rho=1000/1200=5/6$. If the pool later allocated $C_P=1{,}000{,}000$ to this board, $C_{\max}=11{,}000{,}000$ and $\rho=11/12$.
 
 If the same market has $L_{\max}=20{,}000{,}000$ but $x^*$ lands on a cell with only $4{,}000{,}000$ of exposure, then $L=4{,}000{,}000$, $\rho=1$.
 
@@ -1404,71 +1432,142 @@ When coverage is too low, show a strong warning; **orders are still allowed**. P
 
 ---
 
-## 9. Revenue, Waterfall, and Profit Share
+## 9. Commercial Operating Model
 
-### 9.1 Market Revenue and Fees
+This section is the commercial rule, not an implementation hint. Settlement, vault ledgers, and the UI must follow it.
 
-Each trade the user pays:
+### 9.1 Capital stack (what may pay users)
+
+Four USDC pots can fund a board. Only the first is required.
+
+| Seniority | Pot | Who provides it | Required? | When it is used |
+| --- | --- | --- | --- | --- |
+| 1 | $R_{\mathrm{net}}$ | Traders, via $C_S(q)$ | Yes (the default source) | Always first |
+| 2 | $C_M$ | Market creator / listing reserve | No. May be $0$ | After trading, if still short |
+| 3 | $C_R^{\mathrm{final}}$ | Risk LPs who locked and filled | No. May be $0$ | After own funds, by layer, only the leftover shortfall |
+| 4 | $C_P^{\mathrm{alloc}}$ | Platform adjustment fund | No. May be $0$ | Last backstop after $C_R$, still capped |
+
+$$
+C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}
+$$
+
+**If no risk capital entered and no market reserve was injected, payout is still owed and comes from trading** (plus any $C_P$ allocated to that board). Soft solvency is unchanged: if that is still less than $L$, one global $\rho$.
+
+$C_P$ is not a promise that $\rho=1$. It is a bounded commercial reserve so that a thin board is not immediately a lottery.
+
+### 9.2 Two payout paths
+
+**Path A — risk capital is not needed.** $L\le R_{\mathrm{net}}+C_M$.
+
+- Users are paid in full ($\rho=1$).
+- $H_i=0$. Locked LP collateral is released, not debited.
+- $C_P$ is not drawn.
+- Residual $S=\max(R_{\mathrm{net}}+C_M-L,0)$ exists.
+- If $C_R^{\mathrm{final}}>0$ (LPs stood ready but were not hit): $S_R=\alpha_R S$ to those LPs, $S_P=\alpha_P S$ to the platform.
+- If no risk capital entered: $S_R=0$, the whole $S$ goes to the platform.
+
+**Path B — risk capital (and maybe $C_P$) is needed.** $L>R_{\mathrm{net}}+C_M$.
+
+- Draw layers for $\min\bigl(H_i^{\mathrm{raw}},\ (L-R_{\mathrm{net}}-C_M)^+-\text{already drawn}\bigr)$.
+- If still short, allocate $C_P$ as in 9.3.
+- $C_{\max}\ge L$ → $\rho=1$, $S=0$ (own funds were exhausted).
+- $C_{\max}<L$ → $\rho=C_{\max}/L$, $S=0$.
+
+### 9.3 Fees and the platform adjustment fund pool
+
+The adjustment fund is not a per-board piggy bank. It is **one protocol pool**.
+
+| Name | Symbol | What it is |
+| --- | --- | --- |
+| Platform adjustment fund pool | $C_P^{\mathrm{pool}}$ | A single L1 USDC vault. All recyclable platform capital sits here. |
+| Board tap cap | $C_P^{\mathrm{board}}$ | Max this board may take from the pool, locked at listing. May be $0$. |
+| Settlement draw | $C_P^{\mathrm{alloc}}$ | What this board actually takes at settlement. Debited from the pool. |
+
+$$
+C_P^{\mathrm{alloc}}=\min\bigl((L-R_{\mathrm{net}}-C_M-C_R^{\mathrm{final}})^+,\; C_P^{\mathrm{board}},\; C_P^{\mathrm{pool}}\bigr)
+$$
+
+After the draw, $C_P^{\mathrm{pool}}\leftarrow C_P^{\mathrm{pool}}-C_P^{\mathrm{alloc}}$. Two short boards settling in the same window share the remaining pool; there is no reserved slice per board except the listing cap.
+
+Each fill the user pays:
 
 $$
 \mathrm{Pay}=C_S(q)+\phi\cdot C_S(q)
 $$
 
-- $C_S(q)$: LMSR contract cost, enters this board’s Vault, booked as `TradingRevenue`
-- $\phi\cdot C_S(q)$: fee, swept to the platform immediately, **does not enter** the $C_{\max}$ payout pool
+- $C_S(q)$: LMSR contract cost → this board’s Vault → `TradingRevenue` → $R_{\mathrm{net}}$ after premia.
+- $\phi\cdot C_S(q)$: **platform income at fill time**. It does not enter this board’s $C_{\max}$ and is not deducted from $R_{\mathrm{net}}$ a second time.
 
 $$
 R_{\text{net}}=\text{TradingRevenue}-\text{RiskPremium}-\text{HedgeCost}-\text{OracleCost}
 $$
 
-The fee was already taken before entering the pool; it is not deducted from $R_{\text{net}}$ a second time.
+Inflows to the **pool** (explicit sweep, never the same board’s live fill):
 
-### 9.2 Residual Profit
+```text
+φ  →  platform fee pot  ──sweep──►  C_P^pool   (one USDC account)
+S_P →  platform treasury ──sweep──►  C_P^pool
+platform top-up USDC   ──────────►  C_P^pool
+                                      │
+                                      ▼  only at settlement of a short board
+                                 C_P^alloc onto that board
+```
+
+- A fill’s fee must not jump into **that same board’s** $C_{\max}$.
+- Users and LPs have no claim on unallocated pool balances.
+- No `admin_withdraw` of the pool except: settlement draws, or a listed unwind of unused pool into the platform treasury after a published delay.
+- The pool does not change LMSR prices. Coverage may show $C_P^{\mathrm{board}}$ as a warning, never as the quote.
+
+### 9.4 Residual profit
 
 Only when users have already been paid in full at face value ($\rho=1$):
 
 $$
-S=\max(R_{\text{net}}+C_M-L,0)
+S=\max(R_{\mathrm{net}}+C_M-L,0)
 $$
 
 When $\rho<1$, $S=0$ and there is no profit share.
 
-### 9.3 Allocation
-
-Surplus is split into only two parts: risk capital and the platform.
+If $C_R^{\mathrm{final}}>0$:
 
 $$
-S=S_R+S_P,\qquad \alpha_R+\alpha_P=1
+S=S_R+S_P,\qquad S_R=\alpha_R S,\quad S_P=S-S_R,\qquad \alpha_R+\alpha_P=1
 $$
 
-- $S_R=\alpha_R S$: this board’s Risk LPs, then allocated by each LP’s $\alpha_i$ agreed at fill
-- $S_P=\alpha_P S$: the platform (treasury; the platform may on its own move some of this into reserves — that is not a claim of users or LPs)
+- $S_R$: this board’s filled Risk LPs, then by each LP’s $\alpha_i$ agreed at fill
+- $S_P$: the platform
 
-Profit Share is a residual claim, not a guaranteed return. The fee $\phi$ was already paid to the platform at trade time; it is a different pot from $S_P$ here.
+If $C_R^{\mathrm{final}}=0$, $S_R=0$ and $S=S_P$.
 
-### 9.4 Full Waterfall
+Profit share is a residual claim, not a guaranteed return. $\phi$ is a different pot from $S_P$. Both may be swept into $C_P$.
+
+### 9.5 Full waterfall
 
 ```text
-Trading revenue
+Trading revenue R_net          ← primary commercial source
     │
     ▼
-Market reserve
+Optional market reserve C_M
     │
     ▼
 User payout (ρ · face value, one global ρ)
     │
     ▼
-Risk Layer draw (by H_i, cap each layer’s D_i)
+Risk layer draw (H_i on leftover shortfall only)
+    │
+    ▼
+Platform adjustment draw C_P^alloc
     │
     ▼
 Residual profit (only when ρ = 1)
-    ├── Risk LP (α_R)
-    └── Platform (α_P)
+    ├── Risk LP (α_R)  if C_R^final > 0
+    └── Platform (α_P or all of S)
+            └── optional sweep into C_P^pool
 ```
 
-Seniority must not be inverted: user payout precedes Risk LP profit share; profit share precedes discretionary withdrawal.
+Seniority must not be inverted: user payout precedes Risk LP profit share; profit share and fee sweep precede any discretionary platform withdrawal.
 
-A Risk LP’s Premium is the consideration for underwriting. It is paid in the trading period or at settlement per the auction fill terms. It is already deducted when computing $R_{\text{net}}$, so the same money is not both premium and user payout.
+A Risk LP’s Premium is the consideration for underwriting. It is already deducted when computing $R_{\mathrm{net}}$, so the same money is not both premium and user payout.
 
 ---
 
@@ -1622,7 +1721,7 @@ $$
 **Invariant 2 — Payout cap**
 
 $$
-\sum_j \text{ActualPayout}_j \le C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}
+\sum_j \text{ActualPayout}_j \le C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}+C_P^{\mathrm{alloc}}
 $$
 
 Trading-period $L_{\max}\le C_M+C_R$ is no longer required.
@@ -1671,12 +1770,13 @@ Trader ──buy interval──► Prediction Market ──revenue──► Vaul
               Risk LP locks collateral, receives Premium
                          │
                          ▼
-              Expiry x* → L = E(x*) → ρ → payout
+              Expiry x* → L = E(x*) → R_net → C_M → C_R → C_P → ρ → payout
 ```
 
-- No tail, or the layer is not breached: Risk LP receives Premium and may receive Profit Share
-- Layer breached but $C_{\max}\ge L$: Risk LP pays by $H_i$; users still receive full face value
-- $C_{\max}<L$: Risk LP pays the already-locked layers in full; users are haircut at $\rho$
+- No tail, or the layer is not breached: Risk LP receives Premium and may receive Profit Share; $C_P$ is not drawn
+- Layer breached but $C_{\max}\ge L$: Risk LP pays by leftover $H_i$; $C_P$ may finish the gap; users still receive full face value
+- $C_{\max}<L$: every locked source is drawn up to its cap; users are haircut at $\rho$
+- No $C_M$ and no $C_R$: the board still settles from trading, then $C_P$ if allocated
 
 A Risk LP’s core metric is not nominal APY, but risk-adjusted return:
 
@@ -1826,7 +1926,7 @@ Compressed mathematical objects:
 | User face value | $g_I(x)=1_{x\in I}$ |
 | Exposure | $E(x)=\sum_j q_j g_{I_j}(x)$ |
 | Settlement liability | $L=E(x^*)$ |
-| Payable | $C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}$ |
+| Payable | $C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}+C_P^{\mathrm{alloc}}$ |
 | Recovery rate | $\rho=\min(1,C_{\max}/L)$ |
 | User received | $\rho\cdot q_j\cdot 1_{I_j}(x^*)$ |
 | Risk layer | $H_i(L)=\min((L-A_i)^+,D_i)$ |
@@ -1848,11 +1948,13 @@ Implementation must follow the conventions below. There is no remaining fork of 
 | --- | --- |
 | Reject for insufficient funds? | Do not reject |
 | Settlement liability | $L=E(x^*)$, not $L_{\max}$ |
-| Haircut method | One global $\rho$; FIFO forbidden |
-| $C_{\max}$ | $R_{\text{net}}+C_M+C_R^{\text{final}}$ |
-| Trading fee | Each fill adds $\phi\cdot C_S(q)$ to the platform; not in the payout pool |
+| Claim unit | Fill size $q$ is **shares** on the bought interval. Payout is $\rho\cdot q$ if $x^*$ hits, else $0$ |
+| Haircut method | If $C_{\max}<L$, one global $\rho=C_{\max}/L$ on every hitting share; FIFO forbidden |
+| $C_{\max}$ | $R_{\text{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$; $C_M$, $C_R$, $C_P$ may each be $0$ |
+| Trading fee | $\phi\cdot C_S(q)$ to the platform at fill; not in this board’s pool; may be swept into $C_P$ for later boards |
 | Price of the same outcome | LMSR marginal price rises with fills; buying more makes it more expensive |
-| Surplus allocation | Split to Risk LP and the platform only when $\rho=1$, $\alpha_R+\alpha_P=1$ |
+| Surplus allocation | Only when $\rho=1$. If $C_R^{\mathrm{final}}>0$, $\alpha_R/\alpha_P$. If no risk capital entered, all $S$ to the platform |
+| Adjustment fund | One protocol pool $C_P^{\mathrm{pool}}$; boards only receive $C_P^{\mathrm{alloc}}$ at settlement. Not an unlimited guarantee; not baked into LMSR |
 | Fill price | Pure probability $p_I$; haircut is displayed, not quoted |
 | Low coverage | Strong warning; orders still allowed |
 | Resolution source | Always committee `submit_result` on-chain; no oracle writes $x^*$ |

@@ -1,11 +1,13 @@
 //! Market program: create by distribution family, `p0` once, L1 `buy_set`/`sell_set`.
 //! Listing names (CPI, election, BTC) are metadata, not instructions.
-//! Session / Delegate land later. Vault debit is not in this program.
+//! Session / Delegate land later. Buys debit the L1 vault pot.
 
 use anchor_lang::prelude::*;
 use math::lmsr::{lmsr_update, LmsrState};
 use math::prior;
 use math::Q64;
+use vault::cpi::accounts::CreditTrade;
+use vault::cpi::credit_trade;
 
 pub mod ids;
 pub mod mask;
@@ -255,12 +257,13 @@ fn open_board(
     require!(common.n as usize == p0.len(), MarketError::BadGrid);
     require!((2..=MAX_N).contains(&common.n), MarketError::BadGrid);
     require!(common.beta > 0, MarketError::BadBeta);
-    require!(common.c_m > 0, MarketError::BadCapital);
     require!(common.fee_bps <= 10_000, MarketError::BadFee);
     require!(now < common.close_ts, MarketError::BadClock);
     require!(common.close_ts <= common.risk_lock_ts, MarketError::BadClock);
     lock_roster(common)?;
     lock_layers(common)?;
+    require!(common.alpha_r_bps <= 10_000, MarketError::BadFee);
+    require!(common.platform != Pubkey::default(), MarketError::BadCapital);
 
     let market = &mut ctx.accounts.market;
     market.family = family as u8;
@@ -288,6 +291,9 @@ fn open_board(
     market.beta = common.beta;
     market.c_m = common.c_m;
     market.fees_accrued = 0;
+    market.trading_revenue = 0;
+    market.alpha_r_bps = common.alpha_r_bps;
+    market.platform = common.platform;
     market.l_max = 0;
     market.id_hash = common.id_hash;
     market.extra = extra;
@@ -356,12 +362,19 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, is_buy: bool) ->
     ctx.accounts.grid.exposure = state.exposure.iter().map(|q| q.raw()).collect();
 
     ctx.accounts.market.l_max = l_max;
+    let cost_usdc = (cost.raw().max(0) >> 64) as u64;
+    let fee_usdc = (fee.raw().max(0) >> 64) as u64;
     if is_buy {
         ctx.accounts.market.fees_accrued = ctx
             .accounts
             .market
             .fees_accrued
-            .saturating_add((fee.raw().max(0) >> 64) as u64);
+            .saturating_add(fee_usdc);
+        ctx.accounts.market.trading_revenue = ctx
+            .accounts
+            .market
+            .trading_revenue
+            .saturating_add(cost_usdc);
     }
 
     let pos = &mut ctx.accounts.position;
@@ -371,8 +384,23 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, is_buy: bool) ->
     pos.bump = ctx.bumps.position;
     if is_buy {
         pos.q = pos.q.checked_add(q_raw).ok_or(MarketError::Overflow)?;
+        pos.cost_paid = pos.cost_paid.saturating_add(cost_usdc);
     } else {
         pos.q = pos.q.checked_sub(q_raw).ok_or(MarketError::NoInventory)?;
+        pos.cost_paid = pos.cost_paid.saturating_sub(cost_usdc);
+    }
+
+    if is_buy && (cost_usdc > 0 || fee_usdc > 0) {
+        charge_vault(
+            ctx.accounts.vault_program.to_account_info(),
+            ctx.accounts.owner.to_account_info(),
+            ctx.accounts.market.to_account_info(),
+            ctx.accounts.board.to_account_info(),
+            ctx.accounts.user_vault.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            cost_usdc,
+            fee_usdc,
+        )?;
     }
 
     emit!(FillEvent {
@@ -449,9 +477,10 @@ fn apply_lmsr(
     grid.exposure = state.exposure.iter().map(|q| q.raw()).collect();
     market.l_max = state.l_max().raw();
     if charge_fee {
-        market.fees_accrued = market
-            .fees_accrued
-            .saturating_add((fee.raw().max(0) >> 64) as u64);
+        let fee_usdc = (fee.raw().max(0) >> 64) as u64;
+        let cost_usdc = (cost.raw().max(0) >> 64) as u64;
+        market.fees_accrued = market.fees_accrued.saturating_add(fee_usdc);
+        market.trading_revenue = market.trading_revenue.saturating_add(cost_usdc);
     }
     Ok((cost.raw(), fee.raw()))
 }
@@ -510,10 +539,26 @@ fn fill_skellam(
     pos.owner = owner_key;
     pos.set_hash = ids::skellam_ticket(kind, a, b);
     pos.bump = ctx.bumps.position;
+    let cost_usdc = (cost_sum.max(0) >> 64) as u64;
+    let fee_usdc = (fee_sum.max(0) >> 64) as u64;
     if is_buy {
         pos.q = pos.q.checked_add(q_raw).ok_or(MarketError::Overflow)?;
+        pos.cost_paid = pos.cost_paid.saturating_add(cost_usdc);
     } else {
         pos.q = pos.q.checked_sub(q_raw).ok_or(MarketError::NoInventory)?;
+        pos.cost_paid = pos.cost_paid.saturating_sub(cost_usdc);
+    }
+    if is_buy && (cost_usdc > 0 || fee_usdc > 0) {
+        charge_vault(
+            ctx.accounts.vault_program.to_account_info(),
+            ctx.accounts.owner.to_account_info(),
+            ctx.accounts.market.to_account_info(),
+            ctx.accounts.board.to_account_info(),
+            ctx.accounts.user_vault.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            cost_usdc,
+            fee_usdc,
+        )?;
     }
     emit!(FillEvent {
         market: market_key,
@@ -554,6 +599,32 @@ fn lock_roster(common: &CreateCommon) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn charge_vault<'info>(
+    vault_program: AccountInfo<'info>,
+    owner: AccountInfo<'info>,
+    market: AccountInfo<'info>,
+    board: AccountInfo<'info>,
+    user: AccountInfo<'info>,
+    system_program: AccountInfo<'info>,
+    cost: u64,
+    fee: u64,
+) -> Result<()> {
+    credit_trade(
+        CpiContext::new(
+            vault_program,
+            CreditTrade {
+                owner,
+                market_key: market,
+                board,
+                user,
+                system_program,
+            },
+        ),
+        cost,
+        fee,
+    )
 }
 
 fn lock_layers(common: &CreateCommon) -> Result<()> {
@@ -597,13 +668,13 @@ pub struct Trade<'info> {
         seeds = [MARKET_SEED, market.id_hash.as_ref()],
         bump = market.bump
     )]
-    pub market: Account<'info, Market>,
+    pub market: Box<Account<'info, Market>>,
     #[account(
         mut,
         seeds = [GRID_SEED, market.key().as_ref()],
         bump = grid.bump
     )]
-    pub grid: Account<'info, Grid>,
+    pub grid: Box<Account<'info, Grid>>,
     #[account(
         init_if_needed,
         payer = owner,
@@ -611,7 +682,23 @@ pub struct Trade<'info> {
         seeds = [POS_SEED, market.key().as_ref(), owner.key().as_ref(), ids::set_hash(&set_mask).as_ref()],
         bump
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
+    #[account(
+        mut,
+        seeds = [vault::BOARD_SEED, market.key().as_ref()],
+        bump = board.bump,
+        seeds::program = vault::ID
+    )]
+    pub board: Box<Account<'info, vault::Board>>,
+    #[account(
+        mut,
+        seeds = [vault::USER_SEED, owner.key().as_ref()],
+        bump = user_vault.bump,
+        seeds::program = vault::ID,
+        constraint = user_vault.owner == owner.key()
+    )]
+    pub user_vault: Box<Account<'info, vault::UserVault>>,
+    pub vault_program: Program<'info, vault::program::Vault>,
     pub system_program: Program<'info, System>,
 }
 
@@ -625,13 +712,13 @@ pub struct TradeSkellam<'info> {
         seeds = [MARKET_SEED, market.id_hash.as_ref()],
         bump = market.bump
     )]
-    pub market: Account<'info, Market>,
+    pub market: Box<Account<'info, Market>>,
     #[account(
         mut,
         seeds = [GRID_SEED, market.key().as_ref()],
         bump = grid.bump
     )]
-    pub grid: Account<'info, Grid>,
+    pub grid: Box<Account<'info, Grid>>,
     #[account(
         init_if_needed,
         payer = owner,
@@ -644,7 +731,23 @@ pub struct TradeSkellam<'info> {
         ],
         bump
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
+    #[account(
+        mut,
+        seeds = [vault::BOARD_SEED, market.key().as_ref()],
+        bump = board.bump,
+        seeds::program = vault::ID
+    )]
+    pub board: Box<Account<'info, vault::Board>>,
+    #[account(
+        mut,
+        seeds = [vault::USER_SEED, owner.key().as_ref()],
+        bump = user_vault.bump,
+        seeds::program = vault::ID,
+        constraint = user_vault.owner == owner.key()
+    )]
+    pub user_vault: Box<Account<'info, vault::UserVault>>,
+    pub vault_program: Program<'info, vault::program::Vault>,
     pub system_program: Program<'info, System>,
 }
 
@@ -761,6 +864,8 @@ mod tests {
             n_layers: 3,
             d_unit: 10_000,
             gamma_bps: 1_000,
+            alpha_r_bps: 7_000,
+            platform: a,
         };
         assert!(lock_roster(&common).is_ok());
         common.members = vec![b];
@@ -792,6 +897,8 @@ mod tests {
             n_layers: 3,
             d_unit: 10_000,
             gamma_bps: 1_000,
+            alpha_r_bps: 7_000,
+            platform: a,
         };
         assert!(lock_layers(&common).is_ok());
         common.n_layers = 0;

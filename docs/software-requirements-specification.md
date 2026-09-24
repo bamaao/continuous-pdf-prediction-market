@@ -5,7 +5,7 @@
 | Item | Content |
 | --- | --- |
 | Document | SRS |
-| Version | 1.1 |
+| Version | 1.2 |
 | Status | Baseline for implementation |
 | Audience | Engineers, QA, reviewers |
 | Normative sources | `product-specification.md` (product rules), `system-architecture.md`, `technical-architecture.md` |
@@ -60,7 +60,7 @@ See §10. Those items SHALL NOT be implemented and SHALL NOT be ticketed as “l
 | R-CMTE | Committee member / authorized reporter | `submit_result`, challenge, vote; attach evidence |
 | R-KEEP | Keeper | `close` / Commit / Undelegate, open report window, alerts |
 | R-OPS | Operator (read) | Dashboards, never Vault withdraw
-| R-PLAT | Platform | Receive $\phi$ fees and $\alpha_P$ surplus when $\rho=1$ |
+| R-PLAT | Platform | Receive $\phi$ fees and $S_P$; hold the adjustment **pool** $C_P^{\mathrm{pool}}$ and debit $C_P^{\mathrm{alloc}}$ at settlement |
 
 Identity is a Solana pubkey. There is no password account.
 
@@ -72,15 +72,19 @@ Identity is a Solana pubkey. There is no password account.
 | --- | --- |
 | $f(x)$ / $P$ | Market PDF or discrete mass; $\int f=1$ or $\sum P=1$ |
 | $\theta$ | LMSR state; buy $S$ of size $q$ does $\theta_k\leftarrow\theta_k+q$ on $k\in S$ |
-| $C_S(q)$ | LMSR cost of buying $q$ of set $S$ |
+| $q$ / shares | Fill size. Credits $q$ shares on set $S$. Settlement pays $\rho\cdot q$ USDC if $x^*$ hits |
+| $C_S(q)$ | LMSR cost of buying $q$ shares of set $S$ (not the share count) |
 | $\phi$ | Platform fee rate; fee $=\phi\cdot C_S(q)$ |
 | $E(x)$ | Face exposure at $x$ |
 | $L_{\max}$ | $\sup_x E(x)$ (display / auction signal only) |
 | $L$ | Settlement liability $E(x^*)$ |
-| $C_M$ | Market capital injected at listing |
-| $C_R^{\mathrm{final}}$ | Locked, drawable Risk LP capacity at settlement |
-| $R_{\mathrm{net}}$ | Trading proceeds net of fees and owed premia |
-| $C_{\max}$ | $R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$ |
+| $C_M$ | Optional market capital injected at listing; may be $0$ |
+| $C_R^{\mathrm{final}}$ | Locked, drawable Risk LP capacity at settlement; may be $0$ |
+| $C_P^{\mathrm{pool}}$ | Single protocol USDC vault for the platform adjustment fund |
+| $C_P^{\mathrm{board}}$ | Per-board cap on draws from the pool, locked at listing |
+| $C_P^{\mathrm{alloc}}$ | Debit from $C_P^{\mathrm{pool}}$ onto one board at settlement |
+| $R_{\mathrm{net}}$ | Trading proceeds; fees never entered; premia deducted |
+| $C_{\max}$ | $R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$ |
 | $\rho$ | $\min(1,C_{\max}/L)$; one value for every winner |
 | Receipted fill | ER (or L1) executed the ix, returned a signed receipt, and the receipt reached a replicated journal quorum |
 | Session | Time-limited, amount-limited delegated signer for `buy_set` / `sell_set` only |
@@ -128,7 +132,7 @@ Identity is a Solana pubkey. There is no password account.
 | FR-TRD-01 | `buy_set` / `sell_set` / `buy_skellam_set` / `sell_skellam_set` SHALL execute only on ER while the market is delegated and `now < close_ts`. L1 is allowed only before Delegate (tests). | Status + clock |
 | FR-TRD-02 | Fill price SHALL be the LMSR pure probability $p_S$ / $C_S(q)$. Coverage / $\hat\rho$ SHALL be displayed and SHALL NOT be baked into the quote. | Quote vs chain cost |
 | FR-TRD-03 | Buying the same $S$ again SHALL raise $p_S$ and $C_S$ (LMSR). | Monotonicity test |
-| FR-TRD-04 | Each fill SHALL charge fee $\phi\cdot C_S(q)$ to the platform. Fees SHALL NOT enter the payout pool or $R_{\mathrm{net}}$ as user capital. | Vault ledgers |
+| FR-TRD-04 | Each fill SHALL charge fee $\phi\cdot C_S(q)$ to the platform. Fees SHALL NOT enter this board’s $C_{\max}$ or $R_{\mathrm{net}}$. Fees MAY later be swept into $C_P$ for other boards. | Vault ledgers |
 | FR-TRD-05 | The system SHALL NOT reject a valid order because $L'_{\max}>C_M+C_R$. | Case $L_{\max}$ huge, balance OK |
 | FR-TRD-06 | The system SHALL reject only: insufficient USDC available, illegal set / $q$, market not TRADING, Session unauthorized, or nonce replay. | Negative tests |
 | FR-TRD-07 | After a fill the system SHALL update $\theta$, $E$, $L_{\max}$, and broadcast the new PDF. | Event + indexer |
@@ -161,11 +165,13 @@ Identity is a Solana pubkey. There is no password account.
 | FR-RES-04 | Football SHALL report a score pair; CPI the first official print; election the defined winner / TOP_N set / shares; price the `price_rule` scalar; binary YES or NO. | Type-specific accounts |
 | FR-RES-05 | `evidence_hash` SHALL be an opaque digest. The program SHALL NOT parse oracles, price feeds, or sports APIs. | No feed accounts on ixs |
 | FR-SET-01 | Settlement SHALL use $L=E(x^*)$, not $L_{\max}$. | Fixture $E\neq L_{\max}$ |
-| FR-SET-02 | $C_{\max}$ SHALL equal $R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$. | Ledger identity |
+| FR-SET-02 | $C_{\max}$ SHALL equal $R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. $C_M$, $C_R$, and $C_P^{\mathrm{alloc}}$ MAY each be $0$. | Ledger identity |
 | FR-SET-03 | $\rho=\min(1,C_{\max}/L)$ (or $\rho=1$ if $L=0$). Every winner SHALL receive $\rho\cdot q$. FIFO or entry-order haircuts SHALL NOT be used. | All winners same $\rho$ |
-| FR-SET-04 | Surplus $S=\max(R_{\mathrm{net}}+C_M-L,0)$ SHALL be paid only if $\rho=1$, split $\alpha_R+\alpha_P=1$. If $\rho<1$ then $S=0$. | Surplus cases |
+| FR-SET-04 | Surplus $S=\max(R_{\mathrm{net}}+C_M-L,0)$ SHALL be paid only if $\rho=1$. If $C_R^{\mathrm{final}}>0$, split $\alpha_R+\alpha_P=1$. If $C_R^{\mathrm{final}}=0$, all $S$ SHALL go to the platform. If $\rho<1$ then $S=0$. | Surplus cases |
 | FR-SET-05 | Dust from $\lfloor\rho q\rfloor$ SHALL go to reserves, not to a preferred user. | Remainder account |
-| FR-SET-06 | There SHALL be no `admin_withdraw`. Outflows are: user unused margin, settlement payout, LP draw, surplus split, VOID / failed-resolution refunds. | Instruction whitelist |
+| FR-SET-06 | There SHALL be no `admin_withdraw`. Outflows are: user unused margin, settlement payout, LP draw, $C_P$ allocation, surplus split, VOID / failed-resolution refunds. | Instruction whitelist |
+| FR-SET-07 | There SHALL be one platform adjustment fund pool $C_P^{\mathrm{pool}}$ (one USDC vault). Draw order SHALL be $R_{\mathrm{net}}$, then $C_M$, then $C_R$ by leftover shortfall, then $C_P^{\mathrm{alloc}}=\min((L-R_{\mathrm{net}}-C_M-C_R)^+,C_P^{\mathrm{board}},C_P^{\mathrm{pool}})$, which SHALL debit the pool. Boards SHALL NOT hold a private $C_P$ balance. The pool SHALL NOT be an unlimited guarantee. | Pool balance + two-board contention |
+| FR-SET-08 | If $L\le R_{\mathrm{net}}+C_M$, Risk LP $H$ SHALL be $0$ and $C_P$ SHALL NOT be drawn. | Own-funds fixture |
 
 ### 4.6 Durability and recovery
 

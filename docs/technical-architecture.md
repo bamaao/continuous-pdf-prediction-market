@@ -333,7 +333,7 @@ At settlement:
 
 $$
 L=E(x^*),\quad
-C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}},\quad
+C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}},\quad
 \rho=\min(1,C_{\max}/L)
 $$
 
@@ -365,12 +365,14 @@ $$
 ```text
 1. finalize(x*)
 2. L = E(x*)
-3. Draw R_net + C_M
-4. If short, draw H_i in ascending layer order
-5. ρ = min(1, C_max / L)
-6. Pay all winners ρ·q
-7. If ρ==1 then S = max(R_net+C_M-L, 0)
-8. Split S to LP and platform by α_R / α_P
+3. Draw R_net (trading). C_M is optional and may be 0
+4. If L ≤ R_net+C_M: H=0, do not draw C_P
+5. Else draw H_i on leftover shortfall only, then C_P^alloc if still short
+6. ρ = min(1, C_max / L)
+7. Pay all winners ρ·q
+8. If ρ==1 then S = max(R_net+C_M-L, 0)
+9. If C_R^final>0 split S by α_R / α_P; else S to the platform
+10. Fees stay in the platform pot; sweep into C_P is a later, explicit transfer
 ```
 
 ### 6.7 Finalization (not written automatically by an oracle)

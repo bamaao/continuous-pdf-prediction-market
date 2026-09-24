@@ -16,4 +16,4 @@ cluster = "Localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "echo \"vault unit tests: cargo test -p vault --lib\""
+test = "cargo test -p settle-flow -- --nocapture --test-threads=1"

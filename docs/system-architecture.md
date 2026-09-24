@@ -274,7 +274,8 @@ Funds safety is the floor of public trust. It does not rely on TEE, Postgres, or
 | --- | --- | --- |
 | User margin, trading proceeds | L1 `vault` PDA, Circle USDC Token Account **only** | Into ops hot wallets, into ER withdrawable accounts, accept SOL or other coins, in-protocol FX |
 | Risk LP collateral | This market’s L1 Risk Vault (same USDC mint) | Count $C_R$ before lock; fund collateral with SOL or another mint |
-| Fees | Booked at trade time; swept to the platform PDA periodically or at close | Mix with the payout pool |
+| Fees | Booked at trade time; swept to the platform PDA. May later move into $C_P$ | Mix a fill’s fee into that same board’s $C_{\max}$ |
+| Platform adjustment fund **pool** $C_P^{\mathrm{pool}}$ | One protocol L1 vault PDA (Circle USDC). Boards only receive $C_P^{\mathrm{alloc}}$ at settlement | Per-board $C_P$ wallets; unlimited guarantee; `admin_withdraw`; bake into LMSR |
 | Unsettled surplus | Stay in this market’s Vault; split by $\alpha$ after `settle` | Arbitrary ops withdrawal |
 
 Users first `vault.deposit`. ER only mirrors **available balance**; halt and L1 netting follow. An ER crash cannot make money “disappear”: L1 custody remains. In-play $\theta$ must not be discarded on the theory that “if it was not Committed it never happened” — $\theta$ is restored by replaying the trade log (see section 10.5).
@@ -282,7 +283,7 @@ Users first `vault.deposit`. ER only mirrors **available balance**; halt and L1 
 ### 9.2 Authority
 
 - Program upgrades: multisig + timelock (e.g. 48h); pause withdrawals during the `vault` upgrade window  
-- There is no `admin_withdraw`. The only outflows are: user withdrawal of unused margin, settlement payout, LP draw, surplus split, VOID refund  
+- There is no `admin_withdraw`. The only outflows are: user withdrawal of unused margin, settlement payout, LP draw, $C_P$ allocation, surplus split, VOID refund  
 - Keeper / committee keys can only send allowed instructions; they cannot touch Token account owners  
 - Session Key: per-market allowance, expiry, revocable; if lost, loss is capped at the authorized allowance  
 - Same invariant tests before and after upgrades: $\sum$ amounts paid $\le C_{\max}$, Vault token balance = sum of the books  

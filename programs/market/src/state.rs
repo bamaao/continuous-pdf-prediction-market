@@ -56,6 +56,9 @@ pub struct Market {
     pub beta: i128,
     pub c_m: u64,
     pub fees_accrued: u64,
+    pub trading_revenue: u64,
+    pub alpha_r_bps: u16,
+    pub platform: Pubkey,
     pub l_max: i128,
     pub id_hash: [u8; 32],
     pub extra: FamilyExtra,
@@ -113,11 +116,13 @@ pub struct Position {
     pub owner: Pubkey,
     pub set_hash: [u8; 32],
     pub q: i128,
+    pub cost_paid: u64,
+    pub claimed: bool,
     pub bump: u8,
 }
 
 impl Position {
-    pub const SIZE: usize = 8 + 32 + 32 + 32 + 16 + 1;
+    pub const SIZE: usize = 8 + 32 + 32 + 32 + 16 + 8 + 1 + 1;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -138,6 +143,8 @@ pub struct CreateCommon {
     pub n_layers: u8,
     pub d_unit: u64,
     pub gamma_bps: u16,
+    pub alpha_r_bps: u16,
+    pub platform: Pubkey,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]

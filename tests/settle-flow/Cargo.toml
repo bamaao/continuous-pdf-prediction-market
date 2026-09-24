@@ -1,0 +1,20 @@
+[package]
+name = "settle-flow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Anchor local-validator flow: deposit → CPI market → buy → submit_result → settle ρ<1"
+publish = false
+
+[dev-dependencies]
+anchor-lang = "0.32.1"
+anchor-spl = "0.32.1"
+market = { path = "../../programs/market", default-features = false, features = ["no-entrypoint"] }
+math = { path = "../../crates/math" }
+resolution = { path = "../../programs/resolution", default-features = false, features = ["no-entrypoint"] }
+solana-program-test = "2.2"
+solana-sdk = "2.2"
+spl-associated-token-account = "6"
+spl-token = "7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+vault = { path = "../../programs/vault", default-features = false, features = ["no-entrypoint"] }

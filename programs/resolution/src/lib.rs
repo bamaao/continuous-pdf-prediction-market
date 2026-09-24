@@ -2,7 +2,7 @@
 //! Never Delegates. Session is not an authority. No oracle writes x*.
 
 use anchor_lang::prelude::*;
-use market::state::Market;
+use market::state::{Market, Status};
 
 pub mod machine;
 
@@ -134,7 +134,8 @@ pub mod resolution {
         Ok(())
     }
 
-    pub fn finalize(ctx: Context<MutRecord>) -> Result<()> {
+    pub fn finalize(ctx: Context<Finalize>) -> Result<()> {
+        require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
         let rec = &mut ctx.accounts.record;
         let now = Clock::get()?.unix_timestamp;
         let snap = snapshot(rec, now);
@@ -155,11 +156,13 @@ pub mod resolution {
                 rec.phase = Phase::Finalized as u8;
                 rec.final_outcome = rec.proposed;
                 rec.refunds_due = false;
+                ctx.accounts.market.status = Status::Settled as u8;
             }
             Effect::FinalizeChallenge => {
                 rec.phase = Phase::Finalized as u8;
                 rec.final_outcome = rec.challenged;
                 rec.refunds_due = false;
+                ctx.accounts.market.status = Status::Settled as u8;
             }
             Effect::ExtendOnce => {
                 rec.phase = Phase::Open as u8;
@@ -176,19 +179,22 @@ pub mod resolution {
             Effect::Fail => {
                 rec.phase = Phase::Failed as u8;
                 rec.refunds_due = true;
+                ctx.accounts.market.status = Status::Void as u8;
             }
             _ => return err!(ResError::BadPhase),
         }
         Ok(())
     }
 
-    pub fn void_resolution(ctx: Context<MutRecord>) -> Result<()> {
+    pub fn void_resolution(ctx: Context<Finalize>) -> Result<()> {
+        require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
         let rec = &mut ctx.accounts.record;
         require!(is_member(rec, &ctx.accounts.reporter.key()), ResError::NotReporter);
         let now = Clock::get()?.unix_timestamp;
         apply(&snapshot(rec, now), Event::Void).map_err(|_| error!(ResError::BadPhase))?;
         rec.phase = Phase::Voided as u8;
         rec.refunds_due = true;
+        ctx.accounts.market.status = Status::Void as u8;
         Ok(())
     }
 }
@@ -346,6 +352,15 @@ pub struct MutRecord<'info> {
     pub reporter: Signer<'info>,
     #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
     pub record: Account<'info, Resolution>,
+}
+
+#[derive(Accounts)]
+pub struct Finalize<'info> {
+    pub reporter: Signer<'info>,
+    #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
+    pub record: Account<'info, Resolution>,
+    #[account(mut, constraint = market.key() == record.market @ ResError::CommitteeMismatch)]
+    pub market: Account<'info, Market>,
 }
 
 #[derive(Accounts)]
