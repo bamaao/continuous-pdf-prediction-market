@@ -4,9 +4,9 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.3 |
+| Version | 1.11 |
 | Status | Product specification (features are written as fully delivered; no MVP / later-phase split) |
-| Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(c)$ at $c=\mathrm{cell}(x^*)$ (product §8.1). Do not mix implied PDF $p_k$, exposure $E$, and ticket face. If $L>C_{\max}$, one global pro-rata $\rho$ on **face** (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. Trading is the primary payout source; $C_M$ and $C_R$ are optional. Fees go to the platform and do not enter this board’s $C_{\max}$; they may be swept into $C_P$. Price is pure probability; coverage is displayed only. Markets are created by **distribution family**. Football is Skellam. $x^*$ only via `submit_result`. |
+| Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(c)$ at $c=\mathrm{cell}(x^*)$ (product §8.1). **Settlement gate:** write $\rho=\min(1,C_{\max}/L)$ *before* any user payout — $\rho=1$ if $C_{\max}\ge L$, else the actual ratio $C_{\max}/L$ (SRS FR-SET-03 / FR-SET-11). Do not mix implied PDF $p_k$, exposure $E$, and ticket face. One global pro-rata $\rho$ on **face** (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. Trading is the primary payout source; $C_R$ is optional. Fees go to the platform fee ledger and do not enter this prediction market’s $C_{\max}$ or $C_P$; the platform may claim them at any time. At `close_ts` both prediction fills and the risk auction stop (`risk_lock_ts \le close_ts`). Price is pure probability; coverage is displayed only. Markets are created by **distribution family**. Football is Skellam. $x^*$ only via `submit_result`. |
 
 ---
 
@@ -19,7 +19,7 @@ Unlike traditional YES / NO prediction markets, it trades the full probability d
 - BTC / ETH expiry or close price
 - CPI, interest rates, FX, commodity prices
 - Other continuous economic indicators
-- Football and other score-type events: one board per match, see section 4.6
+- Football and other score-type events: one prediction market per match, see section 4.6
 - Macro prints such as CPI, elections, a same-day BTC price, whether an event occurs by a deadline: see sections 4.7–4.11
 
 The market maintains a probability density curve $f(x)$ that always satisfies:
@@ -61,22 +61,42 @@ $$
 
 The core innovation: turn the tail liability produced by the prediction market into a financial object that can be priced, auctioned, layered, and underwritten.
 
-### 1.1 End-to-End Business Flow
+### 1.1 Locked business rules
 
-A board’s lifecycle follows the path below. During the trading period the risk-capital auction runs in parallel. After the cutoff, the distribution is no longer changed; the board only waits for the outcome and pays out.
+These are protocol rules, not UI hints. Programs, Quote, and the desk SHALL follow them.
+
+| Rule | What happens |
+| --- | --- |
+| After trading close, no fills | **Every** prediction market (all five families). When `now ≥ close_ts`, `buy_set` / `sell_set` / `buy_skellam_set` / `sell_skellam_set` SHALL NOT execute. Kickoff, live score, committee report, and Bernoulli early YES finalize SHALL NOT reopen trading. The trade ticket SHALL disable buy / sell. Compose SHALL refuse those ops (`403`) when the indexed `close_ts` has elapsed. The chain SHALL reject with `Closed`. |
+| Trading close stops the risk auction | When `now ≥ close_ts`, prediction fills **and** new risk-auction quotes / fills SHALL stop. Already-locked $C_R$ stays locked until settlement or VOID. `risk_lock_ts` MAY be earlier than `close_ts` (freeze capital while trading continues). `risk_lock_ts` SHALL NOT be after `close_ts`. Default at listing: `risk_lock_ts = close_ts`. |
+| Fees never enter $C_P$ | Listing locks `fee_bps` and **when** the fee is taken. **At fill** (default): buy pays $C_S+\phi C_S$; $\phi C_S$ hits the platform fee ledger immediately. **At claim**: buy pays only $C_S$; when a winner claims, $\phi$ of that payout is taken (miss / VOID: $0$). The platform MAY `claim_fees` into its UserVault **at any time**. Fees never enter $C_{\max}$ or $C_P^{\mathrm{pool}}$. |
+| $C_P$ is a capped tap | One protocol pool $C_P^{\mathrm{pool}}$. Listing only locks a tap cap $C_P^{\mathrm{board}}$ (MAY be $0$). At settlement, if $L>R_{\mathrm{net}}$, draw $C_P^{\mathrm{alloc}}=\min((L-R_{\mathrm{net}}-C_R)^+,C_P^{\mathrm{board}},C_P^{\mathrm{pool}})$. If $L\le R_{\mathrm{net}}$, do not draw $C_P$. The pool is not an unlimited guarantee. |
+| Soft solvency | Do not reject fills because $L_{\max}$ exceeds capital. After $x^*$ is final, write $\rho=\min(1,C_{\max}/L)$ **before** any user payout. One $\rho$ for every winner; no FIFO. |
+| Surplus vs fees | Surplus $S$ exists only when $\rho=1$. $S_P$ is a residual claim (`pay_surplus_platform`), not a fee. Topping up $C_P$ is an explicit `fund_pool`, never an automatic fee transfer. |
+| Board comments after the market is live | Comments exist only on an **already indexed** market (`/m/[id]`). `/create` writes the public card (title / tags / event / description) and SHALL NOT collect comments — there is no live market yet. A connected wallet posts as `author` pubkey (same grade as listings; SIWS is not required). The thread is a flat off-chain catalog (`market_comment`): not on-chain, not nested, not $C_{\max}$, not $C_P$, not the fee ledger. Unknown / unindexed market: `404`. |
+| The created object is a prediction market | Users create a **prediction market** (预测市场). Product copy SHALL NOT say 盘, 开盘, 关盘, or “board” as the product noun. One football match has one prediction market — 1X2 / handicap / totals are contracts on that market, not separate 盘. On-chain leftover names (`Board`, `board_phase`) are implementation only. |
+| Anyone logged in may apply; review **opens trading** | After SIWS, any wallet MAY submit a **market application**. That is not live. `close_ts` is an **absolute** unix time locked at submit (whistle / first print). Solana `Clock` only reads *now* at the create instruction — it cannot learn the event time. If `now ≥ close_ts` at approve, create SHALL fail; the reviewer rejects or the applicant resubmits. The reviewer wallet signs `create_*` (pays rent). **Open the prediction market** (开通预测市场) means the prediction market exists on-chain, the lobby shows it, and traders MAY fill. **Open the risk auction** (开放风险拍卖) means Risk LPs MAY quote published layers for payout coverage. Both start together on approve. Do not call the created object 盘 / “board”, and do not say “listing” or “open the risk book” in product copy. Fees $\phi$ accrue on that prediction market’s fee ledger; `claim_fees` goes to the protocol `platform` (`PLATFORM_PUBKEY`). Compose `create_*` and lobby ingest SHALL require an approved application — a chain account that skipped review SHALL NOT appear as a live market. Rejected applications never become markets. |
+| Duplicate listings are refused | Two applications SHALL NOT cover the same event. Duplicate key = distribution family + normalized title + trading event (trim / case-fold ASCII). If another row is `PENDING_REVIEW` or `OPEN`, submit returns `409`. The reviewer MAY reject an application as duplicate. |
+| Geo-IP region block | A listing MAY lock blocked countries / regions (ISO 3166-1 alpha-2, optional subdivision). Enforcement is the client IP via GeoIP on lobby, info, quote, compose, trade, auction, and comments. A blocked visitor SHALL NOT see the prediction market as tradable (`403` / hidden). The reviewer MAY add or confirm the block list at review. This is access policy, not settlement math. |
+
+SRS: FR-TRD-01, FR-TRD-04, FR-RSK-05, FR-HAL-01, FR-SET-06–08, FR-UI-32, FR-UI-37, FR-UI-42–45.
+
+### 1.2 End-to-End Business Flow
+
+A prediction market’s lifecycle follows the path below. During the trading period the risk-capital auction runs in parallel. At `close_ts` both prediction fills and the risk auction stop; the prediction market then only waits for the outcome and pays out.
 
 ```text
 ① Choose the distribution family
-② Initialize parameters and create the market (C_M may be 0; open the risk auction book)
+② Initialize parameters and **apply** (SIWS), locking absolute close_ts. Reviewer approves and **opens trading** (create_*). The risk auction opens at the same time.
 ③ Trade (LMSR: buying the same outcome makes it more expensive + fees; LPs may quote at the same time)
-④ At close_ts, cut off orders and freeze f / P
+④ At close_ts, cut off prediction fills **and** the risk auction; freeze f / P
 ⑤ Wait for the event
 ⑥ The committee (or an authorized reporter) writes the outcome on-chain. No oracle writes $x^*$.
-⑦ Payout (commercial stack: trading first, then optional C_M, optional C_R, then optional C_P)
-      ├─ Trading + C_M cover L          → full payout; risk capital not drawn
+⑦ Payout (commercial stack: trading first, then optional C_R, then optional C_P)
+      ├─ Trading covers L               → full payout; risk capital not drawn
       ├─ Those own funds fall short, but L ≤ C_max → draw Risk LP, then C_P if still short; still full payout
       └─ L > C_max                      → pay all winners at the same ratio ρ = C_max / L
-⑧ Only on full payout: surplus is split. If risk capital filled this board, α_R / α_P; if no risk capital entered, residual goes to the platform (and may be swept into C_P).
+⑧ Only on full payout: surplus is split. If risk capital filled this prediction market, α_R / α_P; if no risk capital entered, residual goes to the platform. Fees stay on the fee ledger until claim_fees — they never enter C_P.
 ```
 
 **① Choose the probability-distribution type.** Identify the underlying first, then lock the family. It cannot be swapped later.
@@ -89,42 +109,101 @@ A board’s lifecycle follows the path below. During the trading period the risk
 | Dirichlet | `create_dirichlet_market` | Election winner, `TOP_N`, vote share (`layout`) |
 | Bernoulli | `create_bernoulli_market` | Deadline YES / NO |
 
-**② Initialize and create the market.** Write prior parameters (e.g. $\lambda_H,\lambda_A$ or $\mu,\sigma$ or $\alpha_i$), the grid or atoms, $\beta$, $C_M$, the resolution source, and `close_ts`. At this point $\theta=0$, so board prices equal $f_0$ / $P_0$. Creating the market also opens that board’s risk auction book.
+**② Initialize and open trading.** The applicant writes prior parameters (e.g. $\lambda_H,\lambda_A$ or $\mu,\sigma$ or $\alpha_i$), the grid or atoms, $\beta$, the resolution source, and an **absolute** `close_ts`. After review approve, the reviewer signs `create_*` — that is **open the prediction market** (开通预测市场): it is live, the lobby shows it, traders MAY fill. The same step **opens the risk auction** (开放风险拍卖): Risk LPs MAY quote published layers. Fees stay on the prediction market until the protocol platform claims them. At this point $\theta=0$, so prices equal $f_0$ / $P_0$. Status is `OPEN` once the market key is attached.
 
 **③ Trade.** The user buys some outcome set $S$ (home win, exactly 1 goal, CPI in a bin, YES…). Each fill pays two amounts:
 
-1. **Contract cost** $C_S(q)$: enters this board’s Vault, used for expiry payout
+1. **Contract cost** $C_S(q)$: enters this prediction market’s Vault, used for expiry payout
 2. **Fee** $\phi\cdot C_S(q)$: goes to the platform immediately and does not enter the payout pool
 
 The same outcome gets more expensive the more it is bought. Under LMSR, if at open $P(S)=0.2$, a first tiny order has a marginal price of about $0.2$; after it fills, that stretch of density is pulled up, and the next order for the same outcome has a marginal price strictly above $0.2$. Further buys keep lifting it. This is not a queue markup; the curve is rewritten by the fill itself. Selling (reducing a position) presses that stretch down and the price falls back.
 
 During the trading period $L_{\max}$ may exceed available funds. **Orders are not rejected, and user positions are not force-liquidated.** Coverage is display-only. Risk LPs quote published layers and lock collateral in the same window.
 
-**④ Cutoff.** When `now ≥ close_ts`, prediction-side fills stop and the distribution is frozen. Whether the risk side still accepts collateral depends on `risk_lock_ts`.
+**④ Cutoff.** When `now ≥ close_ts`, prediction-side fills stop, the distribution is frozen, **and the risk-capital auction stops**. New quotes and auction fills SHALL be rejected. Already-locked $C_R$ stays until settlement or VOID. `risk_lock_ts` MAY close the auction earlier; it SHALL NOT be after `close_ts`.
 
 **⑤ Wait for the event.** Football waits for full time; CPI waits for the official print; a price board waits until `observe_ts`; a binary event waits until the deadline or an early occurrence.
 
 **⑥ Submit the result.** The chain does not grow $x^*$ by itself. A `submit_result` transaction must write the settlement value into the market account. The reporter is a committee member or an authorized bot. The payload is a score, a published print, a winner, a price, or YES/NO — not “which line won”. An optional `evidence_hash` may be stored; the program does not parse it. No payout before finalization.
 
-**⑦ Payout.** This protocol has no futures-style liquidation. Settlement only compares face-value liability $L=E(x^*)$ with payable capital $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. $R_{\mathrm{net}}$ is trading revenue; fees never entered it. $C_M$ and $C_R$ may both be zero; then the board pays from trading, plus any allocated platform adjustment $C_P$. The commercial stack is section 9.
+**⑦ Settlement gate — compute $\rho$, then pay.** This protocol has no futures-style liquidation. After $x^*$ is final, settlement **first** locks $L=E(c)$ and $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$, **then** writes one board-wide recovery rate
+
+$$
+\rho=\min\bigl(1,C_{\max}/L\bigr)
+$$
+
+($\rho=1$ if $L=0$). **No** `vault.payout` / claim SHALL run until that $\rho$ is written. Two cases only:
+
+| Funds vs liability | $\rho$ | What winners receive |
+| --- | --- | --- |
+| $C_{\max}\ge L$ (enough) | $\rho=1$ | Full face $\lfloor\mathrm{face}\rfloor$ USDC |
+| $C_{\max}<L$ (short) | $\rho=C_{\max}/L$ | Same actual ratio on every winning ticket: $\lfloor\rho\cdot\mathrm{face}\rfloor$ |
+
+$R_{\mathrm{net}}$ is trading revenue; fees never entered it. $C_R$ may be zero; then the prediction market pays from trading, plus any allocated platform adjustment $C_P$. How the pot is drawn when $\rho=1$ still uses the stack below. The commercial stack is section 9. VOID / `RESOLUTION_FAILED` **do not** compute $\rho$ — they refund `cost_paid`.
 
 | Informal wording | Exact condition | What the user receives |
 | --- | --- | --- |
-| Own funds cover (no risk draw) | $L \le R_{\mathrm{net}}+C_M$ | $\rho=1$; $H_i=0$; $C_P$ not drawn |
-| Draw risk / adjustment, still full | $R_{\mathrm{net}}+C_M < L \le C_{\max}$ | Still $\rho=1$; draw Risk LP by leftover shortfall, then $C_P$ if needed |
+| Own funds cover (no risk draw) | $L \le R_{\mathrm{net}}$ | $\rho=1$; $H_i=0$; $C_P$ not drawn |
+| Draw risk / adjustment, still full | $R_{\mathrm{net}} < L \le C_{\max}$ | Still $\rho=1$; draw Risk LP by leftover shortfall, then $C_P$ if needed |
 | Exceeds maximum payable | $L > C_{\max}$ | $\rho=C_{\max}/L$; all winners at the same ratio; first-come-first-served is forbidden |
 
-Only the third case is a haircut. How $\rho$ is computed is in section 8.3: the denominator is the sum of face values that hit the realized outcome, not trading-period $L_{\max}$.
+Only the third case is a haircut. How $\rho$ is computed is in section 8.1.8 / 8.3: the denominator is the sum of face values that hit the realized outcome, not trading-period $L_{\max}$. SRS: FR-SET-03, FR-SET-11.
 
 **⑧ Surplus allocation.** Surplus exists only when $\rho=1$ (users have already been paid at face value):
 
 $$
-S=\max(R_{\mathrm{net}}+C_M-L,0)
+S=\max(R_{\mathrm{net}}-L,0)
 $$
 
-If this board has filled risk capital ($C_R^{\mathrm{final}}>0$), $S$ is split at the listing lock: $\alpha_R S$ to those Risk LPs (then by each LP’s $\alpha_i$), $\alpha_P S$ to the platform, $\alpha_R+\alpha_P=1$. If no risk capital entered, $S_R=0$ and $S$ goes to the platform. When $\rho<1$, $S=0$. The platform may sweep $\phi$ and $S_P$ into $C_P$; that sweep is not a user or LP claim.
+If this prediction market has filled risk capital ($C_R^{\mathrm{final}}>0$), $S$ is split at the listing lock: $\alpha_R S$ to those Risk LPs (then by each LP’s $\alpha_i$), $\alpha_P S$ to the platform, $\alpha_R+\alpha_P=1$. If no risk capital entered, $S_R=0$ and $S$ goes to the platform. When $\rho<1$, $S=0$. $\phi$ stays on the platform fee ledger until `claim_fees`; it SHALL NOT enter $C_P$. $S_P$ is a separate surplus claim. The platform MAY later `fund_pool` from its own vault; that is a top-up, not a fee sweep.
 
-### 1.2 Business Flow Diagram
+### 1.2.1 核心业务规则：赔付比率与剩余分发（锁定）
+
+本节是商业规则，不是实现备忘。Vault `begin_settle` / `payout` / `draw_lp` / `pay_surplus_*` / `claim_fees`、Quote、UI 公开结果卡，都必须按这里执行。数学内核：`crates/math` 的 `recovery_rate`、`surplus`、`surplus_parts`、`payout_floor`、`c_p_alloc`、`layer_loss`。
+
+**委员会提交 \(x^*\) 并不计算 \(\rho\)。** `submit_result` 只写入拟议结果。挑战期结束、`finalize` 锁定 \(x^*\) 之后，`begin_settle` 才一次性锁死 \(L\)、\(C_{\max}\)、\(\rho\) 和剩余。没写出 \(\rho\) 之前，任何赢家领取都必须拒绝。交易期展示的 \(\hat\rho\) / 覆盖率 **不是** 这笔结算 \(\rho\)。VOID / `RESOLUTION_FAILED` **不算** \(\rho\)，退回买入时付的本金 `cost_paid`。
+
+**先锁责任和资金，再写一个全场 \(\rho\)。**
+
+| 符号 | 定义 | 不是 |
+| --- | --- | --- |
+| \(c=\mathrm{cell}(x^*)\) | 委员会锁定的实现结果落到的那个原子 | 交易期最热的点 |
+| \(L=E(c)\) | 压在 \(c\) 上的票面合计（`grid.exposure[c]`） | \(L_{\max}\)、\(\sum_k E_k\)、买价 |
+| \(R_{\mathrm{net}}\) | 成交收入 − 应付风险保费 | 手续费（手续费另本账） |
+| \(C_R^{\mathrm{final}}\) | 风险拍卖里已锁定、结算时可抽的资金；可为 \(0\) | 未成交的报价承诺 |
+| \(C_P^{\mathrm{alloc}}\) | 仅当 \(L>R_{\mathrm{net}}\) 时：\(\min((L-R_{\mathrm{net}}-C_R)^+,\,C_P^{\mathrm{board}},\,C_P^{\mathrm{pool}})\)；否则 \(0\) | 无限担保、手续费自动转入 |
+| \(C_{\max}\) | \(R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}\) | 含 \(C_M\)（已废除） |
+
+$$
+\rho=\min\bigl(1,\,C_{\max}/L\bigr)
+\qquad(L=0\Rightarrow\rho=1)
+$$
+
+| 资金对责任 | \(\rho\) | 赢家领取 | 未中 |
+| --- | --- | --- | --- |
+| \(C_{\max}\ge L\)（够） | \(1\) | 面值 \(\lfloor\mathrm{face}\rfloor\) USDC | \(0\) |
+| \(C_{\max}<L\)（不够） | \(C_{\max}/L\) | **同一个** \(\rho\)：\(\lfloor\rho\cdot\mathrm{face}\rfloor\)，禁止先到先得 | \(0\) |
+
+普通合约 \(\mathrm{face}=q\)（一股命中面值 1 USDC）。足球四分让球按两条半线：全中 \(q\)、中一条 \(q/2\)。地板抹掉的尘埃进准备金，不补给某个人。
+
+**满付时钱从哪出（补缺口，不是分余利）：** 先用 \(R_{\mathrm{net}}\)。若 \(L\le R_{\mathrm{net}}\)，风险层损失 \(H=0\)，不抽 \(C_P\)。若仍缺，按层抽 \(H=\min((L-A)^+,D_i)\)，且不超过尚未补上的缺口。再不够才抽 \(C_P^{\mathrm{alloc}}\)。
+
+**赔付后还有剩，怎么分。** 剩余 **只在 \(\rho=1\)**（赢家已按面值满付）时存在：
+
+$$
+S=\max(R_{\mathrm{net}}-L,\,0)
+$$
+
+\(\rho<1\) 时 \(S=0\)，没有“多余”可分。
+
+| 条件 | \(S_R\)（风险资金方） | \(S_P\)（平台） |
+| --- | --- | --- |
+| \(C_R^{\mathrm{final}}=0\)（没有风险资金进来） | \(0\) | 全部 \(S\) |
+| \(C_R^{\mathrm{final}}>0\) | \(\alpha_R S\) | \(\alpha_P S=(1-\alpha_R)S\) |
+
+开通预测市场时锁定 \(\alpha_R\)（`alpha_r_bps`）。缺省 **7000 bps：70% 给风险资金方、30% 给平台**。资金方那一份再按各笔成交报价的权重 \(w_i=\) `profit_share_bps` \(\times\) 成交量摊，指令 `pay_surplus_lp`；平台一份 `pay_surplus_platform`。手续费 \(\phi\) 走 `claim_fees`，**不进** \(C_{\max}\)，也不进 \(S\)。平台日后 `fund_pool` 是自己往调节池注资，不是把手续费扫进 \(C_P\)。
+
+### 1.3 Business Flow Diagram
 
 The full figure is `business-flow.png` (same folder).
 
@@ -133,7 +212,7 @@ The full figure is `business-flow.png` (same folder).
 ```mermaid
 flowchart TB
   subgraph P1["① Create the market"]
-    A1[Choose event type and lock the distribution family] --> A2[Initialize parameters / β / grid<br/>inject C_M, open the auction book]
+    A1[Choose event type and lock the distribution family] --> A2[Initialize parameters / β / grid<br/>open the auction book]
     A2 --> A3[Delegate to ER<br/>enter TRADING]
     A3 --> A4[Open price = prior θ = 0]
   end
@@ -154,7 +233,7 @@ flowchart TB
   A4 --> R1
 
   subgraph P3["③ Cutoff and freeze"]
-    C1[close_ts stops prediction trading and freezes the distribution<br/>risk_lock_ts freezes C_R, write back to L1]
+    C1[close_ts stops prediction trading AND the risk auction<br/>already-locked C_R freezes; write back to L1]
   end
 
   T3 --> C1
@@ -173,7 +252,7 @@ flowchart TB
 
   subgraph P5["⑤ Settlement and payout"]
     E1[Compute L = E x* and C_max] --> E2{Compare L with funds}
-    E2 -->|L ≤ R_net + C_M| E3[Full payout ρ=1<br/>H=0, C_P not drawn, compute S]
+    E2 -->|L ≤ R_net| E3[Full payout ρ=1<br/>H=0, C_P not drawn, compute S]
     E2 -->|Need C_R and/or C_P, L ≤ C_max| E4[Draw Risk LP then C_P<br/>still full ρ=1]
     E2 -->|L > C_max| E5[ρ = C_max / L<br/>same ratio, S = 0]
     E3 --> E6[α_R to Risk LP<br/>α_P to the platform]
@@ -193,7 +272,7 @@ flowchart TB
 Traditional prediction markets have two structural defects:
 
 1. **Insufficient expressiveness.** YES / NO can trade only one event. They cannot trade “which interval the price will fall into, and how wide the distribution is”.
-2. **Scale is capped by own funds.** If the protocol requires $L_{\max}\le C_M$, the market cannot grow. If it allows naked shorting and then looks for a rescue after liquidation, user payout has no bound agreed in advance.
+2. **Scale is capped by own funds.** If the protocol requires $L_{\max}$ to stay inside a creator reserve, the market cannot grow. If it allows naked shorting and then looks for a rescue after liquidation, user payout has no bound agreed in advance.
 
 Goals of this protocol:
 
@@ -258,9 +337,9 @@ The person who **writes the final outcome $x^*$ as an on-chain transaction**. Wi
 
 The protocol operator of the fee pot, surplus share $S_P$, and the **platform adjustment fund pool** $C_P^{\mathrm{pool}}$.
 
-- Receives $\phi\cdot C_S(q)$ on every fill. That money is platform income. It does **not** enter this board’s $C_{\max}$.
+- Receives $\phi\cdot C_S(q)$ on every fill onto the **platform fee ledger**. That money is platform income. It does **not** enter this board’s $C_{\max}$ or $C_P^{\mathrm{pool}}$. The platform MAY `claim_fees` into its UserVault at any time.
 - Receives $S_P$ only when $\rho=1$.
-- Sweeps $\phi$ and $S_P$ into **one** protocol-level pool $C_P^{\mathrm{pool}}$. Boards do not hold their own $C_P$ balance.
+- Holds **one** protocol-level pool $C_P^{\mathrm{pool}}$ funded by `fund_pool` (and optional later top-ups). Fees SHALL NOT be swept into the pool. Boards do not hold their own $C_P$ balance.
 - A short board may draw $C_P^{\mathrm{alloc}}$ from that pool at settlement, never more than the pool and never more than the board cap.
 - The pool is a capped commercial reserve, not an unlimited guarantee and not a second LMSR price.
 
@@ -356,9 +435,9 @@ Skellam is therefore not a fourth unrelated prior. It is the **generative bridge
 
 Independent Poisson underestimates draws and ignores attack–defense correlation. When needed, apply a Dixon–Coles low-score correction, or a bivariate Poisson with covariance; the margin can still keep Skellam form.
 
-#### One match, one board
+#### One match, one prediction market
 
-The product shape is: **one football match has exactly one board**. Everyone on that board buys different contracts — home / draw / away, home handicap, totals, correct score. It looks like several prediction markets, but underneath it is the same joint score distribution $P(X=i,Y=j)$, the same pot of funds, the same Risk LPs, and the same settlement score.
+The product shape is: **one football match has exactly one prediction market**. Everyone on that market buys different contracts — home / draw / away, home handicap, totals, correct score. It looks like several questions, but underneath it is the same joint score distribution $P(X=i,Y=j)$, the same pot of funds, the same Risk LPs, and the same settlement score.
 
 It is not a separate, unrelated market for each play type. Every buy is a different set of cells on this one score table.
 
@@ -485,6 +564,8 @@ Example — CPI board, user buys the print interval $[0.3,0.4]$ (mapped to atom 
 
 Do not redeem “the $0.7$ you paid” and do not treat $p_S$ as the payout. $p_S$ is only the **price of a share**.
 
+**Pre-bet (read-only).** Before `buy_set`, the Quote Engine / `GET /v1/markets/{id}/preview` shows the ticket a user is about to take: Pay $=C_S(q)+\phi C_S(q)$, fee, face if $S$ hits ($\lfloor\hat\rho\cdot q\rfloor$ while live), $0$ if it misses, net if hit, and an optional book EV that treats $p_S$ as the viewer’s own probability. None of these replace $p_S$. Coverage / $\hat\rho$ stay display-only.
+
 **This is the same rule on every board and every line** — not a CPI special case. Home / draw / away, handicap, totals, BTTS, exact score, election winner / TOP_N / vote-share band, BTC interval, YES/NO, custom mask: each is some $S$, quoted at $p_S$, minted as $q$ shares, paid $\lfloor\rho\cdot\mathrm{face}\rfloor$ if $c\in S$ (quarter AH is the only split-face exception, section 8.1.5). Section 8.1.
 
 ### 4.5 Positions, Shares, and Liabilities
@@ -499,17 +580,19 @@ $$
 
 If the final outcome maps to atom $c$, the market owes $L=E(c)$ — not $\sum_x E(x)$ and not $\sum_j q_j$ over tickets that merely “look like winners”. $L_{\max}=\sup_x E(x)$ is a trading-period monitor only.
 
+**Highest risk payout (every family, including Gaussian).** Users buy intervals, not cells. $E(x)$ **is** the overlap depth: how much face would pay if the print is $x$. The interval to list is the **thickest overlap**, $\{x:E(x)=L_{\max}\}$ — the contiguous plateau at $\max E$, mapped back onto $\Omega$ (node midpoints). That is not a volume ranking of tickets, and it is not “enumerate every possible $[a,b]$”. A fill of $q$ on $I$ adds $q$ to every atom in $S$; overlapping tickets stack on the intersection. Do not sum $E$ across a bought band (that recounts the same $q$). Football labels the score cell; Bernoulli labels YES / NO. A live tape (`/`, `/ops`) SHALL refresh this row per prediction market on the indexer cadence (UI poll $2\,\mathrm{s}$). The PDF peak $p_k$ is a different object. After settlement the tape yields to $L=E(c)$.
+
 On a football board, exposure lives on score cells: $E(i,j)$. Settlement uses $L=E(x^*,y^*)$. The implied PDF $p_{ij}$ is a different object (section 8.1). Listing steps are in 4.6.
 
 ### 4.6 How a Skellam (Football Score) Board Is Created
 
-A match calls the create instruction once and produces **one board**. 1X2, handicap, totals, and correct score are preset contracts on that board; they do not each call `create_market`.
+A match calls the create instruction once and produces **one prediction market**. 1X2, handicap, totals, and correct score are preset contracts on that market; they do not each call `create_market`.
 
 #### 4.6.1 Who Creates It and When
 
-An authorized creator (protocol ops or a multisig) lists the board before kickoff. Recommended: no later than a few hours before kickoff, so Risk LPs have time to lock collateral.
+Any SIWS-logged-in wallet MAY apply to open a market (off-chain; not on-chain). A **system reviewer** must approve, then **that reviewer wallet** **opens trading** (`create_*`) and **opens the risk auction** (`risk_open_book`) as owner. Only then is the market live (lobby + fills + risk auction). The applicant SHALL NOT sign create. Recommended: apply no later than a few hours before kickoff, so Risk LPs have time to lock collateral after the reviewer opens the risk auction. Duplicate events are refused. Region blocks are IP/GeoIP, not a second settlement rule.
 
-Trading covers pre-match and in-play: fills are allowed from listing until `close_ts`. `close_ts` defaults to the full-time whistle for that `score_scope` (end of regulation, or end of extra time), not kickoff. Kickoff does not close the board. During in-play the underlying is still the **final score** $(X,Y)$, not “the next goal”. Goals and red cards do not rewrite $P_0$; only traders buying and selling continue to change $\theta$. Live score is display and risk hint only.
+Trading covers pre-match and in-play: fills are allowed from listing until `close_ts`. `close_ts` defaults to the full-time whistle for that `score_scope` (end of regulation, or end of extra time), not kickoff. Kickoff does not stop trading. During in-play the underlying is still the **final score** $(X,Y)$, not “the next goal”. Goals and red cards do not rewrite $P_0$; only traders buying and selling continue to change $\theta$. Live score is display and risk hint only.
 
 #### 4.6.2 Creation Parameters
 
@@ -561,17 +644,16 @@ After truncation, divide by $\sum_{i,j}P_0(i,j)$ so the 121 cells sum to 1. `uni
 
 | Field | Description |
 | --- | --- |
-| `market_capital` $C_M$ | Seed reserve injected by the creator |
 | `resolution_source` | `committee` (required) |
 | `resolvers` | Committee roster or the public committee |
 | `authorized_reporters` | Optional; sports-bot public keys; they may only propose; disputes still go to the committee |
-| `close_ts` | Defaults to the full-time whistle for that convention; an in-play board must not close before kickoff |
-| `risk_lock_ts` | Moment risk capital stops being accepted; must satisfy `close_ts ≤ risk_lock_ts ≤` before finalization |
+| `close_ts` | Defaults to the full-time whistle for that convention; an in-play prediction market must not stop trading before kickoff. After `close_ts` there are no fills. |
+| `risk_lock_ts` | Moment risk capital stops being accepted; SHALL NOT be after `close_ts`. Default equals `close_ts`. After `close_ts` the auction is closed even if this field was set later in an old listing |
 | `report_window` | Post-match report / challenge window |
 
 Football $x^*$ is an integer pair $(x^*,y^*)$. See 10.6.
 
-#### 4.6.3 Preset Contracts (“multiple prediction markets” on one board)
+#### 4.6.3 Preset Contracts (several questions on one prediction market)
 
 Creation opens a set of templates. Each template is only a name for a set $S$; it does not open a separate pot. The following must be open:
 
@@ -625,11 +707,10 @@ On-chain:
 
 ```text
 1. Check the match is not already listed (unique match_id + score_scope)
-2. Write identity, convention, grid, prior parameters, C_M, resolution source, close_ts
+2. Write identity, convention, grid, prior parameters, resolution source, close_ts
 3. Generate P_0(i,j) from λ or uniform; θ_{ij}=0
 4. Open contract templates (1X2 / handicap lines / totals lines / scores …)
-5. Inject C_M into this match’s Vault (shared by the whole match, not split per line)
-6. Open this match’s Risk Auction order book (with no LP quotes, Coverage is only C_M)
+5. Open this match’s Risk Auction order book (with no LP quotes, Coverage starts at 0)
 7. Delegate the score grid to the ER
 8. State → TRADING; frontend shows current prices for each template
 ```
@@ -682,7 +763,6 @@ prior:            independent_poisson
 lambda_home:      1.70
 lambda_away:      1.15
 beta:             (configured for target depth)
-C_M:              50,000 USDC
 templates:        1X2, AH [-0.5,-0.75,-1,-1.5], OU [1.5,2.5,3.5], BTTS, CS
 resolution:       committee (3/5) or sports_feed + challenge
 close_ts:         regulation full-time whistle
@@ -745,14 +825,16 @@ A CPI / macro listing calls `create_gaussian_market` and writes:
 | `print_rule` | `FIRST_PRINT` | Only the first official print; later revisions do not change settlement |
 | `seasonal` | Seasonally adjusted / not | Must be bound to `series_id`; no ambiguity |
 | `x_min` / `x_max` | Domain, e.g. YoY $[-2\%,12\%]$ | Creator-specified |
-| `n_grid` | Grid count | $256$ |
+| `n_grid` | Sample count on $\Omega$ | $256$ (create + `grow_grid` + chunked `write_grid_mass` / `seal_grid`; one Solana account cannot hold 256 points in the first `create_account`, and one ix cannot compute 256 $\exp$ masses) |
 | `prior_family` | `normal` / `uniform` | `normal` |
 | `mu` / `sigma` | Prior mean and std (percentage points) | Survey median can be $\mu$, survey dispersion $\sigma$ |
-| `beta` / `C_M` | Liquidity and seed capital | Required |
+| `beta` | LMSR liquidity | Required |
 | `resolution_source` | `committee` | Official agencies are not on-chain; the committee transcribes |
 | `source_url` | Specified BLS / statistics-bureau release page | Locked into the rules |
 | `close_ts` | Usually before the official release time | Cut off before the print |
 | `report_window` | Post-print report window | Hours to 1 day |
+
+Acceptance for these fields is SRS §4.1.1 / FR-MKT-13–22: parameters are percentage points (not cell indices), encoded as Q64 thousandths, $n_{\mathrm{grid}}=256$, $\mu$ = survey median, $\sigma$ = survey dispersion.
 
 Prior (truncated and renormalized on $\Omega$):
 
@@ -776,10 +858,10 @@ Do not open a separate independent board for “will it print above 2.5%”; tha
 
 ```text
 1. Only one board per series_id + release_id + print_rule
-2. Write convention, Ω, grid, N(μ,σ), C_M, committee, close_ts
+2. Write convention, Ω, grid, N(μ,σ), committee, close_ts
 3. Generate f_0, θ_k = 0
 4. Open interval templates
-5. Inject C_M, open the Risk Auction order book
+5. Open the Risk Auction order book
 6. Delegate → TRADING
 ```
 
@@ -814,7 +896,7 @@ An election winner / `TOP_N` listing calls `create_dirichlet_market` (`layout` =
 | `contest_rule` | `PLURALITY` / `ABSOLUTE_MAJORITY` / `ELECTORAL_COLLEGE` / `TOP_N` | Locked; `TOP_N` must also supply `n` |
 | `candidates[]` | Candidate id, name; last item recommended as `OTHER` | $K\ge 2$ |
 | `alpha[]` | Dirichlet prior pseudo-counts | All $1$ when uninformative |
-| `beta` / `C_M` | Liquidity and seed capital | Required |
+| `beta` | LMSR liquidity | Required |
 | `resolution_source` | `committee` | Certified result, not a poll |
 | `cert_source` | Specified certifying body / official page | Locked into the rules |
 | `close_ts` | Voting deadline or before official counting starts | Creator-specified |
@@ -838,16 +920,16 @@ $$
 
 Do not make “A wins” and “B wins” two unrelated YES/NO boards, or $P(A)+P(B)$ can exceed 1. One winner board shares one simplex.
 
-**Vote share** is the same family: `create_dirichlet_market` with `layout` = simplex. Candidate shares $(s_1,\ldots,s_K)$, $\sum s_i=1$, outcome space a grid on the simplex. Buying “A’s share $\in[a,b]$” is that band. Winner-board and vote-share-board funds are independent; both resolve from the same certified tally. The winner is derived from shares via `contest_rule`; the vote-share board pays the shares themselves. Both boards must be fully implemented; they are not half-finished versions of one board. They are **not** a fourth on-chain family.
+**Vote share** is the same family: `create_dirichlet_market` with `layout` = simplex. Candidate shares $(s_1,\ldots,s_K)$, $\sum s_i=1$, outcome space a grid on the simplex, $n=C(\mathrm{bins}+k-1,k-1)$. If `Grid::space(n)` exceeds $10\,240$ bytes, create writes empty $P_0$ and `write_grid_mass` streams unnormalized masses (`PRIOR_CHUNK=256`, `simplex_chunk_raw`); $k$ SHALL be $\le4$. Dirichlet atoms over that cap SHALL reject. Buying “A’s share $\in[a,b]$” is that band. Winner-board and vote-share-board funds are independent; both resolve from the same certified tally. The winner is derived from shares via `contest_rule`; the vote-share board pays the shares themselves. Both boards must be fully implemented; they are not half-finished versions of one board. They are **not** a fourth on-chain family.
 
 #### 4.9.3 Listing Steps
 
 ```text
 1. Only one board per election_id + contest_rule (winner and TOP_N may coexist)
-2. Write candidates, alpha, rule, C_M, committee
+2. Write candidates, alpha, rule, committee
 3. p_0 = normalize(alpha), θ_i = 0
 4. Open single / camp / combination templates
-5. Inject C_M, open the Risk Auction order book
+5. Open the Risk Auction order book
 6. Delegate → TRADING
 ```
 
@@ -885,7 +967,7 @@ A same-day price listing calls `create_lognormal_market` and writes:
 | `grid_space` | `linear` / `log` | Price boards should use `log` |
 | `prior_family` | `normal` / `lognormal` / `uniform` | `lognormal` |
 | `mu` / `sigma` | On $x$ or $\log x$ | Spot at listing time can be $\mu$ |
-| `beta` / `C_M` | Liquidity and seed capital | Required |
+| `beta` | LMSR liquidity | Required |
 | `resolution_source` | `committee` | Required |
 | `close_ts` | Defaults to `observe_ts` | Observation is the cutoff |
 
@@ -911,11 +993,11 @@ Then truncate on $[x_{\min},x_{\max}]$, project onto the log grid, and renormali
 
 ```text
 1. Only one board per symbol + observe_ts + price_rule
-2. Write Ω, grid, prior, price_rule, committee, C_M
+2. Write Ω, grid, prior, price_rule, committee
 3. Generate f_0, θ = 0
 4. Open interval / above-K templates
-5. Inject C_M, open the Risk Auction order book
-6. Delegate → TRADING; close_ts observes the price and closes the board
+5. Open the Risk Auction order book
+6. Delegate → TRADING; `close_ts` observes the price and **stops trading** on this prediction market
 ```
 
 #### 4.10.4 Finalization and Void
@@ -952,9 +1034,9 @@ A deadline event listing calls `create_bernoulli_market` and writes:
 | `early_resolve` | May finalize early if it already occurred before the deadline | `true` |
 | `evidence_urls` | Specified evidence sources | Recommended |
 | `alpha_yes` / `alpha_no` | Prior pseudo-counts | `1, 1` (50 / 50) |
-| `beta` / `C_M` | Liquidity and seed capital | Required |
+| `beta` | LMSR liquidity | Required |
 | `resolution_source` | `committee` | Required |
-| `close_ts` | Defaults to `deadline_ts` | May be slightly after the deadline for verification |
+| `close_ts` | Defaults to `deadline_ts` | Trading **stops** at `close_ts`. Verification and committee report happen **after** close. `close_ts` SHALL NOT be set after the event is known so as to allow trading on a known outcome. |
 
 $$
 p_{\mathrm{YES}}=\frac{\alpha_{\mathrm{YES}}}{\alpha_{\mathrm{YES}}+\alpha_{\mathrm{NO}}}
@@ -977,9 +1059,9 @@ If the same theme also has a numeric question (“first-day volume after approva
 
 ```text
 1. Check the proposition, deadline, and evidence rules are complete
-2. Write YES/NO atoms, prior, C_M, committee
+2. Write YES/NO atoms, prior, committee
 3. Open prices = p_YES / p_NO
-4. Inject C_M, open the Risk Auction order book
+4. Open the Risk Auction order book
 5. Delegate → TRADING
 ```
 
@@ -1043,7 +1125,7 @@ ER / on-chain computation uses fixed point (e.g. Q64.64). $\exp/\ln$ use lookup 
 
 ### 6.1 Why Risk Capital Is Still Needed
 
-Even after $L_{\max}\le C_M+C_R$ is no longer a reject condition, the market still needs external capital to absorb the tail. Otherwise every shortfall becomes a user haircut, the prediction market degenerates into “a lottery that may fail to pay”, and probability discovery is polluted by payout risk.
+Even after a hard $L_{\max}$ reject is no longer a condition, the market still needs external capital to absorb the tail. Otherwise every shortfall becomes a user haircut, the prediction market degenerates into “a lottery that may fail to pay”, and probability discovery is polluted by payout risk.
 
 Risk capital’s role is to:
 
@@ -1162,22 +1244,22 @@ C_R increases → coverage rises → enters C_max at settlement
 
 | Moment | Action |
 | --- | --- |
-| After successful listing and $C_M$ injection | Auction opens, even if there are not yet any prediction fills |
-| While the prediction board is TRADING | Quotes are accepted continuously; more fills raise $L_{\max}$ and the suggested size |
-| Prediction-board `close_ts` | Prediction side stops; whether the auction continues depends on `risk_lock_ts` |
-| `risk_lock_ts` | Stop new fill quotes; already-locked $C_R$ freezes. Must have `close_ts \le risk_lock_ts`, and earlier than finalization |
+| After the reviewer opens the prediction market | Risk auction opens, even if there are not yet any prediction fills |
+| While the prediction board is TRADING and `now < risk_lock_ts` | Quotes are accepted continuously; more fills raise $L_{\max}$ and the suggested size |
+| `risk_lock_ts` if earlier than `close_ts` | Auction stops; prediction trading may continue until `close_ts` |
+| Prediction-board `close_ts` | Prediction fills **and** the auction stop. Already-locked $C_R$ freezes. |
 | Settlement or VOID | Draw or return collateral by layer |
 
-`risk_lock_ts` is a required field at listing. An in-play board may keep the lock window until the full-time whistle. If capital should still be topped up after cutoff, set `risk_lock_ts` between `close_ts` and the start of the report window. At the timestamp it freezes; there is no “extend later” exception.
+`risk_lock_ts` is a required field at listing and SHALL satisfy `risk_lock_ts \le close_ts`. Default is equality. After `close_ts` there is no “keep topping up until report” window. There is no “extend later” exception.
 
 #### 6.6.3 Layers Published by the Protocol, Not Freely Drawn by LPs
 
-At listing, $C_M$ is the first retained layer; fixed layers are cut above it. Example:
+At listing, published layers start at 0. Example:
 
 ```text
-Layer 0   0        → C_M          market retention, not auctioned
-Layer 1   C_M      → C_M + D_unit
-Layer 2   C_M+D_unit → C_M + 2 D_unit
+Layer 1   0          → D_unit
+Layer 2   D_unit     → 2 D_unit
+Layer 3   2 D_unit   → 3 D_unit
 ...
 ```
 
@@ -1186,13 +1268,13 @@ $D_{\mathrm{unit}}$ is specified at creation (e.g. 10,000 USDC). LPs may only qu
 Suggested demand (display only, not a reject):
 
 $$
-D_{\mathrm{required}}=\max(L_{\max}-C_M,0)
+D_{\mathrm{required}}=L_{\max}
 $$
 
 Coverage:
 
 $$
-\mathrm{Coverage}=\frac{C_M+C_R}{L_{\max}}
+\mathrm{Coverage}=\frac{C_R}{L_{\max}}
 $$
 
 How $L_{\max}$ is computed varies by family; the auction only consumes this scalar:
@@ -1224,7 +1306,7 @@ Each layer queues separately and is filled from lowest **unit premium** to highe
 
 1. Remaining unfilled size on that layer: $D_{\mathrm{layer}}^{\mathrm{remain}}$
 2. Take the cheapest valid quote and fill $\min(D_i,D_{\mathrm{layer}}^{\mathrm{remain}})$
-3. Premium is paid in proportion to filled capacity: from this board’s Vault (first $C_M$ / realized trading revenue) into “premium payable”. Accepting a quote makes it a protocol debt immediately; at settlement it is a $R_{\text{net}}$ deduction
+3. Premium is paid in proportion to filled capacity: from this board’s Vault (realized trading revenue) into “premium payable”. Accepting a quote makes it a protocol debt immediately; at settlement it is a $R_{\text{net}}$ deduction
 4. Collateral stays locked until settlement or VOID
 5. After the layer is full, more expensive quotes stay on the book or are cancelled
 
@@ -1256,13 +1338,13 @@ What a Risk LP sees on the board: layers, rates, current $L_{\max}$, an estimate
 #### 6.6.8 Business Loop (one board)
 
 ```text
-List → optional C_M → open layers 1..n
+List → open layers 1..n
    → prediction-side trading (does not check C_R)
    → LPs may quote, lock collateral, get filled
    → close / risk_lock
    → finalize x* (or score / YES)
    → L = E(x*)
-   → R_net first, then C_M, then C_R by leftover shortfall, then C_P^alloc
+   → R_net first, then C_R by leftover shortfall, then C_P^alloc
    → ρ = min(1, C_max / L)
    → pay users at ρ → residual only then is shared
 ```
@@ -1276,7 +1358,7 @@ List → optional C_M → open layers 1..n
 v1.0 required, before accepting an order:
 
 $$
-L'_{\max}=\sup_x\bigl(E(x)+q\,1_I(x)\bigr)\le C_M+C_R
+L'_{\max}=\sup_x\bigl(E(x)+q\,1_I(x)\bigr)
 $$
 
 If not met: reject, partial fill, or open an auction first.
@@ -1295,7 +1377,7 @@ After a user submits $q\cdot 1_I(x)$, the protocol still computes the new $E'(x)
 - Signal to trigger the risk auction / raise premium
 - Strong frontend warning
 
-**Do not reject a fill because $L'_{\max}>C_M+C_R$.**
+**Do not reject a fill because $L'_{\max}$ exceeds locked risk capital.**
 
 Rejections are limited to ordinary trade checks: insufficient balance, interval out of bounds, illegal quantity, market already closed, session unauthorized, etc.
 
@@ -1444,18 +1526,25 @@ p_k=\frac{p0_k\,e^{\theta_k/\beta}}{Z},\qquad
 p_S=\sum_{k\in S}p_k.
 $$
 
-This is the distribution “from trading data”. It is **not** a histogram of fill counts and **not** $E$. Inspect on-chain with `p0`+$\theta$+$\beta$ via `implied_probs` (CLI: `cpm market pdf`). Football shows the $11\times 11$ table, then sums $p$ on each template $S$ for line prices. After close, $\theta$ is frozen; $p$ no longer moves.
+This is the distribution “from trading data”. It is **not** a histogram of fill counts and **not** $E$. Inspect on-chain with `p0`+$\theta$+$\beta$ via `implied_probs` (CLI: `cpm market pdf` / `cpm market info`; Market API `GET /v1/markets/{id}/info`, `GET /v1/markets/{id}/pdf`, `GET /v1/markets/{id}/ws`). The **browser does not compute** LMSR. The indexer projects $\theta$ every $400\,\mathrm{ms}$ (floor $200\,\mathrm{ms}$); the WS ticks $250\,\mathrm{ms}$ and pushes $p_k$ on connect and whenever $\theta$ changes. `/m/[id]` subscribes; if the socket is down it polls `/info` every $2\,\mathrm{s}$. After close the chart freezes. Bars / the $11\times 11$ heat are $p_k$ relative to the peak; hover is percent; $E$ is face in the tooltip only; $n>32$ bins. The stamp is live / polling / frozen plus the snapshot slot (SRS FR-UI-39). The public desk also reports **traders** (distinct owners with $q>0$), **stake** ($\sum$ `position.cost_paid`), $L_{\max}=\sup_k E_k$, and $C_R$ (locked+filled risk capital) so a new ticket can see depth and coverage before it pays $p_S$. The lobby catalog (`GET /v1/markets?q=&family=&status=&page=&limit=`) lists every indexed board so a user can search and page before opening one. A wallet’s own tickets (`GET /v1/owners/{owner}/positions`, `/portfolio`) list every board that wallet filled, the USDC paid in, and — after settlement — claimed payout / net, plus a prompt when a ticket is still unclaimed. The same board’s **pre-bet ticket** (`GET /v1/markets/{id}/preview`) then shows Pay, fee, hit / miss cashflows, and book EV for the chosen $S$ and $q$, and refreshes when the snapshot slot moves. Football shows the $11\times 11$ table **and** the typed templates (1X2, handicap, totals, BTTS, exact score, custom mask); line prices are sums of $p$ on each template $S$, not a second book. After close the public board discloses $x^*$, $\rho$, $L=E(c)$, and the $C_{\max}$ stack. After close, $\theta$ is frozen; $p$ no longer moves. Web surfaces for these reads are listed in §14.6 and ticketed in SRS §4.7.
 
-#### 8.1.8 $\rho$ and redeem
+#### 8.1.8 $\rho$ and redeem (settlement gate)
+
+**Order is normative.** After $x^*$ is final:
+
+1. Read $L=E(c)$ at $c=\mathrm{cell}(x^*)$ (not $L_{\max}$).
+2. Form $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$.
+3. Write $\rho=\min(1,C_{\max}/L)$ on the board ($\rho=1$ if $L=0$).
+4. Only then may tickets claim $\lfloor\rho\cdot\mathrm{face}\rfloor$.
+
+If $C_{\max}\ge L$, funds cover face: $\rho=1$, each unit of face pays $1$ USDC. If $C_{\max}<L$, funds are short: $\rho=C_{\max}/L$ is the **actual** payout ratio, one number for every winner. Misses are $0$ and are not in the haircut. Never FIFO. Dust stays in reserves. VOID / `RESOLUTION_FAILED` skip this gate and refund `cost_paid` — they SHALL NOT invent $\rho=0$ as a fake print.
 
 $$
-C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}},\qquad
+C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}},\qquad
 \rho=\min\bigl(1,C_{\max}/L\bigr)
 $$
 
-($\rho=1$ if $L=0$). Each ticket receives $\lfloor\rho\cdot\mathrm{face}\rfloor$ USDC. Misses are $0$ and are not in the haircut. One global $\rho$; never FIFO. Dust stays in reserves.
-
-If $C_{\max}\ge L$, each unit of face pays $1$ USDC.
+$\hat\rho$ shown while trading is display-only and SHALL NOT be this written $\rho$.
 
 #### 8.1.9 Forbidden
 
@@ -1473,17 +1562,16 @@ If $C_{\max}\ge L$, each unit of face pays $1$ USDC.
 Money actually available at settlement:
 
 $$
-C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}+C_P^{\mathrm{alloc}}
+C_{\max}=R_{\text{net}}+C_R^{\text{final}}+C_P^{\mathrm{alloc}}
 $$
 
 | Symbol | Meaning |
 | --- | --- |
 | $R_{\text{net}}$ | **Primary source.** Net trading revenue: contract cost paid by users. Fees never entered this term. Premia payable to Risk LPs are deducted. |
-| $C_M$ | Optional market reserve injected at listing. May be $0$. |
 | $C_R^{\text{final}}$ | Optional Risk LP capital locked and drawable at settlement $\sum_i D_i$. May be $0$ if nobody filled. |
 | $C_P^{\mathrm{alloc}}$ | Optional draw from the platform adjustment fund, capped per board and by the pool. May be $0$. |
 
-If there is no risk capital and no market reserve, payout is still due: $C_{\max}=R_{\mathrm{net}}+C_P^{\mathrm{alloc}}$. The main source is trading.
+If there is no risk capital, payout is still due: $C_{\max}=R_{\mathrm{net}}+C_P^{\mathrm{alloc}}$. The main source is trading.
 
 Money users have already paid the market must be used for payout first. Leaving $R_{\text{net}}$ out of the numerator would haircut users while the market sits on trading income.
 
@@ -1530,11 +1618,9 @@ This is a warning only. It is not the fill price and does not lock final $\rho$.
 ```text
 R_net  (trading; always first)
     │
-    ├─ + optional C_M
-    │
     ├─ Enough to pay L
     │     → ρ = 1, H_i = 0, C_P not drawn
-    │     → surplus S = max(R_net + C_M − L, 0)
+    │     → surplus S = max(R_net − L, 0)
     │
     └─ Short
            │
@@ -1549,16 +1635,17 @@ R_net  (trading; always first)
 
 Risk LPs pay at most $C_R^{\text{final}}$ and are not topped up because of later orders. $C_P$ pays at most the allocated cap. After every locked source is exhausted, the remaining gap is shared by all winners.
 
+**Surplus is not this draw.** Drawing $H$ / $C_P$ covers a shortfall so winners can still be paid at $\rho=1$. Surplus $S=\max(R_{\mathrm{net}}-L,0)$ exists only after that full pay. Split, default $\alpha_R=70\%$, claims, and the fee ledger: **§1.2.1**. Chain: `begin_settle` writes `rho_raw`, `surplus`, `surplus_r`, `surplus_p`; then `pay_surplus_lp` / `pay_surplus_platform`.
+
 ### 8.7 Numeric Example
 
 At expiry the cell of $x^*$ has face-value total payout $L=12{,}000{,}000$.
 
 - Net trading revenue $3{,}000{,}000$
-- Market reserve $2{,}000{,}000$
 - Locked Risk LP $5{,}000{,}000$
 - Platform adjustment allocated $0$
 
-Then $C_{\max}=10{,}000{,}000$, $\rho=1000/1200=5/6$. If the pool later allocated $C_P=1{,}000{,}000$ to this board, $C_{\max}=11{,}000{,}000$ and $\rho=11/12$.
+Then $C_{\max}=8{,}000{,}000$, $\rho=8/12=2/3$. If the pool later allocated $C_P=1{,}000{,}000$ to this board, $C_{\max}=9{,}000{,}000$ and $\rho=3/4$.
 
 If the same market has $L_{\max}=20{,}000{,}000$ but $x^*$ lands on a cell with only $4{,}000{,}000$ of exposure, then $L=4{,}000{,}000$, $\rho=1$.
 
@@ -1581,37 +1668,36 @@ This section is the commercial rule, not an implementation hint. Settlement, vau
 
 ### 9.1 Capital stack (what may pay users)
 
-Four USDC pots can fund a board. Only the first is required.
+Three USDC pots can fund a board. Only the first is required.
 
 | Seniority | Pot | Who provides it | Required? | When it is used |
 | --- | --- | --- | --- | --- |
 | 1 | $R_{\mathrm{net}}$ | Traders, via $C_S(q)$ | Yes (the default source) | Always first |
-| 2 | $C_M$ | Market creator / listing reserve | No. May be $0$ | After trading, if still short |
-| 3 | $C_R^{\mathrm{final}}$ | Risk LPs who locked and filled | No. May be $0$ | After own funds, by layer, only the leftover shortfall |
-| 4 | $C_P^{\mathrm{alloc}}$ | Platform adjustment fund | No. May be $0$ | Last backstop after $C_R$, still capped |
+| 2 | $C_R^{\mathrm{final}}$ | Risk LPs who locked and filled | No. May be $0$ | After trading, by layer, only the leftover shortfall |
+| 3 | $C_P^{\mathrm{alloc}}$ | Platform adjustment fund | No. May be $0$ | Last backstop after $C_R$, still capped |
 
 $$
-C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}
+C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}
 $$
 
-**If no risk capital entered and no market reserve was injected, payout is still owed and comes from trading** (plus any $C_P$ allocated to that board). Soft solvency is unchanged: if that is still less than $L$, one global $\rho$.
+**If no risk capital entered, payout is still owed and comes from trading** (plus any $C_P$ allocated to that board). Soft solvency is unchanged: if that is still less than $L$, one global $\rho$.
 
 $C_P$ is not a promise that $\rho=1$. It is a bounded commercial reserve so that a thin board is not immediately a lottery.
 
 ### 9.2 Two payout paths
 
-**Path A — risk capital is not needed.** $L\le R_{\mathrm{net}}+C_M$.
+**Path A — risk capital is not needed.** $L\le R_{\mathrm{net}}$.
 
 - Users are paid in full ($\rho=1$).
 - $H_i=0$. Locked LP collateral is released, not debited.
 - $C_P$ is not drawn.
-- Residual $S=\max(R_{\mathrm{net}}+C_M-L,0)$ exists.
+- Residual $S=\max(R_{\mathrm{net}}-L,0)$ exists.
 - If $C_R^{\mathrm{final}}>0$ (LPs stood ready but were not hit): $S_R=\alpha_R S$ to those LPs, $S_P=\alpha_P S$ to the platform.
 - If no risk capital entered: $S_R=0$, the whole $S$ goes to the platform.
 
-**Path B — risk capital (and maybe $C_P$) is needed.** $L>R_{\mathrm{net}}+C_M$.
+**Path B — risk capital (and maybe $C_P$) is needed.** $L>R_{\mathrm{net}}$.
 
-- Draw layers for $\min\bigl(H_i^{\mathrm{raw}},\ (L-R_{\mathrm{net}}-C_M)^+-\text{already drawn}\bigr)$.
+- Draw layers for $\min\bigl(H_i^{\mathrm{raw}},\ (L-R_{\mathrm{net}})^+-\text{already drawn}\bigr)$.
 - If still short, allocate $C_P$ as in 9.3.
 - $C_{\max}\ge L$ → $\rho=1$, $S=0$ (own funds were exhausted).
 - $C_{\max}<L$ → $\rho=C_{\max}/L$, $S=0$.
@@ -1627,7 +1713,7 @@ The adjustment fund is not a per-board piggy bank. It is **one protocol pool**.
 | Settlement draw | $C_P^{\mathrm{alloc}}$ | What this board actually takes at settlement. Debited from the pool. |
 
 $$
-C_P^{\mathrm{alloc}}=\min\bigl((L-R_{\mathrm{net}}-C_M-C_R^{\mathrm{final}})^+,\; C_P^{\mathrm{board}},\; C_P^{\mathrm{pool}}\bigr)
+C_P^{\mathrm{alloc}}=\min\bigl((L-R_{\mathrm{net}}-C_R^{\mathrm{final}})^+,\; C_P^{\mathrm{board}},\; C_P^{\mathrm{pool}}\bigr)
 $$
 
 After the draw, $C_P^{\mathrm{pool}}\leftarrow C_P^{\mathrm{pool}}-C_P^{\mathrm{alloc}}$. Two short boards settling in the same window share the remaining pool; there is no reserved slice per board except the listing cap.
@@ -1645,18 +1731,18 @@ $$
 R_{\text{net}}=\text{TradingRevenue}-\text{RiskPremium}-\text{HedgeCost}-\text{OracleCost}
 $$
 
-Inflows to the **pool** (explicit sweep, never the same board’s live fill):
+Inflows to the **pool** (explicit `fund_pool` only — never a fill, never a fee):
 
 ```text
-φ  →  platform fee pot  ──sweep──►  C_P^pool   (one USDC account)
-S_P →  platform treasury ──sweep──►  C_P^pool
-platform top-up USDC   ──────────►  C_P^pool
+φ  →  platform fee ledger  ──claim_fees──►  platform UserVault  ──withdraw──►  platform wallet
+S_P →  platform UserVault (pay_surplus_platform; only when ρ=1)
+platform top-up USDC   ──fund_pool──►  C_P^pool
                                       │
                                       ▼  only at settlement of a short board
                                  C_P^alloc onto that board
 ```
 
-- A fill’s fee must not jump into **that same board’s** $C_{\max}$.
+- A fill’s fee must not jump into **that same board’s** $C_{\max}$ and SHALL NOT enter $C_P$.
 - Users and LPs have no claim on unallocated pool balances.
 - No `admin_withdraw` of the pool except: settlement draws, or a listed unwind of unused pool into the platform treasury after a published delay.
 - The pool does not change LMSR prices. Coverage may show $C_P^{\mathrm{board}}$ as a warning, never as the quote.
@@ -1666,7 +1752,7 @@ platform top-up USDC   ──────────►  C_P^pool
 Only when users have already been paid in full at face value ($\rho=1$):
 
 $$
-S=\max(R_{\mathrm{net}}+C_M-L,0)
+S=\max(R_{\mathrm{net}}-L,0)
 $$
 
 When $\rho<1$, $S=0$ and there is no profit share.
@@ -1682,7 +1768,7 @@ $$
 
 If $C_R^{\mathrm{final}}=0$, $S_R=0$ and $S=S_P$.
 
-Profit share is a residual claim, not a guaranteed return. $\phi$ is a different pot from $S_P$. Both may be swept into $C_P$.
+Profit share is a residual claim, not a guaranteed return. $\phi$ is a different pot from $S_P$. $\phi$ is claimed via `claim_fees`; it SHALL NOT be swept into $C_P$.
 
 ### 9.5 Full waterfall
 
@@ -1690,7 +1776,6 @@ Profit share is a residual claim, not a guaranteed return. $\phi$ is a different
 Trading revenue R_net          ← primary commercial source
     │
     ▼
-Optional market reserve C_M
     │
     ▼
 User payout (ρ · face value, one global ρ)
@@ -1705,10 +1790,9 @@ Platform adjustment draw C_P^alloc
 Residual profit (only when ρ = 1)
     ├── Risk LP (α_R)  if C_R^final > 0
     └── Platform (α_P or all of S)
-            └── optional sweep into C_P^pool
 ```
 
-Seniority must not be inverted: user payout precedes Risk LP profit share; profit share and fee sweep precede any discretionary platform withdrawal.
+Seniority must not be inverted: user payout precedes Risk LP profit share; fee claim is independent of settlement and never funds $C_P$.
 
 A Risk LP’s Premium is the consideration for underwriting. It is already deducted when computing $R_{\mathrm{net}}$, so the same money is not both premium and user payout.
 
@@ -1815,7 +1899,7 @@ Elections must not report a poll. Binary events must not finalize YES early beca
 
 ```text
 CREATED
-   │  Generic board: initialize PDF, C_M, resolution_source, grid
+   │  Generic board: initialize PDF, resolution_source, grid
    │  Football / CPI / election / daily price / binary event: see 4.6–4.11
    ▼
 PDF_ACTIVE / DELEGATED
@@ -1864,10 +1948,10 @@ $$
 **Invariant 2 — Payout cap**
 
 $$
-\sum_j \text{ActualPayout}_j \le C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}+C_P^{\mathrm{alloc}}
+\sum_j \text{ActualPayout}_j \le C_{\max}=R_{\text{net}}+C_R^{\text{final}}+C_P^{\mathrm{alloc}}
 $$
 
-Trading-period $L_{\max}\le C_M+C_R$ is no longer required.
+Trading-period hard reject on $L_{\max}$ vs locked capital is no longer required.
 
 **Invariant 3 — Risk LP collateral**
 
@@ -1913,13 +1997,13 @@ Trader ──buy interval──► Prediction Market ──revenue──► Vaul
               Risk LP locks collateral, receives Premium
                          │
                          ▼
-              Expiry x* → L = E(x*) → R_net → C_M → C_R → C_P → ρ → payout
+              Expiry x* → L = E(x*) → R_net → C_R → C_P → ρ → payout
 ```
 
 - No tail, or the layer is not breached: Risk LP receives Premium and may receive Profit Share; $C_P$ is not drawn
 - Layer breached but $C_{\max}\ge L$: Risk LP pays by leftover $H_i$; $C_P$ may finish the gap; users still receive full face value
 - $C_{\max}<L$: every locked source is drawn up to its cap; users are haircut at $\rho$
-- No $C_M$ and no $C_R$: the board still settles from trading, then $C_P$ if allocated
+- No $C_R$: the board still settles from trading, then $C_P$ if allocated
 
 A Risk LP’s core metric is not nominal APY, but risk-adjusted return:
 
@@ -1962,7 +2046,7 @@ A market account contains at least:
 
 - `market_id` / `creator` / `liquidity_beta`
 - `total_grid_count` / `x_min` / `x_max`
-- `market_capital` / `committed_risk_capacity` / `current_max_liability`
+- `committed_risk_capacity` / `current_max_liability`
 - `resolution_source` and its config
 - `is_delegated` / lifecycle state
 
@@ -1979,7 +2063,7 @@ Grid buffers:
 2. Compute $p_I$ and $C_I(q)$
 3. Update $\theta_k$, $E_k$, $L_{\max}$
 4. Update and push coverage
-5. **Do not** reject because $L_{\max}\le C_M+C_R$ fails
+5. **Do not** reject because $L_{\max}$ exceeds locked risk capital
 
 Solvency checking moves from “whether a fill is allowed” to computing $\rho$ at settlement.
 
@@ -2015,9 +2099,29 @@ Rules:
 
 Implementation stack (locked; details in `technical-architecture.md`): the user client is **Next.js only** (PWA + wallet WebView + Android official-site TWA). **Do not list** on the App Store / Play, and do not build Flutter / RN. Contracts = **Anchor**. Frictionless orders = MagicBlock Session Keys + this protocol’s limits. Funds do not go through store IAP.
 
-### 14.6 Fills and Bookkeeping Recognize Only USDC
+### 14.6 Client surfaces (web acceptance)
 
-Every amount inside the protocol — contract cost $C_S(q)$, fees, Vault balance, $C_M$, Risk LP collateral, premium, $L$, $C_{\max}$, $\rho$ payout, surplus — is **priced and transferred only in Circle SPL USDC**.
+Every human role in §3 has a screen. Numbered SHALL / verify live in SRS §4.7 (FR-UI-*). A route name alone is not a product.
+
+| Role | Page | Job |
+| --- | --- | --- |
+| Trader | `/` | Search and page every indexed board; row heading is the market name (SRS FR-UI-38) |
+| Trader | `/m/[id]` | **Trade ticket** (SRS FR-UI-32): live implied PDF (FR-UI-39), pre-bet Pay / hit / miss, typed Skellam lines, coverage warning, pending nonce. After `close_ts`: buy / sell **disabled** — no fills. After settlement: public $x^*$ / $\rho$ / $L$ / $C_{\max}$ (FR-UI-33). **Comments** only after the prediction market is indexed (FR-UI-42): off-chain catalog, not settlement or capital |
+| Trader | `/portfolio` | **Cash ticket** (SRS FR-UI-35): Circle USDC deposit / withdraw on confirmed `available` / free; all fills (market **name**, not pubkey-only); **settlement tickets** for claim $\lfloor\rho\cdot\mathrm{face}\rfloor$ or refund (SRS FR-UI-33). Claim uses the fill journal (`TICKETS_PATH` / `POST /v1/tickets`) so $S$ is not this browser’s localStorage (FR-UI-41) |
+| Trader | chrome | Connect / SIWS; open / renew / revoke Session (revoke ≠ disconnect); in-app inbox |
+| Risk LP | `/auctions`, `/auction/[id]` | Browse open books by title; **auction ticket** on published layers (SRS FR-UI-37) |
+| Risk LP | `/lp` | Locked $D_i$ by market **name**; $H$, premium, surplus / unlock claim; list reloads after each write (FR-UI-41) |
+| Trader / applicant | `/create` | **Listing ticket** (SRS FR-UI-31): any SIWS user. Submits an **application** (title, tags, prior, compose spec, geo blocks). Not on-chain. Not open until the reviewer approves **and** signs create (FR-UI-43). Applicant SHALL NOT sign `create_*`. Duplicate → `409` (FR-UI-45). **No comments** on create |
+| Reviewer | `/review` | System review queue (FR-UI-43): **批准并开通预测市场** — reviewer wallet signs `create_*` and 开放风险拍卖; lobby shows it (`OPEN`). **继续开通预测市场** retries if create already landed. 拒绝 / 标为重复. Confirm region blocks (FR-UI-44). Audit log. Not committee, not Vault withdraw |
+| Committee | `/committee`, `/resolve/[id]` | Open window, `submit_result`, evidence object (hash on-chain), challenge, $M/N$. Both desks show the listing name and a market card (FR-UI-36 / FR-UI-41) |
+| Ops / platform | `/ops` | Read-only: index lag, coverage, Vault identity, $C_P^{\mathrm{pool}}$, keeper heartbeat, per-board $C_P$ by market **name**. **No** Vault withdraw |
+| Keeper | CLI | `close` / Commit / Undelegate / alerts. Not a web write path |
+
+Football on `/m/[id]` is one Skellam prediction market with templates, not a generic cell picker pretending to be 1X2. Create collects a human listing title, catalog tags (English vocabulary, several allowed — e.g. `football` + `epl` or `football` + `world cup`; not the distribution family), $\beta$, grid, $C_P^{\mathrm{board}}$, committee, clocks, resolution rule, published layers, optional region blocks, and the family prior. Submit is an **application** (SIWS); a system reviewer opens the prediction market (FR-UI-43). Title and tags are listing metadata (`POST /v1/listings` after approve); topic / tag stay the on-chain series key. **Comments are not part of create** — they appear on `/m/[id]` only after the prediction market is approved and indexed (FR-UI-42): wallet pubkey, Postgres `market_comment`, not settlement or capital. CPI / macro priors are $\Omega$ and $\mathcal{N}(\mu,\sigma^2)$ in percentage points (survey median $\to\mu$, survey dispersion $\to\sigma$), not integer cell indices. The risk auction is a layer-stack ticket ($A$, $T$, $H$ if drawn, standing ladder), not four headline numbers. Every write path is a ticket (SRS §4.7.1): listing, identity, prior, cash, trade, settlement, auction layer, committee phase.
+
+### 14.7 Fills and Bookkeeping Recognize Only USDC
+
+Every amount inside the protocol — contract cost $C_S(q)$, fees, Vault balance, Risk LP collateral, premium, $L$, $C_{\max}$, $\rho$ payout, surplus — is **priced and transferred only in Circle SPL USDC**.
 
 | Question | Answer |
 | --- | --- |
@@ -2069,7 +2173,7 @@ Compressed mathematical objects:
 | User face value | $g_I(x)=1_{x\in I}$ |
 | Exposure | $E(x)=\sum_j q_j g_{I_j}(x)$ |
 | Settlement liability | $L=E(x^*)$ |
-| Payable | $C_{\max}=R_{\text{net}}+C_M+C_R^{\text{final}}+C_P^{\mathrm{alloc}}$ |
+| Payable | $C_{\max}=R_{\text{net}}+C_R^{\text{final}}+C_P^{\mathrm{alloc}}$ |
 | Recovery rate | $\rho=\min(1,C_{\max}/L)$ |
 | User received | $\rho\cdot q_j\cdot 1_{I_j}(x^*)$ |
 | Risk layer | $H_i(L)=\min((L-A_i)^+,D_i)$ |
@@ -2093,10 +2197,10 @@ Implementation must follow the conventions below. There is no remaining fork of 
 | Settlement liability | $L=E(x^*)$, not $L_{\max}$ |
 | Claim unit | Fill size $q$ is **shares** on the bought interval. Payout is $\rho\cdot q$ if $x^*$ hits, else $0$ |
 | Haircut method | If $C_{\max}<L$, one global $\rho=C_{\max}/L$ on every hitting share; FIFO forbidden |
-| $C_{\max}$ | $R_{\text{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$; $C_M$, $C_R$, $C_P$ may each be $0$ |
-| Trading fee | $\phi\cdot C_S(q)$ to the platform at fill; not in this board’s pool; may be swept into $C_P$ for later boards |
+| $C_{\max}$ | $R_{\text{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$; $C_R$, $C_P$ may each be $0$ |
+| Trading fee | Listing locks `fee_bps` + `fee_timing`. At fill: $\phi\cdot C_S$ now. At claim: $\phi$ of the winner’s payout. Never $C_P$. `claim_fees` anytime |
 | Price of the same outcome | LMSR marginal price rises with fills; buying more makes it more expensive |
-| Surplus allocation | Only when $\rho=1$. If $C_R^{\mathrm{final}}>0$, $\alpha_R/\alpha_P$. If no risk capital entered, all $S$ to the platform |
+| Surplus allocation | **§1.2.1.** Only when $\rho=1$: $S=\max(R_{\mathrm{net}}-L,0)$. No $C_R$ → all $S$ to the platform. Else default $\alpha_R=70\%$ to LPs (by `profit_share_bps` $\times$ filled), $30\%$ to the platform. $\rho<1\Rightarrow S=0$. Fees never enter $S$ |
 | Adjustment fund | One protocol pool $C_P^{\mathrm{pool}}$; boards only receive $C_P^{\mathrm{alloc}}$ at settlement. Not an unlimited guarantee; not baked into LMSR |
 | Fill price | Pure probability $p_I$; haircut is displayed, not quoted |
 | Low coverage | Strong warning; orders still allowed |
@@ -2109,14 +2213,17 @@ Implementation must follow the conventions below. There is no remaining fork of 
 | Daily price | Listing recipe on `create_lognormal_market`; committee reports by `price_rule` |
 | Binary event | `create_bernoulli_market`; YES/NO; YES may finalize early before the deadline |
 | Distribution family | On-chain create is by family (`skellam` / `gaussian` / `lognormal` / `dirichlet` / `bernoulli`); listing names are metadata; trading does not switch families |
-| Risk auction | Book opens at listing; published layers, lowest unit premium first; `risk_lock_ts` required and not earlier than `close_ts` |
+| After `close_ts` | No prediction fills on any family. UI disables buy / sell; compose refuses; chain `Closed`. Kickoff / report / early YES do not reopen trading |
+| Highest risk payout | During trading: thickest overlap $\{x:E(x)=L_{\max}\}$. Gaussian / lognormal: that plateau as a print interval on $\Omega$. Not ticket-volume rank. PDF peak ≠ risk peak |
+| Risk auction | Opens with the prediction market; published layers, lowest unit premium first; `risk_lock_ts \le close_ts`; `close_ts` also stops the auction |
 | Finalization failure | Refund user funds, return LP collateral, return unused premium |
 | Chain | Solana + MagicBlock ER |
 | Bookkeeping and fill currency | **Only** Circle SPL USDC; SOL only pays L1 fees; no other coins, no in-protocol auto-swap |
 | Fill durability | A receipted fill does not vanish because a single node crashes; $\theta$ is replayed from the fill journal; L1 Commit is a checkpoint, not the fill criterion |
-| User client | Next.js only; PWA / in-wallet browser / official-site TWA; **not on the App Store / Play** |
+| User client | Next.js only; PWA / in-wallet browser / official-site TWA; **not on the App Store / Play**. Pages: SRS §4.7 / product §14.6 |
 | Stores | Do not submit a trading app; do not build a Flutter / RN “degraded package” |
-| Wallet path | Connect → SIWS → `vault.deposit` → open Session → in-board Session sign; withdraw / create / report must use the main wallet |
+| Wallet path | Connect → SIWS → `vault.deposit` → open Session → in-board Session sign; withdraw / create / risk bid / report must use the main wallet; revoke Session ≠ disconnect |
+| Keeper vs web | Keeper writes are CLI / KMS only. `/ops` is read-only. Committee desk may `resolve_open` |
 | Contracts | Anchor + MagicBlock ER SDK + session-keys; four programs; `vault` / `resolution` do not Delegate and do not accept a Session |
 | Backend | Rust Axum throughout; chain client `@coral-xyz/anchor` + `@solana/web3.js` |
 
@@ -2128,10 +2235,10 @@ The following capabilities are explicitly not built, and are not written as “m
 
 - Rewriting LMSR prices with expected haircut
 - Layered payout by user entry order
-- Trading-period hard reject $L_{\max}\le C_M+C_R$
+- Trading-period hard reject on $L_{\max}$ vs locked capital
 - One unit of risk capital underwriting multiple boards at once
 - Parameterized AMM (updating only $\mu,\sigma$ or $\lambda_H,\lambda_A$)
-- A full on-chain $\mathrm{CVaR}$ portfolio optimizer (suggested size from $L_{\max}-C_M$ is enough)
+- A full on-chain $\mathrm{CVaR}$ portfolio optimizer (suggested size from $L_{\max}$ is enough)
 - Committee token governance and a large on-chain dispute court
 - Using SOL or other SPL tokens as margin / collateral / payout
 - In-protocol auto-swap of arbitrary coins into USDC (no Jupiter / aggregator / oracle FX into the Vault)

@@ -2,7 +2,7 @@
 //! Never Delegates. Session is not an authority. No oracle writes x*.
 
 use anchor_lang::prelude::*;
-use market::state::{Market, Status};
+use market::state::{Market, Status, MAX_COMMITTEE};
 
 pub mod machine;
 
@@ -12,7 +12,6 @@ declare_id!("Rso1111111111111111111111111111111111111111");
 
 pub const RES_SEED: &[u8] = b"res";
 pub const VOTE_SEED: &[u8] = b"vote";
-pub const MAX_COMMITTEE: usize = 8;
 
 pub const FAMILY_SKELLAM: u8 = 0;
 pub const FAMILY_GAUSSIAN: u8 = 1;
@@ -28,14 +27,18 @@ pub mod resolution {
         let market = &ctx.accounts.market;
         let signer = ctx.accounts.payer.key();
         require!(
-            signer == market.creator || market.is_member(&signer),
+            ctx.accounts.committee.key() == market.committee,
+            ResError::CommitteeMismatch
+        );
+        require!(
+            signer == market.creator || ctx.accounts.committee.is_member(&signer),
             ResError::NotReporter
         );
         require!(market.family <= FAMILY_BERNOULLI, ResError::BadFamily);
         require!(
-            market.member_count >= 1
-                && market.m >= 1
-                && market.m <= market.member_count
+            ctx.accounts.committee.member_count >= 1
+                && ctx.accounts.committee.m >= 1
+                && ctx.accounts.committee.m <= ctx.accounts.committee.member_count
                 && market.report_window_secs > 0
                 && market.challenge_secs > 0,
             ResError::BadCommittee
@@ -43,12 +46,12 @@ pub mod resolution {
 
         let rec = &mut ctx.accounts.record;
         rec.market = market.key();
-        rec.members = market.members;
+        rec.members = ctx.accounts.committee.members;
         rec.authorized_reporter = market.authorized_reporter;
         rec.family = market.family;
         rec.phase = Phase::Open as u8;
-        rec.m = market.m;
-        rec.n = market.member_count;
+        rec.m = ctx.accounts.committee.m;
+        rec.n = ctx.accounts.committee.member_count;
         rec.extensions = 0;
         rec.votes_proposal = 0;
         rec.votes_challenge = 0;
@@ -314,7 +317,7 @@ pub struct Resolution {
 }
 
 impl Resolution {
-    pub const SIZE: usize = 8 + 1280;
+    pub const SIZE: usize = 8 + 1536;
 }
 
 #[account]
@@ -335,7 +338,12 @@ pub struct Open<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(owner = market::ID)]
-    pub market: Account<'info, Market>,
+    pub market: Box<Account<'info, Market>>,
+    #[account(
+        owner = market::ID,
+        constraint = committee.key() == market.committee @ ResError::CommitteeMismatch
+    )]
+    pub committee: Box<Account<'info, market::state::Committee>>,
     #[account(
         init,
         payer = payer,
@@ -343,7 +351,7 @@ pub struct Open<'info> {
         seeds = [RES_SEED, market.key().as_ref()],
         bump
     )]
-    pub record: Account<'info, Resolution>,
+    pub record: Box<Account<'info, Resolution>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -351,16 +359,16 @@ pub struct Open<'info> {
 pub struct MutRecord<'info> {
     pub reporter: Signer<'info>,
     #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
-    pub record: Account<'info, Resolution>,
+    pub record: Box<Account<'info, Resolution>>,
 }
 
 #[derive(Accounts)]
 pub struct Finalize<'info> {
     pub reporter: Signer<'info>,
     #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
-    pub record: Account<'info, Resolution>,
+    pub record: Box<Account<'info, Resolution>>,
     #[account(mut, constraint = market.key() == record.market @ ResError::CommitteeMismatch)]
-    pub market: Account<'info, Market>,
+    pub market: Box<Account<'info, Market>>,
 }
 
 #[derive(Accounts)]
@@ -368,7 +376,7 @@ pub struct CastVote<'info> {
     #[account(mut)]
     pub voter: Signer<'info>,
     #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
-    pub record: Account<'info, Resolution>,
+    pub record: Box<Account<'info, Resolution>>,
     #[account(
         init,
         payer = voter,

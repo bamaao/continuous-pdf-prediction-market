@@ -1,0 +1,18 @@
+[package]
+name = "math-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Browser WASM surface for crates/math + quote. No second LMSR."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+math = { path = "../math" }
+quote = { path = "../services/quote" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"

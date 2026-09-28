@@ -1,9 +1,22 @@
-# Optional Postgres for Phase 4 projections. The ledger remains Solana.
+# Local / test PostgreSQL. Ledger remains Solana. Memory is a cache only.
+#   docker compose -f infra/docker-compose.readpath.yml up -d
+#   DATABASE_URL=postgres://postgres:cpm@127.0.0.1:5432/cpm
 services:
   postgres:
     image: postgres:16
     environment:
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: cpm
       POSTGRES_DB: cpm
     ports:
       - "5432:5432"
+    volumes:
+      - cpm-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cpm"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  cpm-pg:

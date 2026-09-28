@@ -3,8 +3,8 @@
 //! Session PDA authorizes in-board fills (FR-WAL-04–06). Delegate is Phase 7.
 
 use anchor_lang::prelude::*;
-use math::lmsr::{lmsr_update, LmsrState};
 use math::prior;
+use math::settle::{usdc, usdc_charge};
 use math::Q64;
 use vault::cpi::accounts::CreditTrade;
 use vault::cpi::credit_trade;
@@ -25,6 +25,21 @@ declare_id!("Market1111111111111111111111111111111111111");
 #[program]
 pub mod market {
     use super::*;
+
+    pub fn init_committee(ctx: Context<InitCommittee>, members: Vec<Pubkey>, m: u8) -> Result<()> {
+        write_roster(&mut ctx.accounts.committee, ctx.accounts.authority.key(), ctx.bumps.committee, members, m)
+    }
+
+    pub fn set_roster(ctx: Context<SetRoster>, members: Vec<Pubkey>, m: u8) -> Result<()> {
+        let committee = &mut ctx.accounts.committee;
+        require!(ctx.accounts.authority.key() == committee.authority, MarketError::BadCommittee);
+        let authority = committee.authority;
+        let bump = committee.bump;
+        let epoch = committee.epoch.saturating_add(1);
+        write_roster(committee, authority, bump, members, m)?;
+        committee.epoch = epoch;
+        Ok(())
+    }
 
     pub fn create_skellam_market(
         mut ctx: Context<CreateBoard>,
@@ -102,27 +117,54 @@ pub mod market {
             MarketError::IdMismatch
         );
         require!(args.alpha.len() >= 2, MarketError::BadPrior);
+        let over = Grid::space(n as usize) > Grid::CREATE_CAP;
+        if over {
+            require!(args.alpha.len() <= 4, MarketError::BadGrid);
+        }
         let alphas: Vec<Q64> = args.alpha.iter().copied().map(Q64::from_raw).collect();
-        let p0 = match args.layout {
-            DIRICHLET_ATOMS => {
-                require!(args.alpha.len() == n as usize, MarketError::BadGrid);
-                prior::dirichlet(&alphas)
+        let p0 = if over {
+            match args.layout {
+                        DIRICHLET_ATOMS => {
+                    // extra.a–d hold at most 4 alphas; atoms over CREATE_CAP cannot be rebuilt.
+                    return err!(MarketError::BadGrid);
+                }
+                DIRICHLET_TOP_N => {
+                    let k = args.alpha.len() as u32;
+                    require!(args.top_n >= 1 && (args.top_n as u32) < k, MarketError::BadPrior);
+                    let atoms = prior::binom(k, args.top_n as u32).ok_or(MarketError::BadGrid)?;
+                    require!(atoms == n as u32 && atoms <= MAX_N as u32, MarketError::BadGrid);
+                }
+                DIRICHLET_SIMPLEX => {
+                    let k = args.alpha.len() as u32;
+                    let cells =
+                        prior::simplex_cell_count(k, args.bins as u32).ok_or(MarketError::BadGrid)?;
+                    require!(cells == n as u32 && cells <= MAX_N as u32, MarketError::BadGrid);
+                }
+                _ => return err!(MarketError::BadPrior),
             }
-            DIRICHLET_TOP_N => {
-                let k = args.alpha.len() as u32;
-                require!(args.top_n >= 1 && (args.top_n as u32) < k, MarketError::BadPrior);
-                let atoms = prior::binom(k, args.top_n as u32).ok_or(MarketError::BadGrid)?;
-                require!(atoms == n as u32 && atoms <= MAX_N as u32, MarketError::BadGrid);
-                math::uniform_prior(atoms as usize)
+            vec![Q64::ZERO; n as usize]
+        } else {
+            match args.layout {
+                DIRICHLET_ATOMS => {
+                    require!(args.alpha.len() == n as usize, MarketError::BadGrid);
+                    prior::dirichlet(&alphas)
+                }
+                DIRICHLET_TOP_N => {
+                    let k = args.alpha.len() as u32;
+                    require!(args.top_n >= 1 && (args.top_n as u32) < k, MarketError::BadPrior);
+                    let atoms = prior::binom(k, args.top_n as u32).ok_or(MarketError::BadGrid)?;
+                    require!(atoms == n as u32 && atoms <= MAX_N as u32, MarketError::BadGrid);
+                    math::uniform_prior(atoms as usize)
+                }
+                DIRICHLET_SIMPLEX => {
+                    let k = args.alpha.len() as u32;
+                    let cells =
+                        prior::simplex_cell_count(k, args.bins as u32).ok_or(MarketError::BadGrid)?;
+                    require!(cells == n as u32 && cells <= MAX_N as u32, MarketError::BadGrid);
+                    prior::vote_share_simplex(k as usize, args.bins as usize, &alphas)
+                }
+                _ => return err!(MarketError::BadPrior),
             }
-            DIRICHLET_SIMPLEX => {
-                let k = args.alpha.len() as u32;
-                let cells =
-                    prior::simplex_cell_count(k, args.bins as u32).ok_or(MarketError::BadGrid)?;
-                require!(cells == n as u32 && cells <= MAX_N as u32, MarketError::BadGrid);
-                prior::vote_share_simplex(k as usize, args.bins as usize, &alphas)
-            }
-            _ => return err!(MarketError::BadPrior),
         };
         open_board(
             &mut ctx,
@@ -130,6 +172,10 @@ pub mod market {
             &args.common,
             p0,
             FamilyExtra {
+                a: *args.alpha.first().unwrap_or(&0),
+                b: *args.alpha.get(1).unwrap_or(&0),
+                c: *args.alpha.get(2).unwrap_or(&0),
+                d: *args.alpha.get(3).unwrap_or(&0),
                 e: args.bins as i64,
                 u0: args.layout,
                 u1: args.top_n,
@@ -240,12 +286,34 @@ pub mod market {
         fill_skellam(&mut ctx, contract, q_raw, nonce, false)
     }
 
+    /// Grow a Grid that did not fit in one `create_account` (n=256 needs one grow; n=1024 needs several).
+    /// Only resizes. $P_0$ is written in `write_grid_mass` chunks then `seal_grid`.
+    pub fn grow_grid(ctx: Context<GrowGrid>) -> Result<()> {
+        expand_grid(ctx)
+    }
+
+    /// Append the next `PRIOR_CHUNK` unnormalized interval masses from `Market.extra`.
+    pub fn write_grid_mass(ctx: Context<GrowGrid>) -> Result<()> {
+        append_interval_mass(ctx)
+    }
+
+    /// Normalize chunked masses into $P_0$ / weights / $z$. Trading stays blocked until this.
+    pub fn seal_grid(ctx: Context<GrowGrid>) -> Result<()> {
+        seal_interval_p0(ctx)
+    }
+
     /// Creator or roster member stops fills (early YES, VOID, or after close).
     pub fn halt(ctx: Context<Halt>) -> Result<()> {
         let market = &mut ctx.accounts.market;
+        require_live_committee(&ctx.accounts.committee)?;
         require!(
-            ctx.accounts.authority.key() == market.creator || market.is_member(&ctx.accounts.authority.key()),
+            ctx.accounts.authority.key() == market.creator
+                || ctx.accounts.committee.is_member(&ctx.accounts.authority.key()),
             MarketError::NotResolver
+        );
+        require!(
+            ctx.accounts.committee.key() == market.committee,
+            MarketError::BadCommittee
         );
         require!(market.status == Status::Trading as u8, MarketError::NotTrading);
         market.status = Status::Halted as u8;
@@ -266,22 +334,32 @@ fn open_interval(
         MarketError::IdMismatch
     );
     require!((8..=MAX_N).contains(&n), MarketError::BadGrid);
-    let p0 = match family {
-        Family::Gaussian => prior::truncated_normal(
-            n as usize,
-            Q64::from_raw(args.x_min),
-            Q64::from_raw(args.x_max),
-            Q64::from_raw(args.mu),
-            Q64::from_raw(args.sigma),
-        ),
-        Family::Lognormal => prior::truncated_lognormal(
-            n as usize,
-            Q64::from_raw(args.x_min),
-            Q64::from_raw(args.x_max),
-            Q64::from_raw(args.mu),
-            Q64::from_raw(args.sigma),
-        ),
-        _ => return err!(MarketError::BadPrior),
+    // Over CREATE_CAP the account cannot hold P0; a full 256-point exp here also blows the 1.4M CU cap.
+    // write_grid_mass / seal_grid rebuild P0 from extra.{a,b,c,d}.
+    let p0 = if Grid::space(n as usize) > Grid::CREATE_CAP {
+        require!(
+            family == Family::Gaussian || family == Family::Lognormal,
+            MarketError::BadGrid
+        );
+        vec![Q64::ZERO; n as usize]
+    } else {
+        match family {
+            Family::Gaussian => prior::truncated_normal(
+                n as usize,
+                Q64::from_raw(args.x_min),
+                Q64::from_raw(args.x_max),
+                Q64::from_raw(args.mu),
+                Q64::from_raw(args.sigma),
+            ),
+            Family::Lognormal => prior::truncated_lognormal(
+                n as usize,
+                Q64::from_raw(args.x_min),
+                Q64::from_raw(args.x_max),
+                Q64::from_raw(args.mu),
+                Q64::from_raw(args.sigma),
+            ),
+            _ => return err!(MarketError::BadPrior),
+        }
     };
     open_board(
         ctx,
@@ -310,9 +388,13 @@ fn open_board(
     require!((2..=MAX_N).contains(&common.n), MarketError::BadGrid);
     require!(common.beta > 0, MarketError::BadBeta);
     require!(common.fee_bps <= 10_000, MarketError::BadFee);
+    require!(
+        common.fee_timing == crate::state::FEE_ON_FILL || common.fee_timing == crate::state::FEE_ON_CLAIM,
+        MarketError::BadFee
+    );
     require!(now < common.close_ts, MarketError::BadClock);
-    require!(common.close_ts <= common.risk_lock_ts, MarketError::BadClock);
-    lock_roster(common)?;
+    require!(common.risk_lock_ts <= common.close_ts, MarketError::BadClock);
+    lock_clocks(common)?;
     lock_layers(common)?;
     require!(common.alpha_r_bps <= 10_000, MarketError::BadFee);
     require!(common.platform != Pubkey::default(), MarketError::BadCapital);
@@ -324,15 +406,10 @@ fn open_board(
     market.grid_bump = ctx.bumps.grid;
     market.n = common.n;
     market.fee_bps = common.fee_bps;
+    market.fee_timing = common.fee_timing;
     market.creator = ctx.accounts.creator.key();
-    market.committee = common.committee;
-    market.members = [Pubkey::default(); MAX_COMMITTEE];
-    for (i, m) in common.members.iter().enumerate() {
-        market.members[i] = *m;
-    }
+    market.committee = Pubkey::find_program_address(&[COMMITTEE_SEED], &crate::ID).0;
     market.authorized_reporter = common.authorized_reporter;
-    market.member_count = common.members.len() as u8;
-    market.m = common.m;
     market.close_ts = common.close_ts;
     market.risk_lock_ts = common.risk_lock_ts;
     market.report_window_secs = common.report_window_secs;
@@ -341,7 +418,7 @@ fn open_board(
     market.d_unit = common.d_unit;
     market.gamma_bps = if common.gamma_bps == 0 { 1_000 } else { common.gamma_bps };
     market.beta = common.beta;
-    market.c_m = common.c_m;
+    market.c_m = 0;
     market.fees_accrued = 0;
     market.trading_revenue = 0;
     market.alpha_r_bps = common.alpha_r_bps;
@@ -354,9 +431,326 @@ fn open_board(
     grid.market = market.key();
     grid.n = common.n;
     grid.bump = ctx.bumps.grid;
+    if Grid::space(p0.len()) <= Grid::CREATE_CAP {
+        write_grid_prior(grid, &p0);
+    } else {
+        require!(
+            family == Family::Gaussian || family == Family::Lognormal || family == Family::Dirichlet,
+            MarketError::BadGrid
+        );
+        grid.p0 = Vec::new();
+        grid.theta = Vec::new();
+        grid.exposure = Vec::new();
+        grid.weights = Vec::new();
+        grid.z = 0;
+    }
+    Ok(())
+}
+
+fn write_grid_prior(grid: &mut Grid, p0: &[Q64]) {
     grid.p0 = p0.iter().map(|q| q.raw()).collect();
     grid.theta = vec![0; p0.len()];
     grid.exposure = vec![0; p0.len()];
+    grid.weights = p0.iter().map(|q| q.raw()).collect();
+    grid.z = p0.iter().fold(Q64::ZERO, |a, p| a.saturating_add(*p)).raw();
+}
+
+fn dirichlet_alphas(market: &Market) -> Result<Vec<Q64>> {
+    let k = market.extra.u2 as usize;
+    require!((2..=4).contains(&k), MarketError::BadPrior);
+    let raw = [
+        market.extra.a,
+        market.extra.b,
+        market.extra.c,
+        market.extra.d,
+    ];
+    Ok(raw[..k].iter().copied().map(Q64::from_raw).collect())
+}
+
+fn interval_log_bounds(market: &Market) -> Result<(Q64, Q64)> {
+    let xmin = Q64::from_raw(market.extra.a);
+    let xmax = Q64::from_raw(market.extra.b);
+    match market.family {
+        x if x == Family::Gaussian as u8 => Ok((xmin, xmax)),
+        x if x == Family::Lognormal as u8 => {
+            require!(xmin.raw() > 0 && xmax > xmin, MarketError::BadGrid);
+            Ok((xmin.ln(), xmax.ln()))
+        }
+        _ => err!(MarketError::BadGrid),
+    }
+}
+
+const GRID_HDR: usize = 8 + 32 + 2 + 1 + 16;
+
+fn grid_i128(data: &[u8], off: usize) -> Result<i128> {
+    require!(data.len() >= off + 16, MarketError::BadGrid);
+    let bytes: [u8; 16] = data[off..off + 16]
+        .try_into()
+        .map_err(|_| error!(MarketError::BadGrid))?;
+    Ok(i128::from_le_bytes(bytes))
+}
+
+fn set_grid_i128(data: &mut [u8], off: usize, v: i128) -> Result<()> {
+    require!(data.len() >= off + 16, MarketError::BadGrid);
+    data[off..off + 16].copy_from_slice(&v.to_le_bytes());
+    Ok(())
+}
+
+fn grid_header(data: &[u8]) -> Result<(Pubkey, u16, u8, i128)> {
+    require!(data.len() >= GRID_HDR + 4, MarketError::BadGrid);
+    require!(&data[..8] == Grid::DISCRIMINATOR, MarketError::BadGrid);
+    let market_bytes: [u8; 32] = data[8..40].try_into().map_err(|_| error!(MarketError::BadGrid))?;
+    let n_bytes: [u8; 2] = data[40..42].try_into().map_err(|_| error!(MarketError::BadGrid))?;
+    Ok((
+        Pubkey::from(market_bytes),
+        u16::from_le_bytes(n_bytes),
+        data[42],
+        grid_i128(data, 43)?,
+    ))
+}
+
+fn grid_vec_lens(data: &[u8]) -> Result<(usize, usize, usize, usize)> {
+    require!(data.len() >= GRID_HDR + 4, MarketError::BadGrid);
+    let mut off = GRID_HDR;
+    let read_len = |data: &[u8], off: &mut usize| -> Result<usize> {
+        require!(data.len() >= *off + 4, MarketError::BadGrid);
+        let n = u32::from_le_bytes(data[*off..*off + 4].try_into().map_err(|_| error!(MarketError::BadGrid))?)
+            as usize;
+        *off += 4 + n.saturating_mul(16);
+        require!(data.len() >= *off, MarketError::BadGrid);
+        Ok(n)
+    };
+    let p0 = read_len(data, &mut off)?;
+    let theta = read_len(data, &mut off)?;
+    let exposure = read_len(data, &mut off)?;
+    let weights = read_len(data, &mut off)?;
+    Ok((p0, theta, exposure, weights))
+}
+
+/// Data offsets of the four `Vec<i128>` payloads when every vec has length `n`.
+fn sealed_vec_offs(n: usize) -> (usize, usize, usize, usize) {
+    let p0 = GRID_HDR + 4;
+    let theta = p0 + n * 16 + 4;
+    let exp = theta + n * 16 + 4;
+    let w = exp + n * 16 + 4;
+    (p0, theta, exp, w)
+}
+
+fn require_sealed_bytes(data: &[u8], market: Pubkey, n: u16) -> Result<(usize, usize, usize)> {
+    let (g_market, g_n, _, z) = grid_header(data)?;
+    require!(g_market == market, MarketError::WrongGrid);
+    require!(g_n == n, MarketError::WrongGrid);
+    require!(z != 0, MarketError::GridNotReady);
+    let nu = n as usize;
+    require!(data.len() >= Grid::space(nu), MarketError::GridNotReady);
+    let (p0_len, theta_len, exp_len, w_len) = grid_vec_lens(data)?;
+    require!(
+        p0_len == nu && theta_len == nu && exp_len == nu && w_len == nu,
+        MarketError::GridNotReady
+    );
+    let (_, theta, exp, w) = sealed_vec_offs(nu);
+    Ok((theta, exp, w))
+}
+
+fn grid_l_max_bytes(data: &[u8], exp_off: usize, n: usize) -> Result<i128> {
+    let mut m = 0i128;
+    for i in 0..n {
+        let v = grid_i128(data, exp_off + i * 16)?;
+        if v > m {
+            m = v;
+        }
+    }
+    Ok(m)
+}
+
+fn apply_cached_on_bytes(
+    data: &mut [u8],
+    n: usize,
+    theta_off: usize,
+    exp_off: usize,
+    w_off: usize,
+    beta: Q64,
+    in_set: impl Fn(usize) -> bool,
+    signed_q: i128,
+) -> Result<Q64> {
+    let z0 = Q64::from_raw(grid_i128(data, 43)?);
+    require!(z0.raw() != 0, MarketError::GridNotReady);
+    let q = Q64::from_raw(signed_q);
+    let mut num = Q64::ZERO;
+    for i in 0..n {
+        if in_set(i) {
+            num = num.saturating_add(Q64::from_raw(grid_i128(data, w_off + i * 16)?));
+        }
+    }
+    let p = num.checked_div(z0).unwrap_or(Q64::ZERO);
+    let cost = math::lmsr::lmsr_cost(beta, p, q);
+    let e = q.checked_div(beta).unwrap_or(Q64::ZERO).exp();
+    let mut z_now = z0;
+    for i in 0..n {
+        if in_set(i) {
+            let w_old = Q64::from_raw(grid_i128(data, w_off + i * 16)?);
+            let w_new = w_old.saturating_mul(e);
+            z_now = z_now.saturating_sub(w_old).saturating_add(w_new);
+            set_grid_i128(data, w_off + i * 16, w_new.raw())?;
+            let th = Q64::from_raw(grid_i128(data, theta_off + i * 16)?);
+            set_grid_i128(data, theta_off + i * 16, th.saturating_add(q).raw())?;
+            let ex = Q64::from_raw(grid_i128(data, exp_off + i * 16)?);
+            set_grid_i128(data, exp_off + i * 16, ex.saturating_add(q).raw())?;
+        }
+    }
+    set_grid_i128(data, 43, z_now.raw())?;
+    Ok(cost)
+}
+
+fn expand_grid(ctx: Context<GrowGrid>) -> Result<()> {
+    let n = ctx.accounts.market.n as usize;
+    require!((2..=MAX_N).contains(&(n as u16)), MarketError::BadGrid);
+    let info = ctx.accounts.grid.to_account_info();
+    {
+        let data = info.try_borrow_data()?;
+        let (g_market, g_n, _, _) = grid_header(&data)?;
+        require!(g_market == ctx.accounts.market.key(), MarketError::WrongGrid);
+        require!(g_n == ctx.accounts.market.n, MarketError::WrongGrid);
+    }
+    let need = Grid::space(n);
+    if info.data_len() >= need {
+        return Ok(());
+    }
+    let next = info.data_len().saturating_add(Grid::CREATE_CAP).min(need);
+    let rent = Rent::get()?.minimum_balance(next);
+    let extra = rent.saturating_sub(info.lamports());
+    if extra > 0 {
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.creator.to_account_info(),
+                    to: info.clone(),
+                },
+            ),
+            extra,
+        )?;
+    }
+    info.resize(next)?;
+    Ok(())
+}
+
+fn append_interval_mass(ctx: Context<GrowGrid>) -> Result<()> {
+    let n = ctx.accounts.market.n as usize;
+    require!((2..=MAX_N).contains(&(n as u16)), MarketError::BadGrid);
+    let info = ctx.accounts.grid.to_account_info();
+    require!(info.data_len() >= Grid::space(n), MarketError::GridNotReady);
+    let family = ctx.accounts.market.family;
+    let kn = if family == Family::Dirichlet as u8 {
+        None
+    } else {
+        let (lo, hi) = interval_log_bounds(&ctx.accounts.market)?;
+        let mu = Q64::from_raw(ctx.accounts.market.extra.c);
+        let sigma = Q64::from_raw(ctx.accounts.market.extra.d);
+        Some(prior::TruncatedNormal::new(n, lo, hi, mu, sigma))
+    };
+    let mut data = info.try_borrow_mut_data()?;
+    let (g_market, g_n, _, z) = grid_header(&data)?;
+    require!(g_market == ctx.accounts.market.key(), MarketError::WrongGrid);
+    require!(g_n == ctx.accounts.market.n, MarketError::WrongGrid);
+    let (p0_len, theta_len, exp_len, w_len) = grid_vec_lens(&data)?;
+    if p0_len == n && w_len == n && z != 0 {
+        return Ok(());
+    }
+    require!(
+        z == 0 && w_len == 0 && theta_len == 0 && exp_len == 0,
+        MarketError::BadGrid
+    );
+    if p0_len >= n {
+        return Ok(());
+    }
+    let start = p0_len;
+    let end = (start + Grid::PRIOR_CHUNK).min(n);
+    let old_tail = GRID_HDR + 4 + start * 16;
+    let new_tail = GRID_HDR + 4 + end * 16;
+    require!(data.len() >= new_tail + 12, MarketError::BadGrid);
+    data.copy_within(old_tail..old_tail + 12, new_tail);
+    data[GRID_HDR..GRID_HDR + 4].copy_from_slice(&(end as u32).to_le_bytes());
+    let p0_off = GRID_HDR + 4;
+    if family == Family::Dirichlet as u8 {
+        match ctx.accounts.market.extra.u0 {
+            DIRICHLET_SIMPLEX => {
+                let alphas = dirichlet_alphas(&ctx.accounts.market)?;
+                let bins = ctx.accounts.market.extra.e as usize;
+                let chunk = prior::simplex_chunk_raw(alphas.len(), bins, &alphas, start, end);
+                require!(chunk.len() == end - start, MarketError::BadGrid);
+                for (i, raw) in chunk.iter().enumerate() {
+                    set_grid_i128(&mut data, p0_off + (start + i) * 16, *raw)?;
+                }
+            }
+            DIRICHLET_TOP_N => {
+                for i in start..end {
+                    set_grid_i128(&mut data, p0_off + i * 16, Q64::ONE.raw())?;
+                }
+            }
+            _ => return err!(MarketError::BadGrid),
+        }
+        return Ok(());
+    }
+    let kn = kn.ok_or_else(|| error!(MarketError::BadGrid))?;
+    for i in start..end {
+        set_grid_i128(&mut data, p0_off + i * 16, kn.weight_at(i).raw())?;
+    }
+    Ok(())
+}
+
+fn seal_interval_p0(ctx: Context<GrowGrid>) -> Result<()> {
+    let n = ctx.accounts.market.n as usize;
+    require!((2..=MAX_N).contains(&(n as u16)), MarketError::BadGrid);
+    let info = ctx.accounts.grid.to_account_info();
+    require!(info.data_len() >= Grid::space(n), MarketError::GridNotReady);
+    let mut data = info.try_borrow_mut_data()?;
+    let (g_market, g_n, _, z) = grid_header(&data)?;
+    require!(g_market == ctx.accounts.market.key(), MarketError::WrongGrid);
+    require!(g_n == ctx.accounts.market.n, MarketError::WrongGrid);
+    let (p0_len, theta_len, exp_len, w_len) = grid_vec_lens(&data)?;
+    if p0_len == n && w_len == n && z != 0 {
+        return Ok(());
+    }
+    require!(
+        p0_len == n && z == 0 && w_len == 0 && theta_len == 0 && exp_len == 0,
+        MarketError::GridNotReady
+    );
+    let p0_off = GRID_HDR + 4;
+    let mut p0 = vec![0i128; n];
+    for (i, slot) in p0.iter_mut().enumerate() {
+        let off = p0_off + i * 16;
+        let bytes: [u8; 16] = data[off..off + 16]
+            .try_into()
+            .map_err(|_| error!(MarketError::BadGrid))?;
+        *slot = i128::from_le_bytes(bytes);
+    }
+    prior::normalize_i128(&mut p0);
+    let z_sum = p0
+        .iter()
+        .fold(Q64::ZERO, |a, p| a.saturating_add(Q64::from_raw(*p)))
+        .raw();
+    data[43..59].copy_from_slice(&z_sum.to_le_bytes());
+    for (i, v) in p0.iter().enumerate() {
+        let off = p0_off + i * 16;
+        data[off..off + 16].copy_from_slice(&v.to_le_bytes());
+    }
+    let mut off = p0_off + n * 16;
+    let n32 = (n as u32).to_le_bytes();
+    data[off..off + 4].copy_from_slice(&n32);
+    off += 4;
+    data[off..off + n * 16].fill(0);
+    off += n * 16;
+    data[off..off + 4].copy_from_slice(&n32);
+    off += 4;
+    data[off..off + n * 16].fill(0);
+    off += n * 16;
+    data[off..off + 4].copy_from_slice(&n32);
+    off += 4;
+    for (i, v) in p0.iter().enumerate() {
+        let at = off + i * 16;
+        data[at..at + 16].copy_from_slice(&v.to_le_bytes());
+    }
     Ok(())
 }
 
@@ -384,52 +778,40 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_b
         return Ok(());
     }
     require_next(&ctx.accounts.nonce_acc, nonce)?;
-    require!(
-        ctx.accounts.grid.market == ctx.accounts.market.key(),
-        MarketError::WrongGrid
-    );
-    require!(ctx.accounts.grid.n == ctx.accounts.market.n, MarketError::WrongGrid);
-    require!(
-        ctx.accounts.grid.p0.len() == ctx.accounts.market.n as usize,
-        MarketError::WrongGrid
-    );
-
-    let in_set = mask::decode(set_mask, ctx.accounts.market.n as usize)?;
+    let n = ctx.accounts.market.n as usize;
+    mask::check(set_mask, n)?;
     let signed = if is_buy { q_raw } else { -q_raw };
     if !is_buy {
         require!(ctx.accounts.position.q >= q_raw, MarketError::NoInventory);
     }
+    let grid_info = ctx.accounts.grid.to_account_info();
+    let mut data = grid_info.try_borrow_mut_data()?;
+    let (theta_off, exp_off, w_off) =
+        require_sealed_bytes(&data, ctx.accounts.market.key(), ctx.accounts.market.n)?;
+    let cost = apply_cached_on_bytes(
+        &mut data,
+        n,
+        theta_off,
+        exp_off,
+        w_off,
+        Q64::from_raw(ctx.accounts.market.beta),
+        |i| mask::bit(set_mask, i),
+        signed,
+    )?;
+    let l_max = grid_l_max_bytes(&data, exp_off, n)?;
+    drop(data);
 
-    let mut state = LmsrState {
-        beta: Q64::from_raw(ctx.accounts.market.beta),
-        p0: ctx.accounts.grid.p0.iter().copied().map(Q64::from_raw).collect(),
-        theta: ctx.accounts.grid.theta.iter().copied().map(Q64::from_raw).collect(),
-        exposure: ctx
-            .accounts
-            .grid
-            .exposure
-            .iter()
-            .copied()
-            .map(Q64::from_raw)
-            .collect(),
-    };
-    let cost = lmsr_update(&mut state, &in_set, Q64::from_raw(signed));
+    ctx.accounts.market.l_max = l_max;
     let fee_bps = ctx.accounts.market.fee_bps;
-    let fee = if is_buy && fee_bps > 0 {
+    let fee = if is_buy && ctx.accounts.market.fee_on_fill() && fee_bps > 0 {
         cost.saturating_mul(Q64::from_int(fee_bps as i64))
             .checked_div(Q64::from_int(10_000))
             .unwrap_or(Q64::ZERO)
     } else {
         Q64::ZERO
     };
-    let l_max = state.l_max().raw();
-
-    ctx.accounts.grid.theta = state.theta.iter().map(|q| q.raw()).collect();
-    ctx.accounts.grid.exposure = state.exposure.iter().map(|q| q.raw()).collect();
-
-    ctx.accounts.market.l_max = l_max;
-    let cost_usdc = (cost.raw().max(0) >> 64) as u64;
-    let fee_usdc = (fee.raw().max(0) >> 64) as u64;
+    let cost_usdc = if is_buy { usdc_charge(cost) } else { usdc(cost) };
+    let fee_usdc = if is_buy { usdc_charge(fee) } else { usdc(fee) };
     if is_buy {
         ctx.accounts.market.fees_accrued = ctx
             .accounts
@@ -499,40 +881,6 @@ fn expand_skellam(contract: SkellamContract, k_max: u32) -> Result<Vec<Vec<bool>
     math::football::skellam_masks(kind, a, b, k_max).ok_or_else(|| error!(MarketError::BadMask))
 }
 
-fn apply_lmsr(
-    market: &mut Market,
-    grid: &mut Grid,
-    in_set: &[bool],
-    signed_q: i128,
-    charge_fee: bool,
-) -> Result<(i128, i128)> {
-    require!(in_set.len() == market.n as usize, MarketError::BadMask);
-    let mut state = LmsrState {
-        beta: Q64::from_raw(market.beta),
-        p0: grid.p0.iter().copied().map(Q64::from_raw).collect(),
-        theta: grid.theta.iter().copied().map(Q64::from_raw).collect(),
-        exposure: grid.exposure.iter().copied().map(Q64::from_raw).collect(),
-    };
-    let cost = lmsr_update(&mut state, in_set, Q64::from_raw(signed_q));
-    let fee = if charge_fee && market.fee_bps > 0 {
-        cost.saturating_mul(Q64::from_int(market.fee_bps as i64))
-            .checked_div(Q64::from_int(10_000))
-            .unwrap_or(Q64::ZERO)
-    } else {
-        Q64::ZERO
-    };
-    grid.theta = state.theta.iter().map(|q| q.raw()).collect();
-    grid.exposure = state.exposure.iter().map(|q| q.raw()).collect();
-    market.l_max = state.l_max().raw();
-    if charge_fee {
-        let fee_usdc = (fee.raw().max(0) >> 64) as u64;
-        let cost_usdc = (cost.raw().max(0) >> 64) as u64;
-        market.fees_accrued = market.fees_accrued.saturating_add(fee_usdc);
-        market.trading_revenue = market.trading_revenue.saturating_add(cost_usdc);
-    }
-    Ok((cost.raw(), fee.raw()))
-}
-
 fn fill_skellam(
     ctx: &mut Context<TradeSkellam>,
     contract: SkellamContract,
@@ -580,28 +928,63 @@ fn fill_skellam(
     require!(parts >= 1 && q_raw % parts == 0, MarketError::ZeroQty);
     let part = q_raw / parts;
     let signed = if is_buy { part } else { -part };
+    let n = ctx.accounts.market.n as usize;
+    let beta = Q64::from_raw(ctx.accounts.market.beta);
+    let fee_bps = ctx.accounts.market.fee_bps;
+    let charge_fee = is_buy && ctx.accounts.market.fee_on_fill() && fee_bps > 0;
+    let grid_info = ctx.accounts.grid.to_account_info();
+    let mut data = grid_info.try_borrow_mut_data()?;
+    let (theta_off, exp_off, w_off) =
+        require_sealed_bytes(&data, ctx.accounts.market.key(), ctx.accounts.market.n)?;
     let mut cost_sum = 0i128;
     let mut fee_sum = 0i128;
-    for mask in &masks {
-        let (c, f) = apply_lmsr(
-            &mut ctx.accounts.market,
-            &mut ctx.accounts.grid,
-            mask,
+    for m in &masks {
+        require!(m.len() == n, MarketError::BadMask);
+        let cost = apply_cached_on_bytes(
+            &mut data,
+            n,
+            theta_off,
+            exp_off,
+            w_off,
+            beta,
+            |i| m[i],
             signed,
-            is_buy,
         )?;
-        cost_sum = cost_sum.checked_add(c).ok_or(MarketError::Overflow)?;
-        fee_sum = fee_sum.checked_add(f).ok_or(MarketError::Overflow)?;
+        let fee = if charge_fee {
+            cost.saturating_mul(Q64::from_int(fee_bps as i64))
+                .checked_div(Q64::from_int(10_000))
+                .unwrap_or(Q64::ZERO)
+        } else {
+            Q64::ZERO
+        };
+        if is_buy {
+            ctx.accounts.market.fees_accrued = ctx
+                .accounts
+                .market
+                .fees_accrued
+                .saturating_add(usdc_charge(fee));
+            ctx.accounts.market.trading_revenue = ctx
+                .accounts
+                .market
+                .trading_revenue
+                .saturating_add(usdc_charge(cost));
+        }
+        cost_sum = cost_sum.checked_add(cost.raw()).ok_or(MarketError::Overflow)?;
+        fee_sum = fee_sum.checked_add(fee.raw()).ok_or(MarketError::Overflow)?;
     }
+    let l_max = grid_l_max_bytes(&data, exp_off, n)?;
+    drop(data);
+    ctx.accounts.market.l_max = l_max;
     let (kind, a, b) = contract.ticket_key();
-    let l_max = ctx.accounts.market.l_max;
     let pos = &mut ctx.accounts.position;
     pos.market = market_key;
     pos.owner = owner_key;
     pos.set_hash = ids::skellam_ticket(kind, a, b);
     pos.bump = ctx.bumps.position;
-    let cost_usdc = (cost_sum.max(0) >> 64) as u64;
-    let fee_usdc = (fee_sum.max(0) >> 64) as u64;
+    let cost_q = Q64::from_raw(cost_sum);
+    let fee_q = Q64::from_raw(fee_sum);
+    let cost_usdc = if is_buy { usdc_charge(cost_q) } else { usdc(cost_q) };
+    let fee_usdc = if is_buy { usdc_charge(fee_q) } else { usdc(fee_q) };
     if is_buy {
         pos.q = pos.q.checked_add(q_raw).ok_or(MarketError::Overflow)?;
         pos.cost_paid = pos.cost_paid.saturating_add(cost_usdc);
@@ -652,25 +1035,52 @@ fn check_common(id_hash: &[u8; 32], n: u16, common: &CreateCommon) -> Result<()>
     Ok(())
 }
 
-fn lock_roster(common: &CreateCommon) -> Result<()> {
-    let n = common.members.len();
-    require!(
-        n >= 1 && n <= MAX_COMMITTEE && common.m >= 1 && (common.m as usize) <= n,
-        MarketError::BadCommittee
-    );
+fn lock_clocks(common: &CreateCommon) -> Result<()> {
     require!(
         common.report_window_secs > 0 && common.challenge_secs > 0,
         MarketError::BadClock
     );
+    Ok(())
+}
+
+fn require_live_committee(committee: &Committee) -> Result<()> {
     require!(
-        common.members.iter().any(|m| *m == common.committee),
+        committee.member_count >= 1
+            && committee.m >= 1
+            && committee.m <= committee.member_count,
         MarketError::BadCommittee
     );
-    for (i, m) in common.members.iter().enumerate() {
-        require!(*m != Pubkey::default(), MarketError::BadCommittee);
-        for prev in common.members.iter().take(i) {
-            require!(m != prev, MarketError::BadCommittee);
+    Ok(())
+}
+
+fn write_roster(
+    committee: &mut Committee,
+    authority: Pubkey,
+    bump: u8,
+    members: Vec<Pubkey>,
+    m: u8,
+) -> Result<()> {
+    let n = members.len();
+    require!(
+        n >= 1 && n <= MAX_COMMITTEE && m >= 1 && (m as usize) <= n,
+        MarketError::BadCommittee
+    );
+    for (i, member) in members.iter().enumerate() {
+        require!(*member != Pubkey::default(), MarketError::BadCommittee);
+        for prev in members.iter().take(i) {
+            require!(member != prev, MarketError::BadCommittee);
         }
+    }
+    committee.authority = authority;
+    committee.members = [Pubkey::default(); MAX_COMMITTEE];
+    for (i, member) in members.iter().enumerate() {
+        committee.members[i] = *member;
+    }
+    committee.member_count = n as u8;
+    committee.m = m;
+    committee.bump = bump;
+    if committee.epoch == 0 {
+        committee.epoch = 1;
     }
     Ok(())
 }
@@ -727,11 +1137,27 @@ pub struct CreateBoard<'info> {
     #[account(
         init,
         payer = creator,
-        space = Grid::space(n as usize),
+        space = Grid::alloc_space(n as usize),
         seeds = [GRID_SEED, market.key().as_ref()],
         bump
     )]
     pub grid: Account<'info, Grid>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct GrowGrid<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    #[account(mut, has_one = creator)]
+    pub market: Account<'info, Market>,
+    /// CHECK: PDA grid. Grow resizes; write/seal parse Borsh without holding four n-vecs on the heap.
+    #[account(
+        mut,
+        seeds = [GRID_SEED, market.key().as_ref()],
+        bump,
+    )]
+    pub grid: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -777,12 +1203,13 @@ pub struct Trade<'info> {
         bump = market.bump
     )]
     pub market: Box<Account<'info, Market>>,
+    /// CHECK: PDA grid. Write/seal/fill mutate Borsh in place; BPF bump heap is 32KiB.
     #[account(
         mut,
         seeds = [GRID_SEED, market.key().as_ref()],
-        bump = grid.bump
+        bump
     )]
-    pub grid: Box<Account<'info, Grid>>,
+    pub grid: UncheckedAccount<'info>,
     #[account(
         init_if_needed,
         payer = trader,
@@ -833,12 +1260,13 @@ pub struct TradeSkellam<'info> {
         bump = market.bump
     )]
     pub market: Box<Account<'info, Market>>,
+    /// CHECK: PDA grid. Write/seal/fill mutate Borsh in place; BPF bump heap is 32KiB.
     #[account(
         mut,
         seeds = [GRID_SEED, market.key().as_ref()],
-        bump = grid.bump
+        bump
     )]
-    pub grid: Box<Account<'info, Grid>>,
+    pub grid: UncheckedAccount<'info>,
     #[account(
         init_if_needed,
         payer = trader,
@@ -888,6 +1316,30 @@ pub struct Halt<'info> {
         bump = market.bump
     )]
     pub market: Account<'info, Market>,
+    #[account(seeds = [COMMITTEE_SEED], bump = committee.bump)]
+    pub committee: Account<'info, Committee>,
+}
+
+#[derive(Accounts)]
+pub struct InitCommittee<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(
+        init,
+        payer = authority,
+        space = Committee::SIZE,
+        seeds = [COMMITTEE_SEED],
+        bump
+    )]
+    pub committee: Account<'info, Committee>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetRoster<'info> {
+    pub authority: Signer<'info>,
+    #[account(mut, seeds = [COMMITTEE_SEED], bump = committee.bump)]
+    pub committee: Account<'info, Committee>,
 }
 
 #[error_code]
@@ -900,7 +1352,7 @@ pub enum MarketError {
     BadPrior,
     #[msg("beta must be > 0")]
     BadBeta,
-    #[msg("C_M must be > 0")]
+    #[msg("platform or d_unit is illegal")]
     BadCapital,
     #[msg("fee_bps must be <= 10000")]
     BadFee,
@@ -936,6 +1388,8 @@ pub enum MarketError {
     SessionLive,
     #[msg("nonce is not the next value (or a same-nonce retry of another fill)")]
     NonceReplay,
+    #[msg("grid P0 is not sealed; grow_grid / write_grid_mass / seal_grid")]
+    GridNotReady,
 }
 
 #[cfg(test)]
@@ -976,37 +1430,22 @@ mod tests {
     }
 
     #[test]
-    fn roster_is_locked_at_create() {
-        use super::{lock_roster, CreateCommon};
+    fn shared_roster_rejects_duplicates() {
+        use super::{write_roster, Committee};
         use anchor_lang::prelude::Pubkey;
         let a = Pubkey::new_from_array([1u8; 32]);
-        let b = Pubkey::new_from_array([2u8; 32]);
-        let mut common = CreateCommon {
-            id_hash: [0; 32],
-            n: 2,
-            close_ts: 10,
-            risk_lock_ts: 20,
-            beta: 1,
-            c_m: 1,
-            fee_bps: 0,
-            committee: a,
-            members: vec![a, b],
-            m: 2,
-            authorized_reporter: Pubkey::default(),
-            report_window_secs: 60,
-            challenge_secs: 30,
-            n_layers: 3,
-            d_unit: 10_000,
-            gamma_bps: 1_000,
-            alpha_r_bps: 7_000,
-            platform: a,
+        let mut c = Committee {
+            authority: a,
+            members: [Pubkey::default(); super::MAX_COMMITTEE],
+            member_count: 0,
+            m: 0,
+            bump: 1,
+            epoch: 0,
         };
-        assert!(lock_roster(&common).is_ok());
-        common.members = vec![b];
-        assert!(lock_roster(&common).is_err());
-        common.members = vec![a, a];
-        common.committee = a;
-        assert!(lock_roster(&common).is_err());
+        assert!(write_roster(&mut c, a, 1, vec![a, Pubkey::new_from_array([2u8; 32])], 2).is_ok());
+        assert_eq!(c.member_count, 2);
+        assert!(write_roster(&mut c, a, 1, vec![a, a], 1).is_err());
+        assert!(write_roster(&mut c, a, 1, vec![a], 2).is_err());
     }
 
     #[test]
@@ -1018,13 +1457,11 @@ mod tests {
             id_hash: [0; 32],
             n: 2,
             close_ts: 10,
-            risk_lock_ts: 20,
+            risk_lock_ts: 10,
             beta: 1,
             c_m: 1,
             fee_bps: 0,
-            committee: a,
-            members: vec![a],
-            m: 1,
+            fee_timing: 0,
             authorized_reporter: Pubkey::default(),
             report_window_secs: 60,
             challenge_secs: 30,

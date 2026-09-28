@@ -1,0 +1,9 @@
+{
+  "name": "Continuous PDF Prediction Desk",
+  "short_name": "Continuous",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#12110e",
+  "theme_color": "#12110e",
+  "description": "Continuous PDF prediction market. Fills are public on Solana."
+}

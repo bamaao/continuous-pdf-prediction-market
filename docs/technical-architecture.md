@@ -4,8 +4,8 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.2 |
-| Corresponding product | `product-specification.md` v1.3 |
+| Version | 1.4 |
+| Corresponding product | `product-specification.md` v1.6 |
 | Corresponding system | `system-architecture.md` |
 
 This document answers: which frameworks, which middleware, and how the core algorithms are implemented.
@@ -23,6 +23,7 @@ This document answers: which frameworks, which middleware, and how the core algo
 | Mobile | **The same Next.js stack**: PWA + in-wallet browsers + official-site Android TWA | No App Store / Play |
 | CLI | Rust `clap` + `crates/client` | Market creation, Keeper, reporting |
 | All backends | **Rust Axum** (no Node/Fastify) | Query, trading gateway, indexer, Keeper |
+| Persistence (read path) | **sqlx → PostgreSQL 16**, DDD + associated-type `Context` | Catalog, fill journal, projections. Next.js does not use sqlx |
 | On-chain programs | **Anchor** + `ephemeral-rollups-sdk` + `session-keys` | Not hand-written-entrypoint pure native |
 | Chain client | `@coral-xyz/anchor` + `@solana/web3.js` (do not use `@solana/kit`) | Build transactions from IDL |
 | Indexing | `yellowstone-grpc` | Write to PG |
@@ -55,7 +56,7 @@ The only user trading client is **this Next.js stack**. No Flutter, no React Nat
 | Offline shell | **PWA** (manifest + service worker): add to home screen, cache static assets; fills remain authoritative only from online ER |
 | Deployment | `www` SSR lobby; trading-board pages are `'use client'`; instructions are not forwarded through a business API |
 
-Minimum route set: `/` lobby, `/m/[id]` trading board, `/auction/[id]`, `/portfolio`, `/resolve/[id]`. The full committee desk lives in `apps/committee` (also Next.js).
+Minimum route set: `/` lobby catalog (approved boards only), `/m/[id]` board, `/auctions` catalog, `/auction/[id]` layer book, `/portfolio` tickets, `/lp` Risk LP book, `/resolve/[id]`, `/committee`, `/create` (SIWS application), `/review` (system reviewer), `/ops` (read-only). Committee is a route in the same Next.js app until it earns a split. Keeper writes stay on the CLI. Web acceptance list: SRS §4.7 (FR-UI-*).
 
 ### 2.2 How phones are used: no native store apps
 
@@ -111,7 +112,7 @@ User path (order is fixed):
    Create Session Keypair + MagicBlock SessionToken
    Then write this protocol’s limits on-chain: expiry, remaining USDC, allowed ixs, market whitelist
 5. In-book buy_set / sell_set: Session Key signs; main wallet no longer pops
-6. Withdraw, create market, inject C_M, authorize committee members: must be a main-wallet popup; Session has no authority
+6. Withdraw, create market, authorize committee members: must be a main-wallet popup; Session has no authority
 7. “End session”: revoke SessionToken + delete the key locally; “Disconnect wallet”: clear JWT
 ```
 
@@ -143,7 +144,7 @@ The path is the same as 2.5: connect → SIWS → `deposit` → Session → plac
 | Open / renew / revoke Session | **Main wallet** | L1 (SessionToken + this protocol’s limit account) |
 | `buy_set` / `sell_set` | **Session** | ER |
 | Risk auction `bid` / `cancel` | Main wallet (locking collateral is a funds action) | L1 or ER per program, but must be the main wallet |
-| `create_*`, inject $C_M$ | Main wallet / ops multisig | L1 |
+| `create_*` | Main wallet / ops multisig | L1 |
 | `submit_result` / `challenge` / `vote` | Committee member main wallet or KMS hot key | L1 |
 | Program upgrade | Multisig + timelock | L1 |
 
@@ -185,7 +186,7 @@ Legal and regional switches are ops configuration (disable trading by jurisdicti
 | Service | Framework | Notes |
 | --- | --- | --- |
 | Gateway | Axum + tower middleware | Rate limits, timeouts, tracing |
-| Market API | Axum + sqlx | Read PG |
+| Market API | Axum + **sqlx** | Web-facing read/catalog API. DDD: Domain traits, Application use-cases, Infrastructure `*RepositoryImpl`. Next.js never opens PG |
 | Trading Gateway | Axum / raw TCP+WSS | Connection pool to ER |
 | Quote Engine | Standalone process, in-memory grid | Subscribes to Indexer or ER accounts |
 | Indexer | tokio tasks | gRPC yellowstone |
@@ -194,13 +195,29 @@ Legal and regional switches are ops configuration (disable trading by jurisdicti
 
 Process model: each service is its own binary, a K8s Deployment. Quote and Trading are **not** co-located with the Indexer.
 
+### 3.1 DDD + sqlx (Market API / Indexer)
+
+Locked for this application’s Rust services that persist off-chain data. Full scheme: `docs/architecture/ddd-sqlx.md`.
+
+```text
+Interface (Axum) → Application (begin / commit) → Domain (traits) → Infrastructure (sqlx)
+```
+
+- **Domain** repository traits use an associated type `Context` (GAT `type Context<'c>`) so the Domain crate never names sqlx.
+- **Infrastructure** binds `type Context<'c> = sqlx::Transaction<'c, sqlx::Postgres>` and runs parameterized `sqlx::query!`.
+- **Application** owns the unit of work: `let mut tx = pool.begin().await?; repo.save(&mut tx, &agg).await?; tx.commit().await?;`
+- **Interface** is Axum only. Handlers do not contain SQL.
+- **Next.js** calls HTTPS `/v1/*`. sqlx is not a web-frontend dependency.
+
+Postgres remains S2: listings, **listing applications / review log**, **board comments**, and the fill journal are off-chain helpers; $\theta$, $\rho$, and Vault USDC stay on-chain (FR-DUR-04). A listing application is `PENDING_REVIEW` until `R-REVIEW` approves and the **reviewer wallet** signs on-chain create (FR-UI-43); status is `OPEN` once `market` is attached. Comments (`market_comment`) exist only after a board is approved and indexed (FR-UI-42) and never enter $C_{\max}$, $C_P$, or the fee ledger. Geo-IP blocks (FR-UI-44) are access policy on `/v1/*`. Local test uses the machine PostgreSQL (`DATABASE_URL`, default `postgres://cpm:cpm@127.0.0.1:5432/cpm` after `infra/local-pg.sql`). Memory is a cache. JSON files are import-only. `ALLOW_MEMORY_ONLY=1` is not for desks.
+
 ---
 
 ## 4. Middleware and infrastructure
 
 | Middleware | Usage |
 | --- | --- |
-| PostgreSQL | Markets, fills, position snapshots, auctions, committee proposals, reconciliation |
+| PostgreSQL | **sqlx only from Rust services.** Tables: `listing`, `listing_application`, `review_log`, `market_comment`, `fill_journal`, `market_proj` (+ later position/quote/layer/resolution projections). Not the ledger |
 | Redis | `quote:{market}`, coverage, nonce, rate-limit token buckets |
 | NATS JetStream | `fills`, `markets.updated`, `resolution.*` |
 | S3 | `evidence/{market}/{proposal}` |
@@ -300,7 +317,7 @@ Steps (ER `buy_set` / `buy_skellam_set`):
 3. Compute $p_S$, $C_S(q)$ in `crates/math` (one LMSR)
 4. For $k\in S$: $\theta_k\leftarrow\theta_k+q$, $E_k\leftarrow E_k+q$
 5. Update $L_{\max}=\max E_k$ (football: $\max_{ij}E_{ij}$)
-6. Debit $C$; fee $\phi C$ recorded as payable to the platform (settlement-time or real-time transfer to the L1 fee account; pick one implementation but keep a single accounting convention)
+6. Debit $C$; fee $\phi C$ recorded on the platform fee ledger (`fees_accrued`). `claim_fees` credits the platform UserVault at any time. Fees never enter $C_P$.
 7. Emit event: new $p$, new $L_{\max}$
 
 Repeated buys of the same $S$ raise $p_S$ and raise $C$. That is the algorithm, not a manual markup.
@@ -325,7 +342,7 @@ Engineering:
 During trading, display:
 
 $$
-\mathrm{Coverage}=\frac{C_M+C_R}{L_{\max}},\qquad
+\mathrm{Coverage}=\frac{C_R}{L_{\max}},\qquad
 \hat\rho_S=\min_{k\in S}\min\bigl(1,C_{\max}/E_k\bigr)
 $$
 
@@ -334,7 +351,7 @@ At settlement (product §8.1 — do not mix $p$, $E$, and ticket face):
 $$
 c=\mathrm{cell}(x^*),\quad
 L=E(c)=\texttt{grid.exposure}[c],\quad
-C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}},\quad
+C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}},\quad
 \rho=\min(1,C_{\max}/L)
 $$
 
@@ -359,7 +376,7 @@ while remain > 0 and book not empty:
     remain -= fill
 ```
 
-Do not solve CVaR on-chain. The suggested size $D_{\mathrm{required}}=\max(L_{\max}-C_M,0)$ is display-only.
+Do not solve CVaR on-chain. The suggested size $D_{\mathrm{required}}=L_{\max}$ is display-only.
 
 LP payout:
 
@@ -372,14 +389,14 @@ $$
 ```text
 1. finalize(x*)
 2. L = E(x*)
-3. Draw R_net (trading). C_M is optional and may be 0
-4. If L ≤ R_net+C_M: H=0, do not draw C_P
+3. Draw R_net (trading)
+4. If L ≤ R_net: H=0, do not draw C_P
 5. Else draw H_i on leftover shortfall only, then C_P^alloc if still short
 6. ρ = min(1, C_max / L)
 7. Pay all winners ρ·q
-8. If ρ==1 then S = max(R_net+C_M-L, 0)
+8. If ρ==1 then S = max(R_net-L, 0)
 9. If C_R^final>0 split S by α_R / α_P; else S to the platform
-10. Fees stay in the platform pot; sweep into C_P is a later, explicit transfer
+10. Fees stay on the platform fee ledger; `claim_fees` credits the platform UserVault. Fees never enter C_P.
 ```
 
 ### 6.7 Finalization (not written automatically by an oracle)
@@ -408,12 +425,12 @@ The funds model locks one option: **an ER-internal margin mirror**. The user fir
 ### 7.2 Market creation through close
 
 ```text
-create_* on L1 → inject C_M → open risk layers
+create_* on L1 → open risk layers
 delegate market + grid → ER
 trading + auctions
-Keeper: clock >= close_ts → stop buy_set
+Keeper: clock >= close_ts → stop buy_set and stop auction quote/fill
 Keeper: undelegate / commit
-Keeper: clock >= risk_lock_ts → stop bid fill
+Keeper: clock >= risk_lock_ts → stop bid fill (risk_lock_ts SHALL NOT be after close_ts)
 enter report_window
 ```
 
@@ -529,6 +546,7 @@ Client: Trading Gateway / Web call the official integrity check when connecting 
 - Machines and networks: `system-architecture.md`
 - Product rules: `product-specification.md`
 - This document: languages, middleware, implementation constraints for LMSR / auctions / $\rho$, and the TEE boundary
+- Read-path DDD / sqlx / associated-type transactions: `docs/architecture/ddd-sqlx.md`
 
 Choices are locked: the user client is only Next.js (including PWA / TWA / wallet WebView). No native store apps. Contracts must be Anchor. LMSR lives only in `crates/math`. A parallel Flutter / RN second fill semantics must not grow.
 

@@ -28,11 +28,11 @@ pub mod risk {
         let market = &ctx.accounts.market;
         require!(market.n_layers >= 1 && market.n_layers <= MAX_LAYERS, RiskError::BadLayer);
         require!(market.d_unit > 0, RiskError::BadSize);
-        require!(market.risk_lock_ts >= market.close_ts, RiskError::BadClock);
+        require!(market.risk_lock_ts <= market.close_ts, RiskError::BadClock);
 
         let book = &mut ctx.accounts.book;
         book.market = market.key();
-        book.c_m = market.c_m;
+        book.c_m = 0;
         book.d_unit = market.d_unit;
         book.n_layers = market.n_layers;
         book.gamma_bps = market.gamma_bps;
@@ -60,8 +60,8 @@ pub mod risk {
             RiskError::Locked
         );
         let now = Clock::get()?.unix_timestamp;
-        require!(now < market.risk_lock_ts, RiskError::Locked);
-        let attach = layer_attachment(book.c_m, book.d_unit, layer_id).ok_or(RiskError::BadLayer)?;
+        require!(now < market.close_ts && now < market.risk_lock_ts, RiskError::Locked);
+        let attach = layer_attachment(book.d_unit, layer_id).ok_or(RiskError::BadLayer)?;
 
         let layer = &mut ctx.accounts.layer;
         if layer.market == Pubkey::default() {
@@ -139,7 +139,8 @@ pub mod risk {
             market.status != Status::Settled as u8 && market.status != Status::Void as u8,
             RiskError::Locked
         );
-        require!(Clock::get()?.unix_timestamp < market.risk_lock_ts, RiskError::Locked);
+        let now = Clock::get()?.unix_timestamp;
+        require!(now < market.close_ts && now < market.risk_lock_ts, RiskError::Locked);
         let (head, idx) = cheapest_entry(layer)?;
         require!(head == quote.key(), RiskError::NotCheapest);
         try_fill(book, layer, quote, seat, idx, market.l_max_usdc())?;
@@ -228,7 +229,7 @@ fn try_fill(
         &view,
         book.gamma_bps,
         book.c_r,
-        d_required(l_max, book.c_m),
+        d_required(l_max),
         book.d_unit,
     ) {
         Ok(v) => v,
@@ -448,7 +449,7 @@ pub enum RiskError {
     BadLayer,
     #[msg("capacity, premium, or gamma is illegal")]
     BadSize,
-    #[msg("risk_lock_ts is before close_ts")]
+    #[msg("risk_lock_ts is after close_ts")]
     BadClock,
     #[msg("now >= risk_lock_ts")]
     Locked,

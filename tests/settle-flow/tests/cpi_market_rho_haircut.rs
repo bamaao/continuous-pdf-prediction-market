@@ -15,7 +15,7 @@ use solana_sdk::system_program;
 use solana_sdk::transaction::Transaction;
 
 const N: u16 = 8;
-const C_M: u64 = 5;
+const C_M: u64 = 0;
 const Q_A: i64 = 60;
 const Q_B: i64 = 40;
 
@@ -198,13 +198,11 @@ async fn deposit_create_cpi_buy_submit_settle_same_rho() {
         id_hash,
         n: N,
         close_ts: 1_000,
-        risk_lock_ts: 2_000,
+        risk_lock_ts: 1_000,
         beta: q(100),
         c_m: C_M,
         fee_bps: 0,
-        committee: creator.pubkey(),
-        members: vec![creator.pubkey()],
-        m: 1,
+        fee_timing: 0,
         authorized_reporter: Pubkey::default(),
         report_window_secs: 400,
         challenge_secs: 20,
@@ -223,6 +221,27 @@ async fn deposit_create_cpi_buy_submit_settle_same_rho() {
         mu: q(5),
         sigma: q(2),
     };
+
+    let (committee, _) = Pubkey::find_program_address(&[market::state::COMMITTEE_SEED], &market::ID);
+    send_signed(
+        &mut ctx,
+        vec![Instruction {
+            program_id: market::ID,
+            accounts: market::accounts::InitCommittee {
+                authority: creator.pubkey(),
+                committee,
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+            data: market::instruction::InitCommittee {
+                members: vec![creator.pubkey()],
+                m: 1,
+            }
+            .data(),
+        }],
+        &[&creator],
+    )
+    .await;
 
     send_signed(
         &mut ctx,
@@ -327,6 +346,7 @@ async fn deposit_create_cpi_buy_submit_settle_same_rho() {
             accounts: resolution::accounts::Open {
                 payer: creator.pubkey(),
                 market: market_pda,
+                committee,
                 record,
                 system_program: system_program::ID,
             }

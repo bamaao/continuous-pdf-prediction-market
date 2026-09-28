@@ -1,0 +1,5 @@
+-- pgAdmin 会把多条语句放进同一个事务。CREATE DATABASE 不能在事务里跑。
+-- 按顺序各执行一次（每次只打开一个文件，点运行）：
+--   1. infra/local-pg-role.sql
+--   2. infra/local-pg-database.sql    （仅这一条；库已存在则跳过）
+--   3. infra/local-pg-grant.sql

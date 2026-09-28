@@ -13,6 +13,7 @@ pub struct Book {
     pub premium_payable: u64,
     pub c_m: u64,
     pub c_r: u64,
+    pub c_p: u64,
     pub slot: u64,
 }
 
@@ -31,16 +32,17 @@ impl Book {
         assert_eq!(p0.len(), theta.len());
         assert_eq!(p0.len(), exposure.len());
         Self {
-            state: LmsrState {
-                beta: Q64::from_raw(beta),
-                p0: p0.iter().copied().map(Q64::from_raw).collect(),
-                theta: theta.iter().copied().map(Q64::from_raw).collect(),
-                exposure: exposure.iter().copied().map(Q64::from_raw).collect(),
-            },
+            state: LmsrState::from_vecs(
+                Q64::from_raw(beta),
+                p0.iter().copied().map(Q64::from_raw).collect(),
+                theta.iter().copied().map(Q64::from_raw).collect(),
+                exposure.iter().copied().map(Q64::from_raw).collect(),
+            ),
             trading_revenue,
             premium_payable,
             c_m,
             c_r,
+            c_p: 0,
             slot,
         }
     }
@@ -68,11 +70,16 @@ impl Book {
             Q64::from_int(self.r_net() as i64),
             Q64::from_int(self.c_m as i64),
             Q64::from_int(self.c_r as i64),
+            Q64::from_int(self.c_p as i64),
         ))
     }
 
     pub fn l_max_usdc(&self) -> u64 {
         usdc(self.state.l_max())
+    }
+
+    pub fn peak_exposure(&self) -> math::PeakExposure {
+        self.state.peak_exposure()
     }
 
     /// Worst-case coverage $C_{\max}/L_{\max}$. Display only.
@@ -122,8 +129,95 @@ pub struct QuoteView {
     pub n: u16,
 }
 
+/// Pre-bet cashflows. Display only. Does not change $p_S$ / $C_S$ (XX-01).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TicketPreview {
+    pub shares: i64,
+    pub fee_bps: u16,
+    pub fee_usdc: u64,
+    pub pay_usdc: u64,
+    pub face_usdc: u64,
+    pub payout_if_hit_usdc: u64,
+    pub payout_if_miss_usdc: u64,
+    pub net_if_hit: i64,
+    pub ev_if_p_s: i64,
+}
+
+/// Same fee as chain: $\mathrm{usdc}(C_S\cdot\mathrm{fee\_bps}/10000)$.
+/// `fee_timing` 0: Pay $=C_S+\phi C_S$ at fill. 1: Pay $=C_S$ now; $\phi$ of hit payout at claim.
+pub fn ticket_from_view(v: &QuoteView, shares: i64, fee_bps: u16) -> TicketPreview {
+    ticket_from_view_ex(v, shares, fee_bps, 0)
+}
+
+pub fn ticket_from_view_ex(v: &QuoteView, shares: i64, fee_bps: u16, fee_timing: u8) -> TicketPreview {
+    let q = if shares > 0 { shares } else { 1 };
+    let face = q as u64;
+    let c = usdc(v.c_s);
+    let payout_hit = usdc(v.rho_hat.saturating_mul(Q64::from_int(q)));
+    let (fee, pay, net_base) = if fee_timing == 1 {
+        let claim_fee = if fee_bps == 0 {
+            0
+        } else {
+            payout_hit.saturating_mul(fee_bps as u64) / 10_000
+        };
+        (claim_fee, c, payout_hit.saturating_sub(claim_fee) as i64 - c as i64)
+    } else {
+        let fee = if fee_bps == 0 {
+            0
+        } else {
+            usdc(
+                v.c_s
+                    .saturating_mul(Q64::from_int(fee_bps as i64))
+                    .checked_div(Q64::from_int(10_000))
+                    .unwrap_or(Q64::ZERO),
+            )
+        };
+        (fee, c.saturating_add(fee), payout_hit as i64 - c.saturating_add(fee) as i64)
+    };
+    let ev_gross = usdc(v.p_s.saturating_mul(Q64::from_int(payout_hit as i64)));
+    TicketPreview {
+        shares: q,
+        fee_bps,
+        fee_usdc: fee,
+        pay_usdc: pay,
+        face_usdc: face,
+        payout_if_hit_usdc: if fee_timing == 1 { payout_hit.saturating_sub(fee) } else { payout_hit },
+        payout_if_miss_usdc: 0,
+        net_if_hit: net_base,
+        ev_if_p_s: ev_gross as i64 - pay as i64,
+    }
+}
+
 pub fn q_bps(q: Q64) -> u64 {
     ((q.raw().max(0) as u128).saturating_mul(10_000) >> 64) as u64
+}
+
+/// Truncate to bps then Hamilton-assign leftover so a PDF vector sums to 10_000.
+pub fn q_bps_renorm(qs: &[Q64]) -> Vec<u64> {
+    if qs.is_empty() {
+        return Vec::new();
+    }
+    let mut bps: Vec<u64> = qs.iter().copied().map(q_bps).collect();
+    let sum: u64 = bps.iter().copied().sum();
+    if sum >= 10_000 {
+        return bps;
+    }
+    let mask = (1u128 << 64) - 1;
+    let mut order: Vec<usize> = (0..qs.len()).collect();
+    order.sort_by(|&i, &j| {
+        let fi = (qs[i].raw().max(0) as u128).saturating_mul(10_000) & mask;
+        let fj = (qs[j].raw().max(0) as u128).saturating_mul(10_000) & mask;
+        fj.cmp(&fi).then(i.cmp(&j))
+    });
+    let mut rem = 10_000 - sum;
+    for i in order {
+        if rem == 0 {
+            break;
+        }
+        bps[i] = bps[i].saturating_add(1);
+        rem -= 1;
+    }
+    bps
 }
 
 /// Bitmask → membership, same layout as `market::mask`.
@@ -187,7 +281,7 @@ mod tests {
     #[test]
     fn fees_never_enter_c_max() {
         let with_fees_excluded = uniform_book(4, 40, 5);
-        assert_eq!(with_fees_excluded.c_max_usdc(), 45);
+        assert_eq!(with_fees_excluded.c_max_usdc(), 40);
         // fees_accrued is not an argument — quoting from trading_revenue only.
         let same = Book::from_grid(
             Q64::from_int(100).raw(),
@@ -200,7 +294,7 @@ mod tests {
             0,
             1,
         );
-        assert_eq!(same.c_max_usdc(), 45);
+        assert_eq!(same.c_max_usdc(), 40);
     }
 
     #[test]
@@ -219,7 +313,7 @@ mod tests {
             1,
         );
         assert_eq!(book.l_max_usdc(), 100);
-        assert_eq!(book.c_max_usdc(), 15);
+        assert_eq!(book.c_max_usdc(), 10);
         assert!(book.coverage() < Q64::ONE);
         assert_eq!(book.rho_hat(), book.coverage());
         let mut cell0 = vec![false; 4];
@@ -246,5 +340,49 @@ mod tests {
         assert_eq!(v.rho_hat, book.rho_hat());
         assert_eq!(v.slot, 1);
         assert_eq!(v.n, 8);
+    }
+
+    #[test]
+    fn ticket_fee_zero_pay_equals_c_s() {
+        let book = uniform_book(8, 4, 5);
+        let mut cell0 = vec![false; 8];
+        cell0[0] = true;
+        let v = book.view(&cell0, Q64::from_int(1));
+        let t = ticket_from_view(&v, 1, 0);
+        assert_eq!(t.fee_usdc, 0);
+        assert_eq!(t.pay_usdc, usdc(v.c_s));
+        assert_eq!(t.payout_if_miss_usdc, 0);
+        assert_eq!(t.face_usdc, 1);
+        assert_eq!(t.payout_if_hit_usdc, usdc(v.rho_hat.saturating_mul(Q64::from_int(1))));
+        assert_eq!(t.net_if_hit, t.payout_if_hit_usdc as i64 - t.pay_usdc as i64);
+    }
+
+    #[test]
+    fn ticket_fee_matches_chain_and_does_not_change_price() {
+        let book = uniform_book(8, 4, 5);
+        let mut cell0 = vec![false; 8];
+        cell0[0] = true;
+        let v = book.view(&cell0, Q64::from_int(10));
+        let zero = ticket_from_view(&v, 10, 0);
+        let taxed = ticket_from_view(&v, 10, 1_000);
+        let expect_fee = usdc(
+            v.c_s
+                .saturating_mul(Q64::from_int(1_000))
+                .checked_div(Q64::from_int(10_000))
+                .unwrap_or(Q64::ZERO),
+        );
+        assert_eq!(taxed.fee_usdc, expect_fee);
+        assert_eq!(taxed.pay_usdc, zero.pay_usdc + expect_fee);
+        assert_eq!(taxed.payout_if_hit_usdc, zero.payout_if_hit_usdc);
+        assert_eq!(taxed.face_usdc, 10);
+        assert_eq!(v.p_s, book.p_s(&cell0));
+    }
+
+    #[test]
+    fn bps_renorm_sums_to_10000() {
+        let p = uniform_prior(159);
+        let bps = q_bps_renorm(&p);
+        assert_eq!(bps.iter().copied().sum::<u64>(), 10_000);
+        assert!(bps.iter().all(|&x| (62..=63).contains(&x)));
     }
 }

@@ -6,9 +6,16 @@ Thumbs.db
 target/
 node_modules/
 .next/
+apps/web/.next/
+apps/web/out/
+tmp/
+*.tsbuildinfo
 dist/
 .env
 .env.*
+!.env.example
 .anchor/
 test-ledger/
 receipts/
+__pycache__/
+*.pyc

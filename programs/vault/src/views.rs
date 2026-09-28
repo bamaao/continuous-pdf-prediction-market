@@ -71,10 +71,7 @@ pub struct Market {
     pub fee_bps: u16,
     pub creator: Pubkey,
     pub committee: Pubkey,
-    pub members: [Pubkey; 8],
     pub authorized_reporter: Pubkey,
-    pub member_count: u8,
-    pub m: u8,
     pub close_ts: i64,
     pub risk_lock_ts: i64,
     pub report_window_secs: i64,
@@ -91,6 +88,7 @@ pub struct Market {
     pub l_max: i128,
     pub id_hash: [u8; 32],
     pub extra: FamilyExtra,
+    pub fee_timing: u8,
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
@@ -98,9 +96,11 @@ pub struct Grid {
     pub market: Pubkey,
     pub n: u16,
     pub bump: u8,
+    pub z: i128,
     pub p0: Vec<i128>,
     pub theta: Vec<i128>,
     pub exposure: Vec<i128>,
+    pub weights: Vec<i128>,
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
@@ -126,7 +126,7 @@ pub struct Outcome {
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
 pub struct Resolution {
     pub market: Pubkey,
-    pub members: [Pubkey; 8],
+    pub members: [Pubkey; 16],
     pub authorized_reporter: Pubkey,
     pub family: u8,
     pub phase: u8,

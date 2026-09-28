@@ -62,6 +62,8 @@ enum Cmd {
     #[command(subcommand)]
     Resolve(ResolveCmd),
     #[command(subcommand)]
+    Committee(CommitteeCmd),
+    #[command(subcommand)]
     Settle(SettleCmd),
     /// Keeper is Phase 5/8. Prints the intended loop only.
     Keeper,
@@ -76,8 +78,6 @@ enum MarketCmd {
         tag: String,
         #[arg(long, default_value_t = 8)]
         n: u16,
-        #[arg(long, default_value_t = 0)]
-        c_m: u64,
         /// Seconds from now until close. Ignored when `--close-ts` is set.
         #[arg(long, default_value_t = 300)]
         close_in: i64,
@@ -91,8 +91,6 @@ enum MarketCmd {
         tag: String,
         #[arg(long, default_value_t = 8)]
         n: u16,
-        #[arg(long, default_value_t = 0)]
-        c_m: u64,
         #[arg(long, default_value_t = 300)]
         close_in: i64,
         #[arg(long)]
@@ -104,8 +102,6 @@ enum MarketCmd {
         topic: String,
         #[arg(long, default_value_t = 3)]
         n: u16,
-        #[arg(long, default_value_t = 0)]
-        c_m: u64,
         #[arg(long, default_value_t = 300)]
         close_in: i64,
         #[arg(long)]
@@ -116,8 +112,6 @@ enum MarketCmd {
     CreateBernoulli {
         topic: String,
         tag: String,
-        #[arg(long, default_value_t = 0)]
-        c_m: u64,
         #[arg(long, default_value_t = 300)]
         close_in: i64,
         #[arg(long)]
@@ -129,8 +123,6 @@ enum MarketCmd {
         topic: String,
         #[arg(long, default_value_t = 0)]
         score_scope: u8,
-        #[arg(long, default_value_t = 0)]
-        c_m: u64,
         #[arg(long, default_value_t = 300)]
         close_in: i64,
         #[arg(long)]
@@ -142,7 +134,9 @@ enum MarketCmd {
     Close { market: String },
     /// Dump the trading-implied PDF $p_k$ and face $E_k$ (they are not the same).
     Pdf { market: String },
-    /// On-chain θ → same $p_S$ / $C_S$ / coverage / $\hat\rho$ as Market API.
+    /// Public desk: traders, stake, L_max, C_R, then the implied PDF.
+    Info { market: String },
+    /// On-chain θ → same $p_S$ / $C_S$ / coverage / $\hat\rho$ / pre-bet ticket as Market API.
     Quote {
         market: String,
         #[arg(long, default_value = "01")]
@@ -216,6 +210,25 @@ enum RiskCmd {
 }
 
 #[derive(Subcommand)]
+enum CommitteeCmd {
+    /// Create the one protocol-wide committee PDA. Create-market only references it.
+    Init {
+        /// Comma-separated member pubkeys. Defaults to the payer.
+        #[arg(long)]
+        members: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        m: u8,
+    },
+    /// Replace the live roster. In-flight votes keep the snapshot taken at resolve_open.
+    Set {
+        #[arg(long)]
+        members: String,
+        #[arg(long, default_value_t = 1)]
+        m: u8,
+    },
+}
+
+#[derive(Subcommand)]
 enum ResolveCmd {
     Open { market: String },
     Submit {
@@ -232,6 +245,8 @@ enum SettleCmd {
         market: String,
         #[arg(long)]
         risk: bool,
+        #[arg(long)]
+        pool: bool,
     },
     Payout {
         market: String,
@@ -239,9 +254,9 @@ enum SettleCmd {
         #[arg(long)]
         owner: Option<String>,
     },
+    /// Open the board vault (amount is always 0).
     FundCm {
         market: String,
-        amount: u64,
     },
 }
 
@@ -250,6 +265,22 @@ fn pad32(s: &str) -> [u8; 32] {
     let b = s.as_bytes();
     o[..b.len().min(32)].copy_from_slice(&b[..b.len().min(32)]);
     o
+}
+
+fn parse_members(raw: &str, fallback: Option<Pubkey>) -> Result<Vec<Pubkey>> {
+    let list = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| Pubkey::from_str(s).context("committee member"))
+        .collect::<Result<Vec<_>>>()?;
+    if list.is_empty() {
+        if let Some(one) = fallback {
+            return Ok(vec![one]);
+        }
+        anyhow::bail!("committee members required");
+    }
+    Ok(list)
 }
 
 fn parse_mask(hex: &str) -> Result<Vec<u8>> {
@@ -263,20 +294,16 @@ fn parse_mask(hex: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-fn load_book(rpc: &RpcClient, market: &Pubkey) -> Result<(quote::Book, u16)> {
+fn load_book(rpc: &RpcClient, market: &Pubkey) -> Result<(quote::Book, u16, u16)> {
     let mkt = client::decode_market(&rpc.get_account(market).context("market")?.data)
         .map_err(|e| anyhow::anyhow!(e))?;
     let grid = client::decode_grid(&rpc.get_account(&client::grid_pda(market)).context("grid")?.data)
         .map_err(|e| anyhow::anyhow!(e))?;
     let mut trading_revenue = mkt.trading_revenue;
-    let mut c_m = mkt.c_m;
     let mut premium_payable = 0u64;
     if let Ok(bacc) = rpc.get_account(&client::board(market)) {
         if let Ok(b) = client::decode_board(&bacc.data) {
             trading_revenue = b.trading_revenue;
-            if b.c_m_locked > 0 {
-                c_m = b.c_m_locked;
-            }
             premium_payable = b.premium_payable;
         }
     }
@@ -295,11 +322,12 @@ fn load_book(rpc: &RpcClient, market: &Pubkey) -> Result<(quote::Book, u16)> {
             &grid.exposure,
             trading_revenue,
             premium_payable,
-            c_m,
+            0,
             c_r,
             slot,
         ),
         mkt.n,
+        mkt.fee_bps,
     ))
 }
 
@@ -334,14 +362,13 @@ fn plan_close(close_in: i64, close_ts: Option<i64>) -> Result<(i64, i64)> {
     if close <= wall_unix() {
         anyhow::bail!("close_ts must be in the future");
     }
-    Ok((close, close + 60))
+    Ok((close, close))
 }
 
 fn common(
     me: Pubkey,
     id_hash: [u8; 32],
     n: u16,
-    c_m: u64,
     close_ts: i64,
     risk_lock_ts: i64,
     challenge_secs: i64,
@@ -352,11 +379,9 @@ fn common(
         close_ts,
         risk_lock_ts,
         beta: Q64::from_int(100).raw(),
-        c_m,
+        c_m: 0,
         fee_bps: 0,
-        committee: me,
-        members: vec![me],
-        m: 1,
+        fee_timing: 0,
         authorized_reporter: Pubkey::default(),
         report_window_secs: 400,
         challenge_secs,
@@ -394,6 +419,7 @@ fn send_via_gateway(
 ) -> Result<String> {
     let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
     let bh = rpc.get_latest_blockhash()?;
+    let heap = ComputeBudgetInstruction::request_heap_frame(256 * 1024);
     let cu = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
     let mut signers: Vec<&Keypair> = vec![payer];
     for s in extra {
@@ -401,7 +427,7 @@ fn send_via_gateway(
             signers.push(*s);
         }
     }
-    let tx = Transaction::new_signed_with_payer(&[cu, ix], Some(&payer.pubkey()), &signers, bh);
+    let tx = Transaction::new_signed_with_payer(&[heap, cu, ix], Some(&payer.pubkey()), &signers, bh);
     let tx_b64 = B64.encode(bincode::serialize(&tx)?);
     let body = serde_json::json!({
         "tx_b64": tx_b64,
@@ -504,8 +530,9 @@ fn send_ixs(
 ) -> Result<String> {
     let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
     let bh = rpc.get_latest_blockhash()?;
+    let heap = ComputeBudgetInstruction::request_heap_frame(256 * 1024);
     let cu = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
-    let mut all = vec![cu];
+    let mut all = vec![heap, cu];
     all.extend(ixs);
     let mut signers: Vec<&Keypair> = vec![payer];
     for s in extra {
@@ -516,6 +543,55 @@ fn send_ixs(
     let tx = Transaction::new_signed_with_payer(&all, Some(&payer.pubkey()), &signers, bh);
     let sig = rpc.send_and_confirm_transaction(&tx)?;
     Ok(sig.to_string())
+}
+
+fn finish_grid(url: &str, payer: &Keypair, market: Pubkey, n: u16) -> Result<()> {
+    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let n = rpc
+        .get_account(&market)
+        .ok()
+        .and_then(|a| client::decode_market(&a.data).ok())
+        .map(|m| m.n)
+        .unwrap_or(n);
+    let grid = client::grid_pda(&market);
+    let need = client::grid_space(n);
+    let tries = client::grid_grow_steps(n)
+        .saturating_add(client::grid_mass_steps(n))
+        .saturating_add(5)
+        .max(1);
+    for _ in 0..tries {
+        if let Ok(acc) = rpc.get_account(&grid) {
+            if let Ok(g) = client::decode_grid(&acc.data) {
+                if g.p0.len() == n as usize && g.weights.len() == n as usize && g.z != 0 && acc.data.len() >= need {
+                    return Ok(());
+                }
+                if acc.data.len() < need {
+                    send(url, payer, client::grow_grid(payer.pubkey(), market))?;
+                    continue;
+                }
+                if g.p0.len() < n as usize {
+                    send(url, payer, client::write_grid_mass(payer.pubkey(), market))?;
+                    continue;
+                }
+                if g.z == 0 {
+                    send(url, payer, client::seal_grid(payer.pubkey(), market))?;
+                    continue;
+                }
+            }
+        } else {
+            send(url, payer, client::grow_grid(payer.pubkey(), market))?;
+        }
+    }
+    let acc = rpc.get_account(&grid).context("grid after finish")?;
+    let g = client::decode_grid(&acc.data).map_err(|e| anyhow::anyhow!("{e}"))?;
+    anyhow::ensure!(
+        g.p0.len() == n as usize && g.weights.len() == n as usize && g.z != 0 && acc.data.len() >= need,
+        "grid not sealed n={n} p0={} z={} bytes={}",
+        g.p0.len(),
+        g.z,
+        acc.data.len()
+    );
+    Ok(())
 }
 
 fn print_created(sig: &str, market: Pubkey, close_ts: i64, challenge_secs: i64) {
@@ -531,6 +607,16 @@ fn main() -> Result<()> {
     let me = kp.pubkey();
 
     match opt.cmd {
+        Cmd::Committee(CommitteeCmd::Init { members, m }) => {
+            let roster = parse_members(members.as_deref().unwrap_or(""), Some(me))?;
+            let sig = send(&opt.url, &kp, client::init_committee(me, roster.clone(), m))?;
+            println!("ok {sig} committee={} n={} m={m}", client::committee_pda(), roster.len());
+        }
+        Cmd::Committee(CommitteeCmd::Set { members, m }) => {
+            let roster = parse_members(&members, None)?;
+            let sig = send(&opt.url, &kp, client::set_roster(me, roster.clone(), m))?;
+            println!("ok {sig} committee={} n={} m={m}", client::committee_pda(), roster.len());
+        }
         Cmd::VaultInit => {
             let sig = send(&opt.url, &kp, client::initialize_vault(me))?;
             println!("ok {sig}");
@@ -625,7 +711,6 @@ fn main() -> Result<()> {
             topic,
             tag,
             n,
-            c_m,
             close_in,
             close_ts,
             challenge_secs,
@@ -636,7 +721,7 @@ fn main() -> Result<()> {
             let id_hash = client::market::ids::interval(client::market::state::Family::Gaussian as u8, &topic, &tag);
             let market = client::market_pda(&id_hash);
             let args = client::market::state::IntervalArgs {
-                common: common(me, id_hash, n, c_m, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
                 topic,
                 tag,
                 x_min: Q64::from_int(0).raw(),
@@ -645,13 +730,13 @@ fn main() -> Result<()> {
                 sigma: Q64::from_int(2).raw(),
             };
             let sig = send(&opt.url, &kp, client::create_gaussian(me, id_hash, n, args))?;
+            finish_grid(&opt.url, &kp, market, n)?;
             print_created(&sig, market, close_ts, challenge_secs);
         }
         Cmd::Market(MarketCmd::CreateLognormal {
             topic,
             tag,
             n,
-            c_m,
             close_in,
             close_ts,
             challenge_secs,
@@ -662,7 +747,7 @@ fn main() -> Result<()> {
             let id_hash = client::market::ids::interval(client::market::state::Family::Lognormal as u8, &topic, &tag);
             let market = client::market_pda(&id_hash);
             let args = client::market::state::IntervalArgs {
-                common: common(me, id_hash, n, c_m, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
                 topic,
                 tag,
                 x_min: Q64::from_int(1).raw(),
@@ -671,12 +756,12 @@ fn main() -> Result<()> {
                 sigma: Q64::from_int(1).raw(),
             };
             let sig = send(&opt.url, &kp, client::create_lognormal(me, id_hash, n, args))?;
+            finish_grid(&opt.url, &kp, market, n)?;
             print_created(&sig, market, close_ts, challenge_secs);
         }
         Cmd::Market(MarketCmd::CreateDirichlet {
             topic,
             n,
-            c_m,
             close_in,
             close_ts,
             challenge_secs,
@@ -687,7 +772,7 @@ fn main() -> Result<()> {
             let market = client::market_pda(&id_hash);
             let alpha = vec![Q64::from_int(1).raw(); n as usize];
             let args = client::market::state::DirichletArgs {
-                common: common(me, id_hash, n, c_m, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
                 topic,
                 layout: client::market::state::DIRICHLET_ATOMS,
                 top_n: 0,
@@ -700,7 +785,6 @@ fn main() -> Result<()> {
         Cmd::Market(MarketCmd::CreateBernoulli {
             topic,
             tag,
-            c_m,
             close_in,
             close_ts,
             challenge_secs,
@@ -712,7 +796,7 @@ fn main() -> Result<()> {
             let market = client::market_pda(&id_hash);
             let n = 2;
             let args = client::market::state::BernoulliArgs {
-                common: common(me, id_hash, n, c_m, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
                 topic,
                 tag,
                 deadline_ts: close_ts,
@@ -726,7 +810,6 @@ fn main() -> Result<()> {
         Cmd::Market(MarketCmd::CreateSkellam {
             topic,
             score_scope,
-            c_m,
             close_in,
             close_ts,
             challenge_secs,
@@ -737,7 +820,7 @@ fn main() -> Result<()> {
             let market = client::market_pda(&id_hash);
             let n = client::market::state::FOOTBALL_N;
             let args = client::market::state::SkellamArgs {
-                common: common(me, id_hash, n, c_m, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
                 topic,
                 score_scope,
                 kickoff_ts: close_ts,
@@ -754,10 +837,41 @@ fn main() -> Result<()> {
             let sig = send(&opt.url, &kp, client::halt(me, market))?;
             println!("ok {sig} halted (undelegate is ER, later)");
         }
+        Cmd::Market(MarketCmd::Info { market }) => {
+            let market = Pubkey::from_str(&market)?;
+            let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let (book, _, fee_bps) = load_book(&rpc, &market)?;
+            let accounts = rpc.get_program_accounts(&client::market::ID)?;
+            let mut owners = std::collections::HashSet::new();
+            let mut tickets = 0u64;
+            let mut stake = 0u64;
+            for (_, acc) in accounts {
+                let Ok(pos) = client::decode_position(&acc.data) else { continue };
+                if pos.market != market || pos.q <= 0 {
+                    continue;
+                }
+                owners.insert(pos.owner);
+                tickets += 1;
+                stake += pos.cost_paid;
+            }
+            println!(
+                "market={market} traders={} tickets={} stake_usdc={} trading_revenue={} l_max_usdc={} c_r={} r_net={} c_max_usdc={} coverage_bps={} fee_bps={}  # p is implied PDF, not E",
+                owners.len(),
+                tickets,
+                stake,
+                book.trading_revenue,
+                book.l_max_usdc(),
+                book.c_r,
+                book.r_net(),
+                book.c_max_usdc(),
+                quote::q_bps(book.coverage()),
+                fee_bps,
+            );
+        }
         Cmd::Market(MarketCmd::Pdf { market }) => {
             let market = Pubkey::from_str(&market)?;
             let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
-            let (book, _) = load_book(&rpc, &market)?;
+            let (book, _, _) = load_book(&rpc, &market)?;
             let p = book.pdf();
             println!(
                 "market={market} n={} beta_int={}  # p_bps is implied PDF; e is face E(x), not p",
@@ -775,13 +889,14 @@ fn main() -> Result<()> {
         Cmd::Market(MarketCmd::Quote { market, mask, shares }) => {
             let market = Pubkey::from_str(&market)?;
             let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
-            let (book, n) = load_book(&rpc, &market)?;
+            let (book, n, fee_bps) = load_book(&rpc, &market)?;
             let bytes = parse_mask(&mask)?;
             let in_set = quote::decode_mask(&bytes, n as usize).map_err(|e| anyhow::anyhow!(e))?;
             let q = if shares > 0 { shares } else { 1 };
             let v = book.view(&in_set, Q64::from_int(q));
+            let t = quote::ticket_from_view(&v, q, fee_bps);
             println!(
-                "market={market} slot={} n={} p_s_raw={} p_s_bps={} c_s_raw={} c_s_usdc={} coverage_bps={} rho_hat_bps={} l_max_usdc={} c_max_usdc={} r_net={}",
+                "market={market} slot={} n={} p_s_raw={} p_s_bps={} c_s_raw={} c_s_usdc={} coverage_bps={} rho_hat_bps={} l_max_usdc={} c_max_usdc={} r_net={} fee_bps={} fee_usdc={} pay_usdc={} face_usdc={} payout_if_hit_usdc={} payout_if_miss_usdc={} net_if_hit={} ev_if_p_s={}",
                 v.slot,
                 v.n,
                 v.p_s.raw(),
@@ -792,7 +907,15 @@ fn main() -> Result<()> {
                 quote::q_bps(v.rho_hat),
                 v.l_max_usdc,
                 v.c_max_usdc,
-                v.r_net
+                v.r_net,
+                t.fee_bps,
+                t.fee_usdc,
+                t.pay_usdc,
+                t.face_usdc,
+                t.payout_if_hit_usdc,
+                t.payout_if_miss_usdc,
+                t.net_if_hit,
+                t.ev_if_p_s
             );
         }
         Cmd::Trade(TradeCmd::BuySet { market, mask, shares, nonce, session, gateway }) => {
@@ -843,14 +966,14 @@ fn main() -> Result<()> {
             let sig = send(&opt.url, &kp, client::finalize(me, market))?;
             println!("ok {sig}");
         }
-        Cmd::Settle(SettleCmd::FundCm { market, amount }) => {
+        Cmd::Settle(SettleCmd::FundCm { market }) => {
             let market = Pubkey::from_str(&market)?;
-            let sig = send(&opt.url, &kp, client::fund_cm(me, market, amount))?;
+            let sig = send(&opt.url, &kp, client::fund_cm(me, market, 0))?;
             println!("ok {sig} board={}", client::board(&market));
         }
-        Cmd::Settle(SettleCmd::Begin { market, risk }) => {
+        Cmd::Settle(SettleCmd::Begin { market, risk, pool }) => {
             let market = Pubkey::from_str(&market)?;
-            let sig = send(&opt.url, &kp, client::begin_settle(market, risk))?;
+            let sig = send(&opt.url, &kp, client::begin_settle_ex(market, risk, pool))?;
             println!("ok {sig}");
         }
         Cmd::Settle(SettleCmd::Payout { market, mask, owner }) => {

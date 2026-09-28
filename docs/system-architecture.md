@@ -2,8 +2,8 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.1 |
-| Product counterpart | `product-specification.md` v1.3 |
+| Version | 1.3 |
+| Product counterpart | `product-specification.md` v1.6 |
 | Scope | Web / PWA / CLI, business services, network, chain, server resource allocation |
 
 This document only answers “which clients and machines make up the system, and how requests flow.” Frameworks and algorithms are in `technical-architecture.md`.
@@ -54,12 +54,15 @@ For traders, Risk LPs, and market browsing. In the browser:
 
 | Module | Responsibility |
 | --- | --- |
-| Market lobby | List football / CPI / elections / daily price / binary events by type |
-| Trading board | Interval pick, preset lines, coverage; **implied PDF** $p_k$ / score heatmap (not $E$); see product §8.1 |
-| Wallet | See below: connect → SIWS → deposit → open Session → in-play orders without extra prompts |
-| Risk auction | Layers, rates, collateral, current $L_{\max}$ |
-| Positions and payout | Holdings, estimated $\hat\rho$, settlement records |
-| Committee entry | After committee login, `submit_result` / challenge / vote (or via a standalone console) |
+| Market lobby `/` | Search / page every indexed board (family and status, not a second create taxonomy) |
+| Trading board `/m/[id]` | Interval pick **and** football typed lines; coverage warning; **implied PDF** $p_k$ / score heatmap (not $E$); pre-bet ticket; rules strip; pending fill; public $x^*$ / $\rho$ after close — product §8.1, §14.6 |
+| Wallet chrome | Connect → SIWS → deposit → open / renew / revoke Session; revoke ≠ disconnect |
+| Risk auction `/auctions`, `/auction/[id]` | Published layers only; rates; collateral; current $L_{\max}$ |
+| LP book `/lp` | This wallet’s $D_i$, $H$, premium, surplus claim |
+| Positions `/portfolio` | Tickets, Vault cash, estimated $\hat\rho$, settlement / refund claim |
+| Create `/create` | Distribution family + full field list; then the reviewer opens the board |
+| Committee `/committee` | `submit_result` / evidence / challenge / vote (same Next.js app until it earns a split) |
+| Ops `/ops` | Read-only lag, coverage, Vault identity, $C_P$ pool, keeper heartbeat. No Vault withdraw |
 
 Deploy: Next.js. Static assets via CDN; APIs via the gateway. Trades are **client-signed** in the browser, then go **Trading Gateway → ER RPC**; they do not traverse the ordinary business API on the hot path.
 
@@ -85,7 +88,7 @@ There is only one BFF / gateway contract. Distribution is in `technical-architec
 
 ### 2.3 CLI
 
-For ops, market making, Keeper, and committee scripts. It does not replace a wallet App.
+For ops, market making, Keeper, and committee scripts. It does not replace a wallet App. **Keeper writes** (`close` / Commit / Undelegate) live here; the Next.js `/ops` page is read-only (SRS FR-UI-27 / FR-UI-28).
 
 | Command group | Use |
 | --- | --- |
@@ -143,7 +146,7 @@ Funds programs are not Delegated to ER, so the high-speed layer never holds with
 | Market list, positions | User → WAF → Gateway → Market API → PG/Redis | < 150 ms |
 | Real-time PDF / book | User → WSS → Quote / Indexer push | < 50 ms |
 | **Place order** | User → Trading Gateway → **ER RPC** | **< 10 ms in-chain execution** (excludes wallet confirmation) |
-| Market create, inject $C_M$ | User / CLI → L1 RPC | Slot confirmation |
+| Market create | User / CLI → L1 RPC | Slot confirmation |
 | Halt write-back | Keeper → MagicBlock Commit / Undelegate → L1 | Seconds |
 | Report / settlement transfer | Committee / Keeper → L1 RPC | Slot confirmation |
 
@@ -274,7 +277,7 @@ Funds safety is the floor of public trust. It does not rely on TEE, Postgres, or
 | --- | --- | --- |
 | User margin, trading proceeds | L1 `vault` PDA, Circle USDC Token Account **only** | Into ops hot wallets, into ER withdrawable accounts, accept SOL or other coins, in-protocol FX |
 | Risk LP collateral | This market’s L1 Risk Vault (same USDC mint) | Count $C_R$ before lock; fund collateral with SOL or another mint |
-| Fees | Booked at trade time; swept to the platform PDA. May later move into $C_P$ | Mix a fill’s fee into that same board’s $C_{\max}$ |
+| Fees | Booked at trade time on the platform fee ledger; `claim_fees` to the platform UserVault at any time. Never $C_P$ | Mix a fill’s fee into that same board’s $C_{\max}$ or $C_P$ |
 | Platform adjustment fund **pool** $C_P^{\mathrm{pool}}$ | One protocol L1 vault PDA (Circle USDC). Boards only receive $C_P^{\mathrm{alloc}}$ at settlement | Per-board $C_P$ wallets; unlimited guarantee; `admin_withdraw`; bake into LMSR |
 | Unsettled surplus | Stay in this market’s Vault; split by $\alpha$ after `settle` | Arbitrary ops withdrawal |
 
@@ -283,7 +286,7 @@ Users first `vault.deposit`. ER only mirrors **available balance**; halt and L1 
 ### 9.2 Authority
 
 - Program upgrades: multisig + timelock (e.g. 48h); pause withdrawals during the `vault` upgrade window  
-- There is no `admin_withdraw`. The only outflows are: user withdrawal of unused margin, settlement payout, LP draw, $C_P$ allocation, surplus split, VOID refund  
+- There is no `admin_withdraw`. The only outflows are: user withdrawal of unused margin, settlement payout, LP draw, $C_P$ allocation, surplus split, platform fee claim, VOID refund  
 - Keeper / committee keys can only send allowed instructions; they cannot touch Token account owners  
 - Session Key: per-market allowance, expiry, revocable; if lost, loss is capped at the authorized allowance  
 - Same invariant tests before and after upgrades: $\sum$ amounts paid $\le C_{\max}$, Vault token balance = sum of the books  
@@ -297,7 +300,7 @@ Users first `vault.deposit`. ER only mirrors **available balance**; halt and L1 
 | Program bug | Timelock pause + multisig; the insurance fund does not replace Vault accounting |
 | Malicious committee proposal | Challenge window; after passage, $x^*$ still pays by the rules; no extra back-door transfer |
 
-Reconciliation: hourly, the Indexer aligns each market’s Vault balance with $\sum$ margin $+R_{\mathrm{net}}+C_M+$ undrawn collateral. On mismatch, alert and halt that market’s outflows.
+Reconciliation: hourly, the Indexer aligns each market’s Vault balance with $\sum$ margin $+R_{\mathrm{net}}+$ undrawn collateral. On mismatch, alert and halt that market’s outflows.
 
 ---
 
@@ -310,11 +313,13 @@ Reconciliation: hourly, the Indexer aligns each market’s Vault balance with $\
 | S0 funds and terminal state | Vault, collateral, $x^*$, settled payouts | **L1 only** | Must not be lost; the chain provides replicas |
 | S0.5 confirmed fills | Each `buy_set` / auction fill receipt and order | ER replication log + object-store trade log + Indexer persist; L1 periodically commits `trades_root` | **Must not vanish because a single node crashed**. See 10.5 |
 | S1 in-play hot state | $\theta$, $E$, $L_{\max}$, ER margin mirror | ER memory; periodic Commit back to L1 | Process death may lose memory; must be replayable from S0.5 |
-| S2 query projection | Fill list, position view, auction book | PG | Rebuildable from S0.5 / chain logs; PG down only means temporarily unqueryable |
+| S2 query projection | Fill list, position view, auction book, **listing identity**, **listing applications / review log**, **board comments**, **fill-journal $S$** | PG via **sqlx in Rust Market API / Indexer** (DDD repos; Next.js does not connect) | Rebuildable from S0.5 / chain logs (listings/journal are off-chain helpers). Applications/review/comments are catalog-only (FR-UI-42–45), not settlement. PG down only means temporarily unqueryable |
 | S3 cache | Quotes, coverage ratio, sessions | Redis | Recompute if lost; RPO is not measured |
 | S4 evidence and static | Attachments, rules text | Object store + hash on L1 | If files are lost, verify by hash; buckets must be cross-region |
 
 Principle: **S2/S3 must never be the ledger.** Recovery order is L1 checkpoint → **replay the trade log** → rebuild PG — not “write balances back from a backup DB,” and not “treat uncommitted fills as never happened.”
+
+Application persistence is DDD + sqlx + associated-type `Context`: `docs/architecture/ddd-sqlx.md`. `listing`, `listing_application`, `review_log`, `market_comment`, `fill_journal`, and `market_proj` live in Postgres (local machine service or production). Memory is a cache; restart reloads from PG. Comments are accepted only for an approved indexed board. Listing applications need reviewer approve, then the reviewer signs on-chain create (reviewer is owner).
 
 ### 10.2 Backups
 

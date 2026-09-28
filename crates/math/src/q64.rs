@@ -66,22 +66,58 @@ impl Q64 {
         div_q64(self.0, rhs.0).map(Self)
     }
 
-    /// Natural exp on a limited domain used by LMSR (`|x| <= 16`).
+    /// Natural exp on `|x| <= 16`. Range-reduce \(x=k\ln 2+r\) so Taylor runs on `|r|<1`, not `|x|`.
     pub fn exp(self) -> Self {
         let x = self.clamp(Self::from_int(-16), Self::from_int(16));
+        if x.raw() == 0 {
+            return Self::ONE;
+        }
+        let k = x.saturating_mul(INV_LN2).round_i32();
+        let r = x.saturating_sub(LN2.saturating_mul(Self::from_int(k as i64)));
         let mut term = Self::ONE;
         let mut sum = Self::ONE;
-        for k in 1..=24 {
+        for i in 1..=12 {
             term = term
-                .saturating_mul(x)
-                .checked_div(Self::from_int(k))
+                .saturating_mul(r)
+                .checked_div(Self::from_int(i))
                 .unwrap_or(Self::ZERO);
             sum = sum.saturating_add(term);
-            if term.0.abs() < 16 {
+            if term.0.abs() < 8 {
                 break;
             }
         }
-        sum
+        sum.mul_pow2(k)
+    }
+
+    fn round_i32(self) -> i32 {
+        let half = 1i128 << (FRAC_BITS - 1);
+        let adj = if self.0 >= 0 { self.0 + half } else { self.0 - half };
+        (adj >> FRAC_BITS).clamp(i32::MIN as i128, i32::MAX as i128) as i32
+    }
+
+    fn mul_pow2(self, k: i32) -> Self {
+        if k == 0 {
+            return self;
+        }
+        if k > 0 {
+            match self.0.checked_shl(k as u32) {
+                Some(v) => Self(v),
+                None => {
+                    if self.0 >= 0 {
+                        Self(i128::MAX)
+                    } else {
+                        Self(i128::MIN)
+                    }
+                }
+            }
+        } else {
+            let sh = (-k) as u32;
+            if sh >= 127 {
+                Self::ZERO
+            } else {
+                Self(self.0 >> sh)
+            }
+        }
     }
 
     /// Natural log for `x > 0`.
@@ -130,6 +166,8 @@ impl Q64 {
 }
 
 const LN2: Q64 = Q64(0xB17217F7D1CF79AB);
+/// \(1/\ln 2\) so `exp` range-reduce is a multiply, not a 64-step Q64 divide.
+const INV_LN2: Q64 = Q64(0x171547652B82FE179);
 
 fn mul_q64(a: i128, b: i128) -> Option<i128> {
     let sign = if (a ^ b) < 0 { -1i128 } else { 1 };
@@ -183,6 +221,18 @@ fn div_q64(a: i128, b: i128) -> Option<i128> {
     let bu = b.unsigned_abs();
     if bu == 0 {
         return None;
+    }
+    // Integer divisor: `(a / n)` in Q64 is `a.raw / n`. Avoids the 64-step frac loop.
+    if bu & (((1u128) << 64) - 1) == 0 {
+        let n = bu >> 64;
+        if n == 0 {
+            return None;
+        }
+        let mag = au / n;
+        if mag > i128::MAX as u128 {
+            return None;
+        }
+        return (mag as i128).checked_mul(sign);
     }
     let int_q = au / bu;
     let rem = au % bu;
@@ -245,5 +295,30 @@ mod tests {
         let e = Q64::ONE.exp();
         let back = e.ln();
         assert!(back.approx_eq(Q64::ONE, 1 << 50), "ln(e) got {}", back.raw());
+    }
+
+    #[test]
+    fn exp_range_reduce_two() {
+        let two = LN2.exp();
+        assert!(two.approx_eq(Q64::from_int(2), 1 << 40), "exp(ln2)={}", two.raw());
+        let half = Q64::from_raw(-LN2.raw()).exp();
+        assert!(half.approx_eq(Q64::from_ratio(1, 2), 1 << 40), "exp(-ln2)={}", half.raw());
+        let prod = Q64::ONE.exp().saturating_mul(Q64::from_raw(-Q64::ONE.raw()).exp());
+        assert!(prod.approx_eq(Q64::ONE, 1 << 40), "e*e^-1={}", prod.raw());
+    }
+
+    #[test]
+    fn inv_ln2_times_ln2_is_one() {
+        let p = INV_LN2.saturating_mul(LN2);
+        assert!(p.approx_eq(Q64::ONE, 1 << 32), "got {}", p.raw());
+    }
+
+    #[test]
+    fn integer_div_is_q64_div() {
+        let a = Q64::from_ratio(5, 1);
+        let q = a.checked_div(Q64::from_int(3)).unwrap();
+        assert!(q.approx_eq(Q64::from_ratio(5, 3), 2));
+        let neg = Q64::from_int(-5).checked_div(Q64::from_int(2)).unwrap();
+        assert!(neg.approx_eq(Q64::from_ratio(-5, 2), 2));
     }
 }

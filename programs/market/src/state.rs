@@ -3,11 +3,16 @@ use anchor_lang::prelude::*;
 pub const MARKET_SEED: &[u8] = b"market";
 pub const GRID_SEED: &[u8] = b"grid";
 pub const POS_SEED: &[u8] = b"pos";
+pub const COMMITTEE_SEED: &[u8] = b"committee";
 
 pub const MAX_N: u16 = 1024;
-pub const MAX_COMMITTEE: usize = 8;
+pub const MAX_COMMITTEE: usize = 16;
 pub const FOOTBALL_K_MAX: u8 = 10;
 pub const FOOTBALL_N: u16 = 121;
+/// Charge $\phi\cdot C_S$ when the trader buys.
+pub const FEE_ON_FILL: u8 = 0;
+/// Charge $\phi$ of the settlement payout when the winner claims. Miss / VOID: 0.
+pub const FEE_ON_CLAIM: u8 = 1;
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,10 +47,7 @@ pub struct Market {
     pub fee_bps: u16,
     pub creator: Pubkey,
     pub committee: Pubkey,
-    pub members: [Pubkey; MAX_COMMITTEE],
     pub authorized_reporter: Pubkey,
-    pub member_count: u8,
-    pub m: u8,
     pub close_ts: i64,
     pub risk_lock_ts: i64,
     pub report_window_secs: i64,
@@ -62,21 +64,39 @@ pub struct Market {
     pub l_max: i128,
     pub id_hash: [u8; 32],
     pub extra: FamilyExtra,
+    pub fee_timing: u8,
 }
 
 impl Market {
-    pub const SIZE: usize = 8 + 640;
+    pub const SIZE: usize = 8 + 408;
+
+    pub fn fee_on_fill(&self) -> bool {
+        self.fee_timing != FEE_ON_CLAIM
+    }
+
+    pub fn can_propose_as_reporter(&self, who: &Pubkey) -> bool {
+        self.authorized_reporter != Pubkey::default() && self.authorized_reporter == *who
+    }
+}
+
+#[account]
+pub struct Committee {
+    pub authority: Pubkey,
+    pub members: [Pubkey; MAX_COMMITTEE],
+    pub member_count: u8,
+    pub m: u8,
+    pub bump: u8,
+    pub epoch: u32,
+}
+
+impl Committee {
+    pub const SIZE: usize = 8 + 576;
 
     pub fn is_member(&self, who: &Pubkey) -> bool {
         self.members
             .iter()
             .take(self.member_count as usize)
             .any(|k| k == who)
-    }
-
-    pub fn can_propose(&self, who: &Pubkey) -> bool {
-        self.is_member(who)
-            || (self.authorized_reporter != Pubkey::default() && self.authorized_reporter == *who)
     }
 }
 
@@ -99,14 +119,41 @@ pub struct Grid {
     pub market: Pubkey,
     pub n: u16,
     pub bump: u8,
+    pub z: i128,
     pub p0: Vec<i128>,
     pub theta: Vec<i128>,
     pub exposure: Vec<i128>,
+    pub weights: Vec<i128>,
 }
 
 impl Grid {
+    /// Solana CPI `create_account` / one `realloc` may move at most 10 240 bytes.
+    pub const CREATE_CAP: usize = 10_240;
+    /// Unnormalized $P_0$ nodes per `write_grid_mass`. Fast exp + $3\sigma$ window fits 256 in one ix.
+    pub const PRIOR_CHUNK: usize = 256;
+
+    /// Borsh layout (no padding): disc(8) + market(32) + n(2) + bump(1) + z(16)
+    /// + 4 × (vec_len(4) + n × i128(16)).
     pub fn space(n: usize) -> usize {
-        8 + 32 + 2 + 1 + 3 * (4 + n * 16)
+        8 + 32 + 2 + 1 + 16 + 4 * (4 + n * 16)
+    }
+
+    pub fn alloc_space(n: usize) -> usize {
+        Self::space(n).min(Self::CREATE_CAP)
+    }
+
+    pub fn grow_steps(n: usize) -> usize {
+        let need = Self::space(n);
+        if need <= Self::CREATE_CAP {
+            0
+        } else {
+            let rest = need - Self::CREATE_CAP;
+            (rest + Self::CREATE_CAP - 1) / Self::CREATE_CAP
+        }
+    }
+
+    pub fn mass_steps(n: usize) -> usize {
+        (n + Self::PRIOR_CHUNK - 1) / Self::PRIOR_CHUNK
     }
 }
 
@@ -134,9 +181,7 @@ pub struct CreateCommon {
     pub beta: i128,
     pub c_m: u64,
     pub fee_bps: u16,
-    pub committee: Pubkey,
-    pub members: Vec<Pubkey>,
-    pub m: u8,
+    pub fee_timing: u8,
     pub authorized_reporter: Pubkey,
     pub report_window_secs: i64,
     pub challenge_secs: i64,
@@ -238,4 +283,101 @@ pub struct FillEvent {
     pub cost: i128,
     pub fee: i128,
     pub l_max: i128,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Grid;
+
+    #[test]
+    fn create_account_holds_128_not_256() {
+        assert_eq!(Grid::space(128), 8_267);
+        assert_eq!(Grid::space(256), 16_459);
+        assert_eq!(Grid::space(1024), 65_611);
+        assert!(Grid::space(128) <= Grid::CREATE_CAP);
+        assert!(Grid::space(256) > Grid::CREATE_CAP);
+        assert_eq!(Grid::alloc_space(256), Grid::CREATE_CAP);
+        assert_eq!(Grid::grow_steps(128), 0);
+        assert_eq!(Grid::grow_steps(256), 1);
+        assert_eq!(Grid::grow_steps(1024), 6);
+        assert_eq!(Grid::PRIOR_CHUNK, 256);
+        assert_eq!(Grid::mass_steps(256), 1);
+        assert_eq!(Grid::mass_steps(1024), 4);
+    }
+
+    #[test]
+    fn space_matches_anchor_serialize() {
+        use super::Grid;
+        use anchor_lang::prelude::Pubkey;
+        use anchor_lang::AccountSerialize;
+        for n in [2usize, 8, 128, 256, 1024] {
+            let g = Grid {
+                market: Pubkey::default(),
+                n: n as u16,
+                bump: 255,
+                z: 1,
+                p0: vec![0; n],
+                theta: vec![0; n],
+                exposure: vec![0; n],
+                weights: vec![0; n],
+            };
+            let mut buf = Vec::new();
+            g.try_serialize(&mut buf).unwrap();
+            assert_eq!(buf.len(), Grid::space(n), "n={n}");
+            assert_eq!(u32::from_le_bytes(buf[59..63].try_into().unwrap()) as usize, n);
+        }
+        let empty = Grid {
+            market: Pubkey::default(),
+            n: 256,
+            bump: 1,
+            z: 0,
+            p0: vec![],
+            theta: vec![],
+            exposure: vec![],
+            weights: vec![],
+        };
+        let mut buf = Vec::new();
+        empty.try_serialize(&mut buf).unwrap();
+        assert_eq!(buf.len(), 75);
+        assert_eq!(u32::from_le_bytes(buf[59..63].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn market_n_is_le_u16_at_offset_12() {
+        use super::{FamilyExtra, Market};
+        use anchor_lang::prelude::Pubkey;
+        use anchor_lang::AccountSerialize;
+        let m = Market {
+            family: 1,
+            status: 1,
+            bump: 255,
+            grid_bump: 254,
+            n: 256,
+            fee_bps: 0,
+            creator: Pubkey::default(),
+            committee: Pubkey::default(),
+            authorized_reporter: Pubkey::default(),
+            close_ts: 0,
+            risk_lock_ts: 0,
+            report_window_secs: 0,
+            challenge_secs: 0,
+            n_layers: 1,
+            gamma_bps: 1_000,
+            d_unit: 1,
+            beta: 1,
+            c_m: 0,
+            fees_accrued: 0,
+            trading_revenue: 0,
+            alpha_r_bps: 0,
+            platform: Pubkey::default(),
+            l_max: 0,
+            id_hash: [0; 32],
+            extra: FamilyExtra::default(),
+            fee_timing: 0,
+        };
+        let mut buf = Vec::new();
+        m.try_serialize(&mut buf).unwrap();
+        assert!(buf.len() <= Market::SIZE, "serialized {} > SIZE {}", buf.len(), Market::SIZE);
+        assert_eq!(u16::from_le_bytes(buf[12..14].try_into().unwrap()), 256);
+    }
 }

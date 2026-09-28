@@ -1,16 +1,16 @@
 //! Settlement waterfall (FR-SET-01–06). Session is not authority.
-//! $L=E(x^*)$, $C_{\max}=R_{\mathrm{net}}+C_M+C_R^{\mathrm{final}}$, one global $\rho$.
+//! $L=E(x^*)$, $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$, one global $\rho$.
 
 use crate::views::{
-    Grid, Layer, Market, Position, Quote, Resolution, RiskBook, PHASE_FAILED, PHASE_FINALIZED,
-    PHASE_VOIDED,
+    Layer, Market, Position, Quote, Resolution, RiskBook, PHASE_FAILED, PHASE_FINALIZED, PHASE_VOIDED,
 };
 use crate::{accounting, VaultError};
 use anchor_lang::prelude::*;
 use math::football;
 use math::outcome::outcome_cell;
 use math::settle::{
-    c_max, layer_loss, payout_floor, r_net, recovery_rate, surplus, surplus_parts, ticket_face, usdc,
+    c_max, c_p_alloc, layer_loss, payout_floor, r_net, recovery_rate, surplus, surplus_parts, ticket_face,
+    usdc,
 };
 use math::Q64;
 
@@ -40,10 +40,12 @@ pub struct Board {
     pub cell: u16,
     pub phase: u8,
     pub bump: u8,
+    pub fee_bps: u16,
+    pub fee_timing: u8,
 }
 
 impl Board {
-    pub const SIZE: usize = 8 + 32 + 8 * 16 + 16 + 2 + 1 + 1;
+    pub const SIZE: usize = 8 + 32 + 8 * 16 + 16 + 2 + 1 + 1 + 2 + 1;
 }
 
 #[account]
@@ -57,7 +59,32 @@ impl Claim {
     pub const SIZE: usize = 8 + 32 + 8 + 1;
 }
 
-/// Lock C_M: debit creator available into the board pot (tokens stay in the vault ATA).
+/// Protocol-wide $C_P$ pool. Tokens stay in the vault ATA; this is the ledger.
+#[account]
+pub struct AdjustPool {
+    pub available: u64,
+    pub allocated: u64,
+    pub bump: u8,
+}
+
+impl AdjustPool {
+    pub const SIZE: usize = 8 + 8 + 8 + 1;
+}
+
+/// Per-board $C_P$ cap. `allocated` is written at `begin_settle`.
+#[account]
+pub struct BoardTap {
+    pub market: Pubkey,
+    pub cap: u64,
+    pub allocated: u64,
+    pub bump: u8,
+}
+
+impl BoardTap {
+    pub const SIZE: usize = 8 + 32 + 8 + 8 + 1;
+}
+
+/// Open the Board account. Amount MUST be 0; leftover `c_m_locked` stays unused.
 pub fn fund_cm_inner(
     board: &mut Board,
     market_key: Pubkey,
@@ -65,7 +92,8 @@ pub fn fund_cm_inner(
     user: &mut crate::UserVault,
     amount: u64,
 ) -> Result<()> {
-    require!(amount == listed_c_m, VaultError::BadSettle);
+    let _ = listed_c_m;
+    require!(amount == 0, VaultError::BadSettle);
     require!(board.c_m_locked == 0, VaultError::AlreadySettled);
     if board.market == Pubkey::default() {
         board.market = market_key;
@@ -87,23 +115,77 @@ pub fn credit_trade_inner(board: &mut Board, user: &mut crate::UserVault, cost: 
     Ok(())
 }
 
+const GRID_HDR: usize = 8 + 32 + 2 + 1 + 16;
+
+fn grid_i128(data: &[u8], off: usize) -> Result<i128> {
+    require!(data.len() >= off + 16, VaultError::BadSettle);
+    let bytes: [u8; 16] = data[off..off + 16]
+        .try_into()
+        .map_err(|_| error!(VaultError::BadSettle))?;
+    Ok(i128::from_le_bytes(bytes))
+}
+
+/// Header only: market + n. Does not copy the four n-vecs (n=1024 is 64KiB).
+pub fn parse_grid_meta(data: &[u8]) -> Result<(Pubkey, u16)> {
+    require!(data.len() >= GRID_HDR + 4, VaultError::BadSettle);
+    let market_bytes: [u8; 32] = data[8..40]
+        .try_into()
+        .map_err(|_| error!(VaultError::BadSettle))?;
+    let n_bytes: [u8; 2] = data[40..42]
+        .try_into()
+        .map_err(|_| error!(VaultError::BadSettle))?;
+    Ok((Pubkey::from(market_bytes), u16::from_le_bytes(n_bytes)))
+}
+
+/// Sealed `exposure[cell]` without deserializing the rest of the grid.
+pub fn parse_grid_exposure(data: &[u8], cell: usize) -> Result<i128> {
+    let (_, n) = parse_grid_meta(data)?;
+    let nu = n as usize;
+    require!(cell < nu, VaultError::BadOutcome);
+    require!(data.len() >= 75 + 64 * nu, VaultError::BadSettle);
+    let p0_len = u32::from_le_bytes(
+        data[GRID_HDR..GRID_HDR + 4]
+            .try_into()
+            .map_err(|_| error!(VaultError::BadSettle))?,
+    ) as usize;
+    require!(p0_len == nu, VaultError::BadSettle);
+    let theta_len_off = GRID_HDR + 4 + nu * 16;
+    let theta_len = u32::from_le_bytes(
+        data[theta_len_off..theta_len_off + 4]
+            .try_into()
+            .map_err(|_| error!(VaultError::BadSettle))?,
+    ) as usize;
+    require!(theta_len == nu, VaultError::BadSettle);
+    let exp_len_off = theta_len_off + 4 + nu * 16;
+    let exp_len = u32::from_le_bytes(
+        data[exp_len_off..exp_len_off + 4]
+            .try_into()
+            .map_err(|_| error!(VaultError::BadSettle))?,
+    ) as usize;
+    require!(exp_len == nu, VaultError::BadSettle);
+    grid_i128(data, exp_len_off + 4 + cell * 16)
+}
+
 pub fn compute_begin(
     board: &mut Board,
     market: &Market,
-    grid: &Grid,
+    grid_data: &[u8],
     record: &Resolution,
     book: Option<&RiskBook>,
+    pool: Option<&mut AdjustPool>,
+    tap: Option<&mut BoardTap>,
 ) -> Result<()> {
     require!(board.phase == BOARD_IDLE, VaultError::AlreadySettled);
     require!(record.phase == PHASE_FINALIZED, VaultError::NotFinalized);
     require!(!record.refunds_due, VaultError::RefundsDue);
     require!(record.market == board.market, VaultError::WrongBoard);
-    require!(grid.market == board.market, VaultError::WrongBoard);
+    let (grid_market, grid_n) = parse_grid_meta(grid_data)?;
+    require!(grid_market == board.market, VaultError::WrongBoard);
 
     let o = &record.final_outcome;
     let cell = outcome_cell(
         record.family,
-        grid.n as usize,
+        grid_n as usize,
         record.k_max,
         market.extra.a,
         market.extra.b,
@@ -112,24 +194,27 @@ pub fn compute_begin(
         o.b,
     )
     .ok_or(VaultError::BadOutcome)?;
-    require!(cell < grid.exposure.len(), VaultError::BadOutcome);
+    require!(cell < grid_n as usize, VaultError::BadOutcome);
+    let exposure_cell = parse_grid_exposure(grid_data, cell)?;
 
-    let liability = usdc(Q64::from_raw(grid.exposure[cell]));
+    let liability = usdc(Q64::from_raw(exposure_cell));
     let premium = book.map(|b| b.premium_payable).unwrap_or(0);
     let c_r = book.map(|b| b.c_r).unwrap_or(0);
     if let Some(b) = book {
         require!(b.market == board.market, VaultError::WrongBoard);
     }
     let r = r_net(board.trading_revenue, premium);
+    let alloc = draw_c_p(liability, r, 0, c_r, pool, tap, board.market)?;
     let cmax = usdc(c_max(
         Q64::from_int(r as i64),
-        Q64::from_int(board.c_m_locked as i64),
+        Q64::ZERO,
         Q64::from_int(c_r as i64),
+        Q64::from_int(alloc as i64),
     ));
     let rho = recovery_rate(Q64::from_int(cmax as i64), Q64::from_int(liability as i64));
     let s = usdc(surplus(
         Q64::from_int(r as i64),
-        Q64::from_int(board.c_m_locked as i64),
+        Q64::ZERO,
         Q64::from_int(liability as i64),
         rho,
     ));
@@ -150,7 +235,49 @@ pub fn compute_begin(
     board.surplus_p = sp;
     board.cell = cell as u16;
     board.phase = BOARD_SETTLED;
+    board.fee_bps = market.fee_bps;
+    board.fee_timing = market.fee_timing;
     Ok(())
+}
+
+/// $C_P^{\mathrm{alloc}}$ only when $L>R_{\mathrm{net}}$. Missing pool/tap → 0.
+pub fn draw_c_p(
+    liability: u64,
+    r_net: u64,
+    c_m: u64,
+    c_r: u64,
+    pool: Option<&mut AdjustPool>,
+    tap: Option<&mut BoardTap>,
+    market: Pubkey,
+) -> Result<u64> {
+    let (Some(pool), Some(tap)) = (pool, tap) else {
+        return Ok(0);
+    };
+    require!(tap.market == market, VaultError::WrongBoard);
+    let alloc = c_p_alloc(liability, r_net, c_m, c_r, tap.cap, pool.available);
+    if alloc > 0 {
+        pool.available = pool.available.saturating_sub(alloc);
+        pool.allocated = pool.allocated.saturating_add(alloc);
+        tap.allocated = alloc;
+    }
+    Ok(alloc)
+}
+
+pub fn fund_pool_inner(pool: &mut AdjustPool, user: &mut crate::UserVault, amount: u64) -> Result<()> {
+    require!(amount > 0, VaultError::ZeroAmount);
+    user.available = accounting::debit_available(user.available, user.reserved, amount)?;
+    pool.available = accounting::credit(pool.available, amount)?;
+    Ok(())
+}
+
+/// Move this board's accrued fees into the platform UserVault. Never credits $C_P$.
+pub fn claim_fees_inner(board: &mut Board, platform: &mut crate::UserVault) -> Result<u64> {
+    let fees = board.fees_accrued;
+    if fees > 0 {
+        platform.available = accounting::credit(platform.available, fees)?;
+        board.fees_accrued = 0;
+    }
+    Ok(fees)
 }
 
 pub fn compute_refund(board: &mut Board, record: &Resolution) -> Result<()> {
@@ -190,11 +317,28 @@ pub fn pay_winner_clean(
     }
     let pay = payout_floor(Q64::from_raw(board.rho_raw), face_usdc);
     board.dust = board.dust.saturating_add(rho_dust(board.rho_raw, face_usdc, pay));
-    if pay > 0 {
-        user.available = accounting::credit(user.available, pay)?;
-        board.paid_users = board.paid_users.saturating_add(pay);
+    let fee = if board.fee_timing == 1 && board.fee_bps > 0 && pay > 0 {
+        (pay as u128 * board.fee_bps as u128 / 10_000) as u64
+    } else {
+        0
+    };
+    let net = pay.saturating_sub(fee);
+    if fee > 0 {
+        board.fees_accrued = board.fees_accrued.saturating_add(fee);
     }
-    Ok(pay)
+    if net > 0 {
+        user.available = accounting::credit(user.available, net)?;
+        board.paid_users = board.paid_users.saturating_add(net);
+    }
+    Ok(net)
+}
+
+fn reserved_for_quote(quote: &Quote) -> u64 {
+    if quote.cancelled {
+        quote.filled
+    } else {
+        quote.capacity
+    }
 }
 
 pub fn draw_quote(
@@ -206,8 +350,8 @@ pub fn draw_quote(
     require!(board.phase == BOARD_SETTLED, VaultError::NotFinalized);
     require!(layer.market == board.market && quote.market == board.market, VaultError::WrongBoard);
     require!(quote.layer_id == layer.layer_id, VaultError::WrongBoard);
-    // Own funds first: R_net + C_M. Draw C_R only for the leftover shortfall.
-    let own = r_net(board.trading_revenue, board.premium_payable).saturating_add(board.c_m_locked);
+    // Own funds first: R_net. Draw C_R only for the leftover shortfall.
+    let own = r_net(board.trading_revenue, board.premium_payable);
     let need = board.liability.saturating_sub(own).saturating_sub(board.drawn_h);
     let h_raw = usdc(layer_loss(
         Q64::from_int(board.liability as i64),
@@ -216,8 +360,9 @@ pub fn draw_quote(
     ));
     let h = h_raw.min(need);
     require!(h <= quote.capacity, VaultError::Overflow);
-    if quote.capacity > 0 {
-        lp.reserved = accounting::release(lp.reserved, quote.capacity)?;
+    let locked = reserved_for_quote(quote);
+    if locked > 0 {
+        lp.reserved = accounting::release(lp.reserved, locked)?;
     }
     if h > 0 {
         lp.available = accounting::debit_available(lp.available, lp.reserved, h)?;
@@ -229,8 +374,9 @@ pub fn draw_quote(
 pub fn release_quote(board: &Board, quote: &Quote, lp: &mut crate::UserVault) -> Result<()> {
     require!(board.phase == BOARD_REFUND, VaultError::NotFinalized);
     require!(quote.market == board.market, VaultError::WrongBoard);
-    if quote.capacity > 0 {
-        lp.reserved = accounting::release(lp.reserved, quote.capacity)?;
+    let locked = reserved_for_quote(quote);
+    if locked > 0 {
+        lp.reserved = accounting::release(lp.reserved, locked)?;
     }
     Ok(())
 }
@@ -374,7 +520,7 @@ mod tests {
     fn board() -> Board {
         Board {
             market: Pubkey::new_from_array([7; 32]),
-            c_m_locked: 20,
+            c_m_locked: 0,
             trading_revenue: 30,
             fees_accrued: 5,
             premium_payable: 0,
@@ -393,6 +539,8 @@ mod tests {
             cell: 0,
             phase: BOARD_IDLE,
             bump: 0,
+            fee_bps: 0,
+            fee_timing: 0,
         }
     }
 
@@ -404,7 +552,7 @@ mod tests {
         b.fees_accrued = 7;
         let r = r_net(b.trading_revenue, 0);
         assert_eq!(r, 40);
-        let c = r + b.c_m_locked;
+        let c = r;
         let rho = recovery_rate(Q64::from_int(c as i64), Q64::from_int(100));
         assert!(rho.approx_eq(Q64::from_ratio(2, 5), 1 << 40));
         assert_eq!(
@@ -430,14 +578,56 @@ mod tests {
     #[test]
     fn fees_out_of_c_max() {
         let mut b = board();
-        // R_net = 30 − 0, C_M = 20, C_R = 0 → 50. L = 100 → ρ = 1/2. S = 0.
+        // R_net = 30, C_R = 0 → C_max = 30. L = 100 → ρ = 3/10. S = 0.
         b.phase = BOARD_IDLE;
         let r = r_net(b.trading_revenue, 0);
-        let c = r + b.c_m_locked;
+        let c = r;
         let rho = recovery_rate(Q64::from_int(c as i64), Q64::from_int(100));
-        assert!(rho.approx_eq(Q64::from_ratio(1, 2), 1 << 40));
-        assert_eq!(usdc(surplus(Q64::from_int(r as i64), Q64::from_int(20), Q64::from_int(100), rho)), 0);
+        assert!(rho.approx_eq(Q64::from_ratio(3, 10), 1 << 40));
+        assert_eq!(usdc(surplus(Q64::from_int(r as i64), Q64::ZERO, Q64::from_int(100), rho)), 0);
         assert_eq!(b.fees_accrued, 5);
+    }
+
+    #[test]
+    fn claim_fees_go_to_platform_not_pool() {
+        let mut b = board();
+        b.fees_accrued = 7;
+        let pool = AdjustPool {
+            available: 10,
+            allocated: 0,
+            bump: 0,
+        };
+        let mut plat = user(1, 0);
+        let n = claim_fees_inner(&mut b, &mut plat).unwrap();
+        assert_eq!(n, 7);
+        assert_eq!(b.fees_accrued, 0);
+        assert_eq!(plat.available, 8);
+        assert_eq!(pool.available, 10);
+    }
+
+    #[test]
+    fn claim_timing_fee_taken_from_payout() {
+        let mut b = board();
+        b.phase = BOARD_SETTLED;
+        b.rho_raw = Q64::ONE.raw();
+        b.fee_bps = 1_000;
+        b.fee_timing = 1;
+        b.fees_accrued = 0;
+        let pos = Position {
+            market: b.market,
+            owner: Pubkey::default(),
+            set_hash: [0; 32],
+            q: Q64::from_int(100).raw(),
+            cost_paid: 20,
+            claimed: false,
+            bump: 0,
+        };
+        let mut u = user(0, 0);
+        let net = pay_winner_clean(&mut b, &pos, 100, &mut u).unwrap();
+        assert_eq!(net, 90);
+        assert_eq!(u.available, 90);
+        assert_eq!(b.fees_accrued, 10);
+        assert_eq!(b.paid_users, 90);
     }
 
     #[test]
@@ -536,12 +726,13 @@ mod tests {
     fn no_draw_when_own_funds_cover() {
         let mut b = board();
         b.phase = BOARD_SETTLED;
-        // R_net=30 + C_M=20 = 50 ≥ L=40 → risk capital stands by, H=0, then surplus.
+        // R_net=50 ≥ L=40 → risk capital stands by, H=0, then surplus.
+        b.trading_revenue = 50;
         b.liability = 40;
         b.rho_raw = Q64::ONE.raw();
         let s = usdc(surplus(
-            Q64::from_int(30),
-            Q64::from_int(20),
+            Q64::from_int(50),
+            Q64::ZERO,
             Q64::from_int(40),
             Q64::ONE,
         ));
@@ -582,6 +773,7 @@ mod tests {
         let mut b = board();
         b.phase = BOARD_SETTLED;
         // own=50, L=60, A=20 → raw H=40 but need only 10.
+        b.trading_revenue = 50;
         b.liability = 60;
         let layer = Layer {
             market: b.market,
@@ -609,5 +801,63 @@ mod tests {
         assert_eq!(draw_quote(&mut b, &layer, &quote, &mut lp).unwrap(), 10);
         assert_eq!(lp.available, 90);
         assert_eq!(b.drawn_h, 10);
+    }
+
+    #[test]
+    fn draw_after_cancel_releases_only_filled() {
+        let mut b = board();
+        b.phase = BOARD_SETTLED;
+        b.liability = 80;
+        let layer = Layer {
+            market: b.market,
+            attachment: 50,
+            thickness: 40,
+            filled: 10,
+            layer_id: 1,
+            quote_count: 1,
+            bump: 0,
+        };
+        let quote = Quote {
+            market: b.market,
+            lp: Pubkey::default(),
+            capacity: 100,
+            filled: 10,
+            premium: 10,
+            premium_owed: 1,
+            ts: 1,
+            profit_share_bps: 0,
+            layer_id: 1,
+            cancelled: true,
+            bump: 0,
+        };
+        let mut lp = user(200, 10);
+        assert_eq!(draw_quote(&mut b, &layer, &quote, &mut lp).unwrap(), 10);
+        assert_eq!(lp.reserved, 0);
+        assert_eq!(lp.available, 190);
+    }
+
+    #[test]
+    fn c_p_draws_only_on_shortfall() {
+        let market = Pubkey::new_from_array([3; 32]);
+        let mut pool = AdjustPool {
+            available: 50,
+            allocated: 0,
+            bump: 1,
+        };
+        let mut tap = BoardTap {
+            market,
+            cap: 20,
+            allocated: 0,
+            bump: 1,
+        };
+        assert_eq!(
+            draw_c_p(100, 40, 0, 0, Some(&mut pool), Some(&mut tap), market).unwrap(),
+            20
+        );
+        assert_eq!(pool.available, 30);
+        assert_eq!(pool.allocated, 20);
+        assert_eq!(tap.allocated, 20);
+        assert_eq!(draw_c_p(30, 40, 0, 0, Some(&mut pool), Some(&mut tap), market).unwrap(), 0);
+        assert_eq!(draw_c_p(100, 40, 0, 0, None, None, market).unwrap(), 0);
     }
 }

@@ -10,7 +10,7 @@ echo "health $health"
 
 markets="$(curl -fsS "$API/v1/markets")"
 echo "markets $markets"
-market="$(echo "$markets" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["market"] if d else "")')"
+market="$(echo "$markets" | python3 -c 'import json,sys; d=json.load(sys.stdin); items=d.get("items", d) if isinstance(d, dict) else d; print(items[0]["market"] if items else "")')"
 if [[ -z "$market" ]]; then
   echo "no projected markets (start validator + cpm loop, then market-api with EMBED_INDEXER=1)"
   exit 1

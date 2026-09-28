@@ -93,7 +93,7 @@ SRS: FR-CLI-01. IDL-generated; no second discriminator.
 ## Phase 4 — Read path
 
 - Indexer: local RPC poll (`crates/services/readpath` `indexer`); Yellowstone later
-- Postgres projections optional (`DATABASE_URL` + `infra/docker-compose.readpath.yml`); memory store is the local cache. Not the ledger.
+- Postgres required for Market API (`DATABASE_URL`, machine PostgreSQL after `infra/local-pg.sql`). Memory is a cache. listing + fill_journal + market_proj. DDD + sqlx (`docs/architecture/ddd-sqlx.md`). Next.js does not use sqlx.
 - Quote Engine (`crates/services/quote`, `crates/math` only)
 - Market API (`market-api`): `GET /v1/health`, `/v1/markets`, `/v1/markets/{pk}/quote`, `/pdf`, `/ws`
 
@@ -127,7 +127,9 @@ Order of screens: connect + SIWS → deposit → board (1D + football heat) → 
 
 WASM quotes from `crates/math-wasm`. No second LMSR.
 
-**Done when:** Manual path matches CLI loop on localnet.
+**Done when:** Manual path matches CLI loop on localnet: connect → SIWS → deposit → session → buy on `/m/[id]` (WASM / Market API quote from `crates/math`) → withdraw is main-wallet only; End session ≠ Disconnect.
+
+Local check: `scripts/phase6-playwright.py` (UI + SIWS copy + desk stats + pre-bet ticket + catalog search/pagination + portfolio tickets); compose via `crates/client` (`POST /v1/compose`); preview via `crates/math-wasm`; `GET /v1/markets` (search + page); `GET /v1/owners/{owner}/positions` (tickets + settle prompts); `GET /v1/markets/{id}/info`; `GET /v1/markets/{id}/preview`. Localnet loop: `scripts/phase6-web.sh` + `scripts/phase6-e2e.py`.
 
 ---
 

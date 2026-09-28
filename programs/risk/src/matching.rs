@@ -15,15 +15,16 @@ pub struct QuoteView {
     pub lp_filled_on_board: u64,
 }
 
-pub fn layer_attachment(c_m: u64, d_unit: u64, layer_id: u8) -> Option<u64> {
+/// Layer \(k\) attaches at \((k-1)\,D_{\mathrm{unit}}\). There is no retained seed layer.
+pub fn layer_attachment(d_unit: u64, layer_id: u8) -> Option<u64> {
     if layer_id == 0 || layer_id > MAX_LAYERS {
         return None;
     }
-    c_m.checked_add(d_unit.checked_mul((layer_id as u64) - 1)?)
+    d_unit.checked_mul((layer_id as u64) - 1)
 }
 
-pub fn d_required(l_max: u64, c_m: u64) -> u64 {
-    l_max.saturating_sub(c_m)
+pub fn d_required(l_max: u64) -> u64 {
+    l_max
 }
 
 /// Same LP may not take more than γ of the working size on this board.
@@ -124,9 +125,9 @@ mod tests {
 
     #[test]
     fn published_layer_ids_only() {
-        assert!(layer_attachment(50, 10, 0).is_none());
-        assert_eq!(layer_attachment(50, 10, 1).unwrap(), 50);
-        assert_eq!(layer_attachment(50, 10, 2).unwrap(), 60);
+        assert!(layer_attachment(10, 0).is_none());
+        assert_eq!(layer_attachment(10, 1).unwrap(), 0);
+        assert_eq!(layer_attachment(10, 2).unwrap(), 10);
     }
 
     #[test]

@@ -1,15 +1,21 @@
 use crate::MarketError;
 use anchor_lang::prelude::*;
 
-pub fn decode(bytes: &[u8], n: usize) -> Result<Vec<bool>> {
+pub fn bit(bytes: &[u8], i: usize) -> bool {
+    bytes
+        .get(i / 8)
+        .map(|b| b & (1 << (i % 8)) != 0)
+        .unwrap_or(false)
+}
+
+/// Length, trailing-bit, and non-empty checks without an `n`-bool heap vec.
+pub fn check(bytes: &[u8], n: usize) -> Result<()> {
     require!(n > 0, MarketError::EmptySet);
     let need = n.div_ceil(8);
     require!(bytes.len() == need, MarketError::BadMask);
-    let mut out = vec![false; n];
     let mut any = false;
     for i in 0..n {
-        if bytes[i / 8] & (1 << (i % 8)) != 0 {
-            out[i] = true;
+        if bit(bytes, i) {
             any = true;
         }
     }
@@ -19,7 +25,12 @@ pub fn decode(bytes: &[u8], n: usize) -> Result<Vec<bool>> {
         require!(extra == 0, MarketError::BadMask);
     }
     require!(any, MarketError::EmptySet);
-    Ok(out)
+    Ok(())
+}
+
+pub fn decode(bytes: &[u8], n: usize) -> Result<Vec<bool>> {
+    check(bytes, n)?;
+    Ok((0..n).map(|i| bit(bytes, i)).collect())
 }
 
 #[cfg(test)]

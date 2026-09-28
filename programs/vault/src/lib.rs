@@ -3,8 +3,8 @@
 //! The USDC mint is Circle's official SPL mint (`USDC_MINT`). This program
 //! never creates that mint. `initialize` only opens the vault token account.
 //! Allowed outflows: unused-margin withdraw, settlement payout, LP draw,
-//! surplus split, VOID / failed-resolution refunds.
-//! There is no `admin_withdraw`. Session keys are not authority.
+//! $C_P$ allocation, surplus split, platform fee claim, VOID / failed-resolution refunds.
+//! Fees never enter $C_P$. There is no `admin_withdraw`. Session keys are not authority.
 
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
@@ -15,7 +15,7 @@ pub mod settle;
 pub mod views;
 
 pub use mint::{CIRCLE_USDC_DEVNET, CIRCLE_USDC_MAINNET, USDC_MINT};
-pub use settle::{Board, Claim};
+pub use settle::{AdjustPool, Board, BoardTap, Claim};
 
 declare_id!("VaULt11111111111111111111111111111111111111");
 
@@ -23,6 +23,8 @@ pub const VAULT_SEED: &[u8] = b"vault";
 pub const USER_SEED: &[u8] = b"user";
 pub const BOARD_SEED: &[u8] = b"board";
 pub const CLAIM_SEED: &[u8] = b"claim";
+pub const CPOOL_SEED: &[u8] = b"cpool";
+pub const CPTAP_SEED: &[u8] = b"cptap";
 
 #[program]
 pub mod vault {
@@ -107,7 +109,7 @@ pub mod vault {
         Ok(())
     }
 
-    /// Inject listed $C_M$ from the creator into this board's pot.
+    /// Open this board's Vault account. Amount MUST be 0 — there is no seed reserve.
     pub fn fund_cm(ctx: Context<FundCm>, amount: u64) -> Result<()> {
         let board = &mut ctx.accounts.board;
         if board.market == Pubkey::default() {
@@ -135,13 +137,48 @@ pub mod vault {
     /// After `finalize`, lock $L=E(x^*)$, $C_{\max}$, one $\rho$.
     pub fn begin_settle(ctx: Context<BeginSettle>) -> Result<()> {
         let book = ctx.accounts.risk_book.as_ref().map(|a| a.as_ref().as_ref());
+        let pool = ctx.accounts.pool.as_mut().map(|a| &mut **a);
+        let tap = ctx.accounts.tap.as_mut().map(|a| &mut **a);
+        let grid_data = ctx.accounts.grid.try_borrow_data()?;
         settle::compute_begin(
             &mut ctx.accounts.board,
             &ctx.accounts.market,
-            &ctx.accounts.grid,
+            &grid_data,
             &ctx.accounts.record,
             book,
+            pool,
+            tap,
         )?;
+        Ok(())
+    }
+
+    pub fn init_pool(ctx: Context<InitPool>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        pool.bump = ctx.bumps.pool;
+        Ok(())
+    }
+
+    pub fn fund_pool(ctx: Context<FundPool>, amount: u64) -> Result<()> {
+        settle::fund_pool_inner(&mut ctx.accounts.pool, &mut ctx.accounts.user, amount)
+    }
+
+    pub fn set_tap(ctx: Context<SetTap>, cap: u64) -> Result<()> {
+        let m = &ctx.accounts.market;
+        require!(
+            ctx.accounts.authority.key() == m.creator || ctx.accounts.authority.key() == m.platform,
+            VaultError::NotOwner
+        );
+        let tap = &mut ctx.accounts.tap;
+        tap.market = m.key();
+        tap.cap = cap;
+        tap.bump = ctx.bumps.tap;
+        Ok(())
+    }
+
+    pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
+        let m = &ctx.accounts.market;
+        require!(ctx.accounts.authority.key() == m.platform, VaultError::NotOwner);
+        settle::claim_fees_inner(&mut ctx.accounts.board, &mut ctx.accounts.user)?;
         Ok(())
     }
 
@@ -156,10 +193,13 @@ pub mod vault {
             ctx.accounts.position.set_hash == settle::set_hash(&set_mask),
             VaultError::BadMask
         );
+        let grid_data = ctx.accounts.grid.try_borrow_data()?;
+        let (grid_market, grid_n) = settle::parse_grid_meta(&grid_data)?;
+        require!(grid_market == ctx.accounts.board.market, VaultError::WrongBoard);
         let face = settle::mask_face(
             ctx.accounts.position.q,
             &set_mask,
-            ctx.accounts.grid.n as usize,
+            grid_n as usize,
             board.cell as usize,
         )?;
         let paid = settle::pay_winner_clean(
@@ -436,11 +476,70 @@ pub struct BeginSettle<'info> {
     #[account(mut, seeds = [BOARD_SEED, market.key().as_ref()], bump = board.bump)]
     pub board: Box<Account<'info, Board>>,
     pub market: Box<Account<'info, views::Market>>,
-    #[account(constraint = grid.market == market.key() @ VaultError::WrongBoard)]
-    pub grid: Box<Account<'info, views::Grid>>,
+    /// CHECK: market-program grid. Header + one exposure word; n=1024 is 65KB.
+    #[account(owner = views::MARKET_ID)]
+    pub grid: UncheckedAccount<'info>,
     #[account(constraint = record.market == market.key() @ VaultError::WrongBoard)]
     pub record: Box<Account<'info, views::Resolution>>,
     pub risk_book: Option<Box<Account<'info, views::RiskBook>>>,
+    #[account(mut, seeds = [CPOOL_SEED], bump = pool.bump)]
+    pub pool: Option<Account<'info, AdjustPool>>,
+    #[account(mut, seeds = [CPTAP_SEED, market.key().as_ref()], bump = tap.bump)]
+    pub tap: Option<Account<'info, BoardTap>>,
+}
+
+#[derive(Accounts)]
+pub struct InitPool<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(init_if_needed, payer = payer, space = AdjustPool::SIZE, seeds = [CPOOL_SEED], bump)]
+    pub pool: Account<'info, AdjustPool>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct FundPool<'info> {
+    pub owner: Signer<'info>,
+    #[account(mut, seeds = [CPOOL_SEED], bump = pool.bump)]
+    pub pool: Account<'info, AdjustPool>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, owner.key().as_ref()],
+        bump = user.bump,
+        has_one = owner @ VaultError::NotOwner
+    )]
+    pub user: Account<'info, UserVault>,
+}
+
+#[derive(Accounts)]
+pub struct SetTap<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub market: Account<'info, views::Market>,
+    #[account(
+        init_if_needed,
+        payer = authority,
+        space = BoardTap::SIZE,
+        seeds = [CPTAP_SEED, market.key().as_ref()],
+        bump
+    )]
+    pub tap: Account<'info, BoardTap>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimFees<'info> {
+    pub authority: Signer<'info>,
+    pub market: Account<'info, views::Market>,
+    #[account(mut, seeds = [BOARD_SEED, market.key().as_ref()], bump = board.bump)]
+    pub board: Account<'info, Board>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, market.platform.as_ref()],
+        bump = user.bump,
+        constraint = user.owner == market.platform @ VaultError::NotOwner
+    )]
+    pub user: Account<'info, UserVault>,
 }
 
 #[derive(Accounts)]
@@ -458,7 +557,9 @@ pub struct Payout<'info> {
     pub payer: Signer<'info>,
     #[account(mut, seeds = [BOARD_SEED, board.market.as_ref()], bump = board.bump)]
     pub board: Box<Account<'info, Board>>,
-    pub grid: Box<Account<'info, views::Grid>>,
+    /// CHECK: market-program grid. Only n is read.
+    #[account(owner = views::MARKET_ID)]
+    pub grid: UncheckedAccount<'info>,
     pub record: Box<Account<'info, views::Resolution>>,
     #[account(constraint = position.market == board.market @ VaultError::WrongBoard)]
     pub position: Box<Account<'info, views::Position>>,

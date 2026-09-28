@@ -81,10 +81,11 @@ done
 
 solana airdrop 100 --url "$URL" --keypair "$KEYPAIR" >/dev/null
 
-echo "== faucet / vault / deposit =="
+echo "== faucet / vault / deposit / shared committee =="
 cpm faucet 100000
 cpm vault-init
 cpm deposit 50000
+cpm committee init --m 1
 
 echo "== create gaussian / fund / buy =="
 CREATE_OUT="$(cpm market create-gaussian cli-loop first-print --n 8 --c-m 5 --close-in 8 --challenge-secs 3)"

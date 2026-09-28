@@ -2,9 +2,21 @@
 
 use crate::q64::Q64;
 
-/// $C_{\max} = R_{\mathrm{net}} + C_M + C_R^{\mathrm{final}}$.
-pub fn c_max(r_net: Q64, c_m: Q64, c_r_final: Q64) -> Q64 {
-    r_net.saturating_add(c_m).saturating_add(c_r_final)
+/// $C_{\max} = R_{\mathrm{net}} + C_R^{\mathrm{final}} + C_P^{\mathrm{alloc}}$.
+/// The unused `c_m` argument is kept so call sites compile; it is never added.
+pub fn c_max(r_net: Q64, _c_m: Q64, c_r_final: Q64, c_p_alloc: Q64) -> Q64 {
+    r_net.saturating_add(c_r_final).saturating_add(c_p_alloc)
+}
+
+/// $C_P^{\mathrm{alloc}}=\min(\mathrm{shortfall}, C_P^{\mathrm{board}}, C_P^{\mathrm{pool}})$.
+/// Shortfall is $(L-R_{\mathrm{net}}-C_R)^+$. Own-funds path: shortfall 0.
+pub fn c_p_alloc(liability: u64, r_net: u64, _c_m: u64, c_r: u64, cap: u64, pool: u64) -> u64 {
+    let own = r_net;
+    if liability <= own {
+        return 0;
+    }
+    let after_r = liability.saturating_sub(own).saturating_sub(c_r);
+    after_r.min(cap).min(pool)
 }
 
 /// $\rho = \min(1, C_{\max}/L)$. If $L=0$, $\rho=1$.
@@ -20,12 +32,12 @@ pub fn recovery_rate(c_max: Q64, liability: Q64) -> Q64 {
     }
 }
 
-/// $S = \max(R_{\mathrm{net}}+C_M-L, 0)$ only meaningful when $\rho=1$.
-pub fn surplus(r_net: Q64, c_m: Q64, liability: Q64, rho: Q64) -> Q64 {
+/// $S = \max(R_{\mathrm{net}}-L, 0)$ only meaningful when $\rho=1$.
+pub fn surplus(r_net: Q64, _c_m: Q64, liability: Q64, rho: Q64) -> Q64 {
     if rho < Q64::ONE {
         return Q64::ZERO;
     }
-    let s = r_net.saturating_add(c_m).saturating_sub(liability);
+    let s = r_net.saturating_sub(liability);
     if s.raw() < 0 {
         Q64::ZERO
     } else {
@@ -39,6 +51,21 @@ pub fn usdc(q: Q64) -> u64 {
         0
     } else {
         (q.raw() as u128 >> 64) as u64
+    }
+}
+
+/// Buy debit: smallest integer USDC that covers a positive Q64 `C_S`.
+/// Floor would mint face-$1 shares for free and force $\rho=0$ when $C_{\max}=0$.
+pub fn usdc_charge(q: Q64) -> u64 {
+    if q.raw() <= 0 {
+        return 0;
+    }
+    let floor = usdc(q);
+    let frac = (q.raw() as u128) & ((1u128 << 64) - 1);
+    if frac == 0 {
+        floor
+    } else {
+        floor.saturating_add(1)
     }
 }
 
@@ -94,10 +121,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn buy_charge_ceils_fractional_cs() {
+        assert_eq!(usdc_charge(Q64::ZERO), 0);
+        assert_eq!(usdc_charge(Q64::from_int(2)), 2);
+        assert_eq!(usdc_charge(Q64::from_ratio(2, 5)), 1);
+    }
+
+    #[test]
     fn rho_one_when_funded() {
-        let c = c_max(Q64::from_int(30), Q64::from_int(50), Q64::from_int(20));
-        assert_eq!(c, Q64::from_int(100));
-        assert_eq!(recovery_rate(c, Q64::from_int(80)), Q64::ONE);
+        let c = c_max(Q64::from_int(30), Q64::ZERO, Q64::from_int(20), Q64::ZERO);
+        assert_eq!(c, Q64::from_int(50));
+        assert_eq!(recovery_rate(c, Q64::from_int(40)), Q64::ONE);
     }
 
     #[test]
@@ -117,7 +151,7 @@ mod tests {
 
     #[test]
     fn surplus_when_full_pay() {
-        let s = surplus(Q64::from_int(40), Q64::from_int(20), Q64::from_int(50), Q64::ONE);
+        let s = surplus(Q64::from_int(60), Q64::ZERO, Q64::from_int(50), Q64::ONE);
         assert_eq!(s, Q64::from_int(10));
     }
 
@@ -183,7 +217,9 @@ mod tests {
 
     #[test]
     fn trade_only_pool_when_no_cm_no_cr() {
-        let c = c_max(Q64::from_int(40), Q64::ZERO, Q64::ZERO);
+        let c = c_max(Q64::from_int(40), Q64::ZERO, Q64::ZERO, Q64::ZERO);
+        assert_eq!(c_p_alloc(100, 40, 0, 0, 20, 50), 20);
+        assert_eq!(c_p_alloc(30, 40, 0, 0, 20, 50), 0);
         assert_eq!(c, Q64::from_int(40));
         assert_eq!(recovery_rate(c, Q64::from_int(100)), Q64::from_ratio(2, 5));
         assert_eq!(

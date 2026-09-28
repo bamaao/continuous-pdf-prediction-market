@@ -82,6 +82,14 @@ mod tests {
     }
 
     #[test]
+    fn set_and_skellam_ticket_are_domain_separated() {
+        let set = set_hash(&[1]);
+        let sk = skellam_ticket(0, 0, 0);
+        assert_ne!(set, sk);
+        assert_eq!(set[0] != 0 || set.iter().any(|b| *b != 0), true);
+    }
+
+    #[test]
     fn dirichlet_layout_is_not_a_product_type() {
         let t = [4u8; 32];
         assert_ne!(dirichlet(&t, 0, 0, 0), dirichlet(&t, 2, 0, 8));

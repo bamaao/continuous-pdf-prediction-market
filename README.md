@@ -23,4 +23,16 @@ Diagrams: `docs/business-flow.png`, `docs/system-arch.png`, `docs/tech-arch.png`
 
 Suggested repo layout is in `docs/technical-architecture.md` section 9.
 
-Implementation order: [docs/plans/2026-09-24-implementation-sequence.md](docs/plans/2026-09-24-implementation-sequence.md). Math crate first; Next.js last.
+Implementation order: [docs/plans/2026-09-24-implementation-sequence.md](docs/plans/2026-09-24-implementation-sequence.md).
+
+```bash
+# Machine PostgreSQL on :5432 (do not start Docker if that port is already taken):
+#   psql -U postgres -h 127.0.0.1 -f infra/local-pg.sql
+# DATABASE_URL defaults to postgres://cpm:cpm@127.0.0.1:5432/cpm
+cargo run -p readpath --bin market-api
+cd apps/web && npm install && npm run dev
+```
+
+Listing names and the fill journal live in **local Postgres**, not process memory. A Market API restart reloads them. `ALLOW_MEMORY_ONLY=1` is only for unit tests.
+
+Web talks to `market-api` (`:8080`), Trading Gateway (`:8081`), and local RPC. Quotes come from `crates/math` (WASM crate + Market API). Do not reimplement LMSR in TypeScript. Persistence: `docs/architecture/ddd-sqlx.md`.
