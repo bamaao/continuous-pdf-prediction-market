@@ -65,7 +65,7 @@ enum Cmd {
     Committee(CommitteeCmd),
     #[command(subcommand)]
     Settle(SettleCmd),
-    /// Keeper is Phase 5/8. Prints the intended loop only.
+    /// Prints the Delegate / Commit / undelegate loop (ER keeper lands in Phase 8).
     Keeper,
     /// RPC slot, plus Market API health when `MARKET_API` is set.
     IndexStatus,
@@ -130,8 +130,15 @@ enum MarketCmd {
         #[arg(long, default_value_t = 20)]
         challenge_secs: i64,
     },
-    /// L1 stand-in for close / undelegate (ER lands later).
+    /// Halt trading. If the board is delegated, also undelegate.
     Close { market: String },
+    Delegate { market: String },
+    Commit {
+        market: String,
+        /// 64-char hex journal `trades_root`.
+        root: String,
+    },
+    Undelegate { market: String },
     /// Dump the trading-implied PDF $p_k$ and face $E_k$ (they are not the same).
     Pdf { market: String },
     /// Public desk: traders, stake, L_max, C_R, then the implied PDF.
@@ -292,6 +299,18 @@ fn parse_mask(hex: &str) -> Result<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&h[i..i + 2], 16).context("mask hex"))
         .collect()
+}
+
+fn parse_root(hex: &str) -> Result<[u8; 32]> {
+    let h = hex.trim().trim_start_matches("0x");
+    if h.len() != 64 {
+        anyhow::bail!("trades_root must be 64 hex chars");
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).context("trades_root hex")?;
+    }
+    Ok(out)
 }
 
 fn load_book(rpc: &RpcClient, market: &Pubkey) -> Result<(quote::Book, u16, u16)> {
@@ -835,7 +854,34 @@ fn main() -> Result<()> {
         Cmd::Market(MarketCmd::Close { market }) => {
             let market = Pubkey::from_str(&market)?;
             let sig = send(&opt.url, &kp, client::halt(me, market))?;
-            println!("ok {sig} halted (undelegate is ER, later)");
+            let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let delegated = rpc
+                .get_account(&market)
+                .ok()
+                .and_then(|a| client::decode_market(&a.data).ok())
+                .map(|m| m.delegated)
+                .unwrap_or(false);
+            if delegated {
+                let sig2 = send(&opt.url, &kp, client::undelegate_book(me, market))?;
+                println!("ok {sig} halted; undelegate {sig2}");
+            } else {
+                println!("ok {sig} halted");
+            }
+        }
+        Cmd::Market(MarketCmd::Delegate { market }) => {
+            let market = Pubkey::from_str(&market)?;
+            let sig = send(&opt.url, &kp, client::delegate_book(me, market))?;
+            println!("ok {sig} delegated");
+        }
+        Cmd::Market(MarketCmd::Commit { market, root }) => {
+            let market = Pubkey::from_str(&market)?;
+            let sig = send(&opt.url, &kp, client::commit_book(me, market, parse_root(&root)?))?;
+            println!("ok {sig} commit");
+        }
+        Cmd::Market(MarketCmd::Undelegate { market }) => {
+            let market = Pubkey::from_str(&market)?;
+            let sig = send(&opt.url, &kp, client::undelegate_book(me, market))?;
+            println!("ok {sig} undelegated");
         }
         Cmd::Market(MarketCmd::Info { market }) => {
             let market = Pubkey::from_str(&market)?;
@@ -854,8 +900,11 @@ fn main() -> Result<()> {
                 tickets += 1;
                 stake += pos.cost_paid;
             }
+            let mkt = client::decode_market(&rpc.get_account(&market).context("market")?.data)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let root: String = mkt.trades_root.iter().map(|b| format!("{b:02x}")).collect();
             println!(
-                "market={market} traders={} tickets={} stake_usdc={} trading_revenue={} l_max_usdc={} c_r={} r_net={} c_max_usdc={} coverage_bps={} fee_bps={}  # p is implied PDF, not E",
+                "market={market} traders={} tickets={} stake_usdc={} trading_revenue={} l_max_usdc={} c_r={} r_net={} c_max_usdc={} coverage_bps={} fee_bps={} delegated={} trades_root={} commit_ts={}  # p is implied PDF, not E",
                 owners.len(),
                 tickets,
                 stake,
@@ -866,6 +915,9 @@ fn main() -> Result<()> {
                 book.c_max_usdc(),
                 quote::q_bps(book.coverage()),
                 fee_bps,
+                mkt.delegated,
+                root,
+                mkt.commit_ts,
             );
         }
         Cmd::Market(MarketCmd::Pdf { market }) => {
@@ -987,7 +1039,7 @@ fn main() -> Result<()> {
             println!("ok {sig}");
         }
         Cmd::Keeper => {
-            println!("stub: keeper loop is Phase 5/8 (Delegate / Commit / undelegate).");
+            println!("keeper: for each delegated market, append journal → commit_book(trades_root) → after close_ts/halt undelegate_book. MagicBlock ER RPC is later.");
         }
         Cmd::IndexStatus => {
             let rpc = RpcClient::new(opt.url);

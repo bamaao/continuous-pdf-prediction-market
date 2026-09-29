@@ -21,6 +21,7 @@ solana-client = "2.2"
 solana-sdk = "2.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 tower-http = { version = "0.6", features = ["cors"] }
+journal = { path = "../../journal" }
 
 [dev-dependencies]
 http-body-util = "0.1"

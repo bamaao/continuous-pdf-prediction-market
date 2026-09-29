@@ -447,6 +447,26 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             Ok(client::seal_grid(owner, market))
         }
+        "halt" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::halt(owner, market))
+        }
+        "delegate_book" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::delegate_book(owner, market))
+        }
+        "commit_book" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::commit_book(
+                owner,
+                market,
+                hash32(body.evidence_hex.as_deref())?,
+            ))
+        }
+        "undelegate_book" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::undelegate_book(owner, market))
+        }
         "fund_cm" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             Ok(client::fund_cm(owner, market, body.amount.unwrap_or(0)))
@@ -718,6 +738,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn halt_and_delegate_bytes_match_client_crate() {
+        let owner = Pubkey::new_unique();
+        let market = Pubkey::new_unique();
+        let root = [7u8; 32];
+        let hex: String = root.iter().map(|b| format!("{b:02x}")).collect();
+        for (op, want) in [
+            ("halt", client::halt(owner, market)),
+            ("delegate_book", client::delegate_book(owner, market)),
+            ("undelegate_book", client::undelegate_book(owner, market)),
+            ("commit_book", client::commit_book(owner, market, root)),
+        ] {
+            let got = build(&ComposeBody {
+                op: op.into(),
+                owner: owner.to_string(),
+                market: Some(market.to_string()),
+                evidence_hex: Some(hex.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(want.program_id, got.program_id, "{op}");
+            assert_eq!(want.data, got.data, "{op}");
+        }
+    }
+
+    #[test]
     fn renew_bytes_match_client_crate() {
         let owner = Pubkey::new_unique();
         let want = client::renew_session(owner, 99, 7);

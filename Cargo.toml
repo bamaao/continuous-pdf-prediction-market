@@ -5,6 +5,7 @@ members = [
     "crates/math-wasm",
     "crates/client",
     "crates/cli",
+    "crates/journal",
     "crates/services/quote",
     "crates/services/readpath",
     "crates/services/gateway",
@@ -19,3 +20,6 @@ members = [
 edition = "2021"
 license = "MIT"
 version = "0.1.0"
+
+[profile.release]
+overflow-checks = true

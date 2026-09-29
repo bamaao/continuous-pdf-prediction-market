@@ -65,10 +65,15 @@ pub struct Market {
     pub id_hash: [u8; 32],
     pub extra: FamilyExtra,
     pub fee_timing: u8,
+    /// L1 fills are refused while true (FR-TRD-01). MagicBlock ER executes them off this program.
+    pub delegated: bool,
+    /// Journal checkpoint. Not whether a fill exists (FR-DUR-02).
+    pub trades_root: [u8; 32],
+    pub commit_ts: i64,
 }
 
 impl Market {
-    pub const SIZE: usize = 8 + 408;
+    pub const SIZE: usize = 8 + 456;
 
     pub fn fee_on_fill(&self) -> bool {
         self.fee_timing != FEE_ON_CLAIM
@@ -374,6 +379,9 @@ mod tests {
             id_hash: [0; 32],
             extra: FamilyExtra::default(),
             fee_timing: 0,
+            delegated: false,
+            trades_root: [0; 32],
+            commit_ts: 0,
         };
         let mut buf = Vec::new();
         m.try_serialize(&mut buf).unwrap();

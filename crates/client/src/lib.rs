@@ -472,6 +472,30 @@ fn trade_set(
 }
 
 pub fn halt(authority: Pubkey, market: Pubkey) -> Instruction {
+    book_ix(authority, market, market::instruction::Halt {}.data())
+}
+
+pub fn delegate_book(authority: Pubkey, market: Pubkey) -> Instruction {
+    book_ix(authority, market, market::instruction::DelegateBook {}.data())
+}
+
+pub fn commit_book(authority: Pubkey, market: Pubkey, trades_root: [u8; 32]) -> Instruction {
+    book_ix(
+        authority,
+        market,
+        market::instruction::CommitBook { trades_root }.data(),
+    )
+}
+
+pub fn undelegate_book(authority: Pubkey, market: Pubkey) -> Instruction {
+    book_ix(
+        authority,
+        market,
+        market::instruction::UndelegateBook {}.data(),
+    )
+}
+
+fn book_ix(authority: Pubkey, market: Pubkey, data: Vec<u8>) -> Instruction {
     Instruction {
         program_id: market::ID,
         accounts: market::accounts::Halt {
@@ -480,7 +504,7 @@ pub fn halt(authority: Pubkey, market: Pubkey) -> Instruction {
             committee: committee_pda(),
         }
         .to_account_metas(None),
-        data: market::instruction::Halt {}.data(),
+        data,
     }
 }
 

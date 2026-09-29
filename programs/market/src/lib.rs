@@ -1,6 +1,6 @@
 //! Market program: create by distribution family, `p0` once, L1 `buy_set`/`sell_set`.
 //! Listing names (CPI, election, BTC) are metadata, not instructions.
-//! Session PDA authorizes in-board fills (FR-WAL-04–06). Delegate is Phase 7.
+//! Session PDA authorizes in-board fills (FR-WAL-04–06). After `delegate_book`, L1 fills return `Delegated`.
 
 use anchor_lang::prelude::*;
 use math::prior;
@@ -304,19 +304,44 @@ pub mod market {
 
     /// Creator or roster member stops fills (early YES, VOID, or after close).
     pub fn halt(ctx: Context<Halt>) -> Result<()> {
+        require_book_authority(&ctx)?;
         let market = &mut ctx.accounts.market;
-        require_live_committee(&ctx.accounts.committee)?;
-        require!(
-            ctx.accounts.authority.key() == market.creator
-                || ctx.accounts.committee.is_member(&ctx.accounts.authority.key()),
-            MarketError::NotResolver
-        );
-        require!(
-            ctx.accounts.committee.key() == market.committee,
-            MarketError::BadCommittee
-        );
         require!(market.status == Status::Trading as u8, MarketError::NotTrading);
         market.status = Status::Halted as u8;
+        Ok(())
+    }
+
+    /// Marks the board delegated. Further L1 `buy_set` / `sell_set` fail until undelegate.
+    pub fn delegate_book(ctx: Context<Halt>) -> Result<()> {
+        require_book_authority(&ctx)?;
+        let market = &mut ctx.accounts.market;
+        require!(market.status == Status::Trading as u8, MarketError::NotTrading);
+        require!(!market.delegated, MarketError::AlreadyDelegated);
+        market.delegated = true;
+        Ok(())
+    }
+
+    /// Writes a journal checkpoint. Does not move Vault USDC (FR-DUR-02).
+    pub fn commit_book(ctx: Context<Halt>, trades_root: [u8; 32]) -> Result<()> {
+        require_book_authority(&ctx)?;
+        let market = &mut ctx.accounts.market;
+        require!(market.delegated, MarketError::NotDelegated);
+        market.trades_root = trades_root;
+        market.commit_ts = Clock::get()?.unix_timestamp;
+        Ok(())
+    }
+
+    /// Clears `delegated` after halt or `close_ts` so L1 can settle.
+    pub fn undelegate_book(ctx: Context<Halt>) -> Result<()> {
+        require_book_authority(&ctx)?;
+        let market = &mut ctx.accounts.market;
+        require!(market.delegated, MarketError::NotDelegated);
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            market.status == Status::Halted as u8 || now >= market.close_ts,
+            MarketError::StillOpen
+        );
+        market.delegated = false;
         Ok(())
     }
 }
@@ -426,6 +451,9 @@ fn open_board(
     market.l_max = 0;
     market.id_hash = common.id_hash;
     market.extra = extra;
+    market.delegated = false;
+    market.trades_root = [0u8; 32];
+    market.commit_ts = 0;
 
     let grid = &mut ctx.accounts.grid;
     grid.market = market.key();
@@ -760,6 +788,7 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_b
         ctx.accounts.market.status == Status::Trading as u8,
         MarketError::NotTrading
     );
+    require!(!ctx.accounts.market.delegated, MarketError::Delegated);
     let now = Clock::get()?.unix_timestamp;
     require!(now < ctx.accounts.market.close_ts, MarketError::Closed);
     let owner_key = ctx.accounts.owner.key();
@@ -897,6 +926,7 @@ fn fill_skellam(
         ctx.accounts.market.status == Status::Trading as u8,
         MarketError::NotTrading
     );
+    require!(!ctx.accounts.market.delegated, MarketError::Delegated);
     let now = Clock::get()?.unix_timestamp;
     require!(now < ctx.accounts.market.close_ts, MarketError::Closed);
     let owner_key = ctx.accounts.owner.key();
@@ -1039,6 +1069,20 @@ fn lock_clocks(common: &CreateCommon) -> Result<()> {
     require!(
         common.report_window_secs > 0 && common.challenge_secs > 0,
         MarketError::BadClock
+    );
+    Ok(())
+}
+
+fn require_book_authority(ctx: &Context<Halt>) -> Result<()> {
+    require_live_committee(&ctx.accounts.committee)?;
+    require!(
+        ctx.accounts.authority.key() == ctx.accounts.market.creator
+            || ctx.accounts.committee.is_member(&ctx.accounts.authority.key()),
+        MarketError::NotResolver
+    );
+    require!(
+        ctx.accounts.committee.key() == ctx.accounts.market.committee,
+        MarketError::BadCommittee
     );
     Ok(())
 }
@@ -1390,6 +1434,14 @@ pub enum MarketError {
     NonceReplay,
     #[msg("grid P0 is not sealed; grow_grid / write_grid_mass / seal_grid")]
     GridNotReady,
+    #[msg("market is delegated; L1 fills are ER-only")]
+    Delegated,
+    #[msg("market is already delegated")]
+    AlreadyDelegated,
+    #[msg("market is not delegated")]
+    NotDelegated,
+    #[msg("undelegate only after halt or close_ts")]
+    StillOpen,
 }
 
 #[cfg(test)]

@@ -1,0 +1,2 @@
+[env]
+SBF_OUT_DIR = { value = "target/deploy", relative = true }

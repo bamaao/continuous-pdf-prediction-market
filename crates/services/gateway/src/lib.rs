@@ -10,6 +10,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
+use journal::Journal;
 use serde::{Deserialize, Serialize};
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcSendTransactionConfig;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub rpc: String,
     pub store: FileStore,
     pub limit: RateLimit,
+    pub journal: Option<Journal>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,6 +81,10 @@ pub fn reject_secrets(v: &serde_json::Value) -> bool {
 }
 
 pub fn router(rpc: String, receipt_dir: PathBuf) -> Router {
+    router_with_journal(rpc, receipt_dir, None)
+}
+
+pub fn router_with_journal(rpc: String, receipt_dir: PathBuf, journal: Option<Journal>) -> Router {
     let store = FileStore::open(&receipt_dir).expect("receipt dir");
     Router::new()
         .route("/v1/health", get(health))
@@ -90,6 +96,7 @@ pub fn router(rpc: String, receipt_dir: PathBuf) -> Router {
             rpc,
             store,
             limit: RateLimit::new(20, Duration::from_secs(10)),
+            journal,
         })
 }
 
@@ -183,7 +190,17 @@ fn forward(st: AppState, key: String) {
             match rpc.confirm_transaction(&sig) {
                 Ok(_) => {
                     next.receipt.status = "confirmed".into();
-                    let _ = st.store.put(&key, next);
+                    let _ = st.store.put(&key, next.clone());
+                    if let Some(j) = &st.journal {
+                        if let Err(e) = j.append(
+                            &next.receipt.market,
+                            &next.receipt.owner,
+                            next.receipt.nonce,
+                            &next.receipt.sig,
+                        ) {
+                            eprintln!("journal append: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     next.receipt.error = Some(e.to_string());
