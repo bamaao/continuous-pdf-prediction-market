@@ -463,6 +463,7 @@ async fn new_read_surfaces_exist() {
         "/v1/auctions".to_string(),
         format!("/v1/markets/{market}/layers"),
         "/v1/ops/status".into(),
+        "/v1/notify".into(),
         "/v1/pool".into(),
         "/v1/owners/Owner1111111111111111111111111111111111111/risk".into(),
     ] {

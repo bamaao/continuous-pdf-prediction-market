@@ -65,8 +65,21 @@ enum Cmd {
     Committee(CommitteeCmd),
     #[command(subcommand)]
     Settle(SettleCmd),
-    /// Prints the Delegate / Commit / undelegate loop (ER keeper lands in Phase 8).
-    Keeper,
+    /// R-KEEP write path (FR-UI-28): Commit, close/undelegate, heartbeat.
+    Keeper {
+        #[arg(long)]
+        once: bool,
+        #[arg(long, default_value_t = 15)]
+        interval: u64,
+        #[arg(long)]
+        journal_replica: Option<PathBuf>,
+        #[arg(long)]
+        journal_object: Option<PathBuf>,
+        #[arg(long)]
+        heartbeat: Option<PathBuf>,
+        #[arg(long)]
+        notify_dir: Option<PathBuf>,
+    },
     /// RPC slot, plus Market API health when `MARKET_API` is set.
     IndexStatus,
 }
@@ -539,6 +552,130 @@ fn trade_cmd(
 
 fn send(url: &str, payer: &Keypair, ix: solana_sdk::instruction::Instruction) -> Result<String> {
     send_ixs(url, payer, vec![ix], &[])
+}
+
+fn keeper_once(
+    url: &str,
+    kp: &Keypair,
+    journal: &journal::Journal,
+    heartbeat: &PathBuf,
+    notify_dir: &PathBuf,
+) -> Result<()> {
+    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let slot = rpc.get_slot().unwrap_or(0);
+    let now = wall_unix();
+    let me = kp.pubkey();
+    let mut last = "scan".to_string();
+    let mut last_market = String::new();
+    let mut ok = true;
+    let accounts = match rpc.get_program_accounts(&client::market::ID) {
+        Ok(a) => a,
+        Err(e) => {
+            notify::write_heartbeat(
+                heartbeat,
+                &notify::Heartbeat {
+                    slot,
+                    ts: now,
+                    last: format!("rpc {e}"),
+                    market: String::new(),
+                    ok: false,
+                },
+            )?;
+            return Ok(());
+        }
+    };
+    for (key, acc) in accounts {
+        let Ok(mkt) = client::decode_market(&acc.data) else { continue };
+        let market = key;
+        if mkt.delegated {
+            let root = journal.trades_root(&market.to_string()).unwrap_or([0u8; 32]);
+            if root != mkt.trades_root {
+                match send(url, kp, client::commit_book(me, market, root)) {
+                    Ok(sig) => {
+                        last = "commit".into();
+                        last_market = market.to_string();
+                        let _ = notify::append_event(
+                            notify_dir,
+                            &notify::Event {
+                                ts: now,
+                                kind: "commit".into(),
+                                market: last_market.clone(),
+                            },
+                        );
+                        println!("commit {sig} market={market}");
+                    }
+                    Err(e) => {
+                        ok = false;
+                        eprintln!("commit {market}: {e}");
+                    }
+                }
+            }
+        }
+        let trading = mkt.status == 1;
+        let halted = mkt.status == 2;
+        if trading && now >= mkt.close_ts {
+            match send(url, kp, client::halt(me, market)) {
+                Ok(sig) => {
+                    last = "close".into();
+                    last_market = market.to_string();
+                    let _ = notify::append_event(
+                        notify_dir,
+                        &notify::Event {
+                            ts: now,
+                            kind: "close".into(),
+                            market: last_market.clone(),
+                        },
+                    );
+                    println!("close {sig} market={market}");
+                    if mkt.delegated {
+                        match send(url, kp, client::undelegate_book(me, market)) {
+                            Ok(s2) => {
+                                last = "undelegate".into();
+                                println!("undelegate {s2} market={market}");
+                            }
+                            Err(e) => eprintln!("undelegate {market}: {e}"),
+                        }
+                    }
+                    if let Err(e) = send(url, kp, client::resolve_open(me, market)) {
+                        eprintln!("resolve_open {market}: {e}");
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("NotTrading") && !msg.contains("6010") {
+                        ok = false;
+                        eprintln!("close {market}: {e}");
+                    }
+                }
+            }
+        } else if mkt.delegated && (halted || now >= mkt.close_ts) {
+            match send(url, kp, client::undelegate_book(me, market)) {
+                Ok(sig) => {
+                    last = "undelegate".into();
+                    last_market = market.to_string();
+                    println!("undelegate {sig} market={market}");
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("NotDelegated") && !msg.contains("6025") {
+                        eprintln!("undelegate {market}: {e}");
+                    }
+                }
+            }
+        }
+    }
+    notify::write_heartbeat(
+        heartbeat,
+        &notify::Heartbeat {
+            slot,
+            ts: now,
+            last,
+            market: last_market,
+            ok,
+        },
+    )?;
+    println!("ok heartbeat {} slot={slot}", heartbeat.display());
+    Ok(())
 }
 
 fn send_ixs(
@@ -1038,8 +1175,34 @@ fn main() -> Result<()> {
             let sig = send(&opt.url, &kp, client::payout(me, market, owner, set_mask))?;
             println!("ok {sig}");
         }
-        Cmd::Keeper => {
-            println!("keeper: for each delegated market, append journal → commit_book(trades_root) → after close_ts/halt undelegate_book. MagicBlock ER RPC is later.");
+        Cmd::Keeper {
+            once,
+            interval,
+            journal_replica,
+            journal_object,
+            heartbeat,
+            notify_dir,
+        } => {
+            let replica = journal_replica.unwrap_or_else(|| {
+                PathBuf::from(std::env::var("JOURNAL_REPLICA_DIR").unwrap_or_else(|_| "journal-replica".into()))
+            });
+            let object = journal_object.unwrap_or_else(|| {
+                PathBuf::from(std::env::var("JOURNAL_OBJECT_DIR").unwrap_or_else(|_| "journal-object".into()))
+            });
+            let heartbeat = heartbeat.unwrap_or_else(|| {
+                PathBuf::from(std::env::var("KEEPER_HEARTBEAT_PATH").unwrap_or_else(|_| "tmp/keeper-heartbeat.json".into()))
+            });
+            let notify_dir = notify_dir.unwrap_or_else(|| {
+                PathBuf::from(std::env::var("NOTIFY_DIR").unwrap_or_else(|_| "tmp/notify".into()))
+            });
+            let journal = journal::Journal::open(&replica, &object)?;
+            loop {
+                keeper_once(&opt.url, &kp, &journal, &heartbeat, &notify_dir)?;
+                if once {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+            }
         }
         Cmd::IndexStatus => {
             let rpc = RpcClient::new(opt.url);

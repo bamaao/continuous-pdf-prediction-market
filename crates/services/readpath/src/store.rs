@@ -880,6 +880,12 @@ pub fn memory_only() -> bool {
     std::env::var("ALLOW_MEMORY_ONLY").ok().as_deref() == Some("1")
 }
 
+/// Staging / production must keep Postgres (listing + fill journal).
+pub fn memory_forbidden_for_env() -> bool {
+    let env = std::env::var("CPM_ENV").unwrap_or_else(|_| "local".into());
+    env != "local" && memory_only()
+}
+
 /// Listing + fill journal + projections. Memory is a cache. Refuse to run without PG
 /// unless `ALLOW_MEMORY_ONLY=1` (unit tests / emergency).
 pub async fn open_required_pool(mem: &MemoryStore) -> Result<sqlx::PgPool> {
@@ -1593,5 +1599,13 @@ mod tests {
         assert!(store.list().is_empty());
         assert!(store.listings().is_empty());
         assert!(store.catalog_tags().iter().any(|t| t.name == "macro" && t.used == 0));
+    }
+
+    #[test]
+    fn local_env_allows_memory_flag() {
+        let env = std::env::var("CPM_ENV").unwrap_or_else(|_| "local".into());
+        if env == "local" && !memory_only() {
+            assert!(!memory_forbidden_for_env());
+        }
     }
 }

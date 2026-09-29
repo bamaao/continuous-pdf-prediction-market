@@ -17,5 +17,7 @@ dist/
 .anchor/
 test-ledger/
 receipts/
+journal-replica/
+journal-object/
 __pycache__/
 *.pyc

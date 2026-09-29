@@ -6,6 +6,7 @@ members = [
     "crates/client",
     "crates/cli",
     "crates/journal",
+    "crates/notify",
     "crates/services/quote",
     "crates/services/readpath",
     "crates/services/gateway",

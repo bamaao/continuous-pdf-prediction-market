@@ -436,6 +436,9 @@ export async function fetchOpsStatus(api: string): Promise<{
   c_p_pool: number;
   vault_mint: string;
   keeper_heartbeat_slot: number;
+  keeper_ok?: boolean;
+  keeper_ts?: number;
+  keeper_last?: string;
   index_lag_slots: number;
   read_only: boolean;
   withdraw_disabled: boolean;

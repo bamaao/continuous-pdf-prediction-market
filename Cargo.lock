@@ -1190,6 +1190,8 @@ dependencies = [
  "bincode",
  "clap",
  "client",
+ "journal",
+ "notify",
  "quote 0.1.0",
  "serde_json",
  "solana-client",
@@ -3264,6 +3266,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
+name = "notify"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "num"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4072,6 +4083,7 @@ dependencies = [
  "http-body-util",
  "math",
  "math-wasm",
+ "notify",
  "quote 0.1.0",
  "serde",
  "serde_json",

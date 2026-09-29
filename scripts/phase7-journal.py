@@ -145,7 +145,7 @@ def run_chain() -> None:
             },
         )
         if st != 200:
-            flow.out(f"SKIP live chain: compose delegate_book {st} (restart market-api + reload market.so)")
+            fail("compose-delegate", f"{st} {probe} — market-api must serve delegate_book")
             return
     except Exception as e:
         fail("api", str(e))

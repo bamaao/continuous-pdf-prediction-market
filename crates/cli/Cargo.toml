@@ -16,6 +16,8 @@ clap = { version = "4", features = ["derive"] }
 ureq = { version = "2", default-features = false, features = ["json"] }
 bincode = "1"
 client = { path = "../client" }
+journal = { path = "../journal" }
+notify = { path = "../notify" }
 quote = { path = "../services/quote" }
 serde_json = "1"
 solana-client = "2.2"

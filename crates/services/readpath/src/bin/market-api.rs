@@ -13,6 +13,9 @@ async fn main() -> Result<()> {
     let rpc = std::env::var("RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8899".into());
     let store = Arc::new(MemoryStore::new());
     let listings = std::env::var("LISTINGS_PATH").unwrap_or_else(|_| "tmp/cpm-listings.json".into());
+    if readpath::memory_forbidden_for_env() {
+        anyhow::bail!("CPM_ENV forbids ALLOW_MEMORY_ONLY");
+    }
     if memory_only() || std::path::Path::new(&listings).exists() {
         store.persist_listings(&listings);
     }

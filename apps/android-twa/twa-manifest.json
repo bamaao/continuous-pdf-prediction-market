@@ -1,0 +1,15 @@
+{
+  "packageId": "market.cpm.twa",
+  "host": "localhost",
+  "name": "Continuous PDF prediction market",
+  "launcherName": "CPM",
+  "display": "standalone",
+  "themeColor": "#111111",
+  "navigationColor": "#111111",
+  "startUrl": "/",
+  "iconUrl": "/icon-512.png",
+  "webManifestUrl": "/manifest.json",
+  "shortcuts": [],
+  "generatorApp": "official-site-twa",
+  "note": "Wrapper only. Same Next.js origin. No store listing, no business code."
+}

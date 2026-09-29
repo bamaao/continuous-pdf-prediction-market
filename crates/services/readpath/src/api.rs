@@ -1950,11 +1950,17 @@ async fn load_owner_vault(owner: &str) -> Result<serde_json::Value, ()> {
     }))
 }
 
+fn keeper_heartbeat() -> Option<notify::Heartbeat> {
+    let path = std::env::var("KEEPER_HEARTBEAT_PATH").unwrap_or_else(|_| "tmp/keeper-heartbeat.json".into());
+    notify::read_heartbeat(path).ok().flatten()
+}
+
 async fn ops_status(State(st): State<AppState>) -> impl IntoResponse {
     let rows = st.store.list();
     let n = rows.len();
     let covered = rows.iter().filter(|m| m.book().coverage().raw() > 0).count();
     let c_r: u64 = rows.iter().map(|m| m.c_r).sum();
+    let hb = keeper_heartbeat();
     Json(serde_json::json!({
         "slot": st.store.slot(),
         "boards": n,
@@ -1962,11 +1968,21 @@ async fn ops_status(State(st): State<AppState>) -> impl IntoResponse {
         "c_r_total": c_r,
         "c_p_pool": st.store.pool_available(),
         "vault_mint": "Circle SPL USDC",
-        "keeper_heartbeat_slot": st.store.slot(),
+        "keeper_heartbeat_slot": hb.as_ref().map(|h| h.slot).unwrap_or(0),
+        "keeper_ok": hb.as_ref().map(|h| h.ok).unwrap_or(false),
+        "keeper_ts": hb.as_ref().map(|h| h.ts).unwrap_or(0),
+        "keeper_last": hb.as_ref().map(|h| h.last.clone()).unwrap_or_default(),
         "index_lag_slots": 0,
         "pg": st.catalog.has_pg(),
         "read_only": true,
         "withdraw_disabled": true,
+    }))
+}
+
+async fn notify_feed() -> impl IntoResponse {
+    let dir = std::env::var("NOTIFY_DIR").unwrap_or_else(|_| "tmp/notify".into());
+    Json(serde_json::json!({
+        "events": notify::last_events(dir, 40).unwrap_or_default()
     }))
 }
 
@@ -2335,6 +2351,7 @@ pub fn router_with_pool(store: Arc<MemoryStore>, pool: Option<sqlx::PgPool>) -> 
         .route("/v1/tags/{name}", delete(delete_tag))
         .route("/v1/tickets", post(put_ticket))
         .route("/v1/ops/status", get(ops_status))
+        .route("/v1/notify", get(notify_feed))
         .route("/v1/pool", get(pool_one))
         .route("/v1/prior", get(prior_one))
         .route("/v1/committee", get(committee_one))

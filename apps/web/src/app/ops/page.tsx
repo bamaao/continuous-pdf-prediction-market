@@ -14,6 +14,8 @@ export default async function OpsPage() {
     c_p_pool: 0,
     vault_mint: "Circle SPL USDC",
     keeper_heartbeat_slot: 0,
+    keeper_ok: false,
+    keeper_last: "",
     index_lag_slots: 0,
     read_only: true,
     withdraw_disabled: true,
@@ -40,7 +42,10 @@ export default async function OpsPage() {
         <Stat k="C_P pool" v={`${ops.c_p_pool} USDC`} />
         <Stat k="Fees" v="platform ledger, not C_P" />
         <Stat k="Vault mint" v={ops.vault_mint} />
-        <Stat k="Keeper heartbeat" v={`slot ${ops.keeper_heartbeat_slot}`} />
+        <Stat
+          k="Keeper heartbeat"
+          v={`slot ${ops.keeper_heartbeat_slot}${ops.keeper_ok ? " ok" : ""}${ops.keeper_last ? ` ${ops.keeper_last}` : ""}`}
+        />
         <Stat k="Withdraw" v="disabled" />
       </dl>
       <RiskTape limit={50} />
