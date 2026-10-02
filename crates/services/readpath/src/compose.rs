@@ -127,6 +127,15 @@ pub struct ComposeBody {
     /// Protocol fee claimant. If omitted, `PLATFORM_PUBKEY` or the create signer (local only).
     #[serde(default)]
     pub platform: Option<String>,
+    /// When true, compose an ER fill (readonly vaults + remaining MAGIC program).
+    #[serde(default)]
+    pub er: Option<bool>,
+    /// Grid shard index for `create_grid_shard` / `write_grid_shard`.
+    #[serde(default)]
+    pub ix: Option<u8>,
+    /// Extra shard indices for `accum_seal` / `apply_seal`.
+    #[serde(default)]
+    pub extras: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -256,6 +265,45 @@ fn platform_pubkey(owner: Pubkey, body: &ComposeBody) -> Result<Pubkey, StatusCo
     Ok(owner)
 }
 
+fn interval_bounds(body: &ComposeBody, family: u8) -> (i128, i128) {
+    let milli = body.milli.unwrap_or(false);
+    let n = body.n.unwrap_or(if milli { 256 } else { 8 });
+    let (def_min, def_max) = if family == 2 && milli {
+        (10_000_000, 250_000_000)
+    } else if milli {
+        (-2_000, 12_000)
+    } else {
+        (0, i64::from(n))
+    };
+    (
+        q_scaled(body.x_min.unwrap_or(def_min), milli),
+        q_scaled(body.x_max.unwrap_or(def_max), milli),
+    )
+}
+
+fn settle_grid(market: Pubkey, body: &ComposeBody) -> Pubkey {
+    if let Some(ix) = body.ix {
+        return client::grid_shard_pda(&market, ix);
+    }
+    let n = body.n.unwrap_or(0);
+    if n < 2 {
+        return client::grid_pda(&market);
+    }
+    let o = outcome_from(body);
+    let (extra_a, extra_b) = interval_bounds(body, o.family);
+    client::winning_shard(
+        market,
+        n,
+        o.family,
+        10,
+        extra_a,
+        extra_b,
+        o.kind,
+        o.a,
+        o.b,
+    )
+}
+
 fn outcome_from(body: &ComposeBody) -> client::resolution::Outcome {
     let family = body.family.unwrap_or(1);
     let kind = body.kind.unwrap_or(default_kind(family));
@@ -337,18 +385,31 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
             let q = Q64::from_int(body.shares.unwrap_or(1)).raw();
             let nonce = body.nonce.unwrap_or(1);
             let sell = body.op == "sell_skellam_set";
+            let on_er = body.er.unwrap_or(false);
             if let Some(trader) = body.trader.as_deref() {
                 let t = pk(trader)?;
                 if t != owner {
                     return Ok(if sell {
-                        client::sell_skellam_set_session(owner, t, market, kind, a, b, q, nonce)
+                        if on_er {
+                            client::sell_skellam_set_session_er(owner, t, market, kind, a, b, q, nonce)
+                        } else {
+                            client::sell_skellam_set_session(owner, t, market, kind, a, b, q, nonce)
+                        }
+                    } else if on_er {
+                        client::buy_skellam_set_session_er(owner, t, market, kind, a, b, q, nonce)
                     } else {
                         client::buy_skellam_set_session(owner, t, market, kind, a, b, q, nonce)
                     });
                 }
             }
             Ok(if sell {
-                client::sell_skellam_set(owner, market, kind, a, b, q, nonce)
+                if on_er {
+                    client::sell_skellam_set_er(owner, market, kind, a, b, q, nonce)
+                } else {
+                    client::sell_skellam_set(owner, market, kind, a, b, q, nonce)
+                }
+            } else if on_er {
+                client::buy_skellam_set_er(owner, market, kind, a, b, q, nonce)
             } else {
                 client::buy_skellam_set(owner, market, kind, a, b, q, nonce)
             })
@@ -358,7 +419,15 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
             let kind = body.kind.unwrap_or(0);
             let a = i16::try_from(body.value.unwrap_or(0)).map_err(|_| StatusCode::BAD_REQUEST)?;
             let b = i16::try_from(body.value_b.unwrap_or(0)).map_err(|_| StatusCode::BAD_REQUEST)?;
-            Ok(client::payout_skellam(owner, market, owner, kind, a, b))
+            Ok(client::payout_skellam_on(
+                owner,
+                market,
+                owner,
+                kind,
+                a,
+                b,
+                settle_grid(market, body),
+            ))
         }
         "draw_lp" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
@@ -397,10 +466,11 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
         }
         "begin_settle" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
-            Ok(client::begin_settle_ex(
+            Ok(client::begin_settle_on(
                 market,
                 true,
                 body.include_pool.unwrap_or(false),
+                settle_grid(market, body),
             ))
         }
         "buy_set" | "sell_set" => {
@@ -409,18 +479,31 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
             let q = Q64::from_int(body.shares.unwrap_or(1)).raw();
             let nonce = body.nonce.unwrap_or(1);
             let sell = body.op == "sell_set";
+            let on_er = body.er.unwrap_or(false);
             if let Some(trader) = body.trader.as_deref() {
                 let t = pk(trader)?;
                 if t != owner {
                     return Ok(if sell {
-                        client::sell_set_session(owner, t, market, mask, q, nonce)
+                        if on_er {
+                            client::sell_set_session_er(owner, t, market, mask, q, nonce)
+                        } else {
+                            client::sell_set_session(owner, t, market, mask, q, nonce)
+                        }
+                    } else if on_er {
+                        client::buy_set_session_er(owner, t, market, mask, q, nonce)
                     } else {
                         client::buy_set_session(owner, t, market, mask, q, nonce)
                     });
                 }
             }
             Ok(if sell {
-                client::sell_set(owner, market, mask, q, nonce)
+                if on_er {
+                    client::sell_set_er(owner, market, mask, q, nonce)
+                } else {
+                    client::sell_set(owner, market, mask, q, nonce)
+                }
+            } else if on_er {
+                client::buy_set_er(owner, market, mask, q, nonce)
             } else {
                 client::buy_set(owner, market, mask, q, nonce)
             })
@@ -428,7 +511,13 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
         "payout" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             let mask = mask_hex(body.mask.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
-            Ok(client::payout(owner, market, owner, mask))
+            Ok(client::payout_on(
+                owner,
+                market,
+                owner,
+                mask,
+                settle_grid(market, body),
+            ))
         }
         "refund" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
@@ -443,9 +532,30 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             Ok(client::write_grid_mass(owner, market))
         }
+        "create_grid_shard" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            let ix = body.ix.ok_or(StatusCode::BAD_REQUEST)?;
+            Ok(client::create_grid_shard(owner, market, ix))
+        }
+        "write_grid_shard" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            let ix = body.ix.ok_or(StatusCode::BAD_REQUEST)?;
+            Ok(client::write_grid_shard(owner, market, ix))
+        }
+        "accum_seal" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            let extras = body.extras.clone().unwrap_or_default();
+            Ok(client::accum_seal(owner, market, &extras))
+        }
+        "apply_seal" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            let extras = body.extras.clone().unwrap_or_default();
+            Ok(client::apply_seal(owner, market, &extras))
+        }
         "seal_grid" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
-            Ok(client::seal_grid(owner, market))
+            let n = body.n.unwrap_or(8);
+            Ok(client::seal_grid_n(owner, market, n))
         }
         "halt" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
@@ -454,6 +564,10 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
         "delegate_book" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             Ok(client::delegate_book(owner, market))
+        }
+        "prepare_delegate_buffer" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::prepare_delegate_buffer(owner, client::grid_pda(&market)))
         }
         "commit_book" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
@@ -706,14 +820,16 @@ mod tests {
         .unwrap();
         assert_eq!(want.program_id, got.program_id);
         assert_eq!(want.data, got.data);
-        assert_eq!(client::grid_space(128), 8_267);
-        assert_eq!(client::grid_space(256), 16_459);
+        assert_eq!(client::grid_space(16), 1_101);
+        assert_eq!(client::grid_space(128), 8_269);
+        assert_eq!(client::grid_space(256), 16_461);
         assert_eq!(client::grid_grow_steps(256), 1);
         assert_eq!(client::grid_grow_steps(1024), 6);
-        assert_eq!(client::grid_mass_steps(256), 1);
-        assert_eq!(client::grid_mass_steps(1024), 4);
+        assert_eq!(client::grid_mass_steps(256), 4);
+        assert_eq!(client::grid_mass_steps(1024), 16);
         let mass = client::write_grid_mass(owner, market);
         let seal = client::seal_grid(owner, market);
+        let seal256 = client::seal_grid_n(owner, market, 256);
         assert_eq!(
             build(&ComposeBody {
                 op: "write_grid_mass".into(),
@@ -736,6 +852,38 @@ mod tests {
             .data,
             seal.data
         );
+        let got256 = build(&ComposeBody {
+            op: "seal_grid".into(),
+            owner: owner.to_string(),
+            market: Some(market.to_string()),
+            n: Some(256),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(got256.data, seal256.data);
+        assert!(got256.accounts.len() > seal.accounts.len());
+    }
+
+    #[test]
+    fn begin_settle_points_at_winning_shard() {
+        let market = Pubkey::new_unique();
+        let shard0 = client::begin_settle_on(market, true, false, client::grid_pda(&market));
+        let got = build(&ComposeBody {
+            op: "begin_settle".into(),
+            owner: Pubkey::new_unique().to_string(),
+            market: Some(market.to_string()),
+            family: Some(1),
+            kind: Some(1),
+            milli: Some(true),
+            n: Some(256),
+            value: Some(2_400),
+            x_min: Some(-2_000),
+            x_max: Some(12_000),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(got.program_id, shard0.program_id);
+        assert_ne!(got.accounts, shard0.accounts);
     }
 
     #[test]

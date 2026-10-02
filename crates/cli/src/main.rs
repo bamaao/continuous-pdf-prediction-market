@@ -22,6 +22,9 @@ const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 struct Opt {
     #[arg(long, default_value = "http://127.0.0.1:8899")]
     url: String,
+    /// ER RPC. Empty = send commit/undelegate to `--url` (L1 / program-test).
+    #[arg(long, default_value = "")]
+    er_url: String,
     #[arg(long)]
     keypair: Option<PathBuf>,
     #[command(subcommand)]
@@ -143,15 +146,35 @@ enum MarketCmd {
         #[arg(long, default_value_t = 20)]
         challenge_secs: i64,
     },
-    /// Halt trading. If the board is delegated, also undelegate.
-    Close { market: String },
+    /// Halt trading. If the board is delegated, halt on ER then undelegate.
+    Close {
+        market: String,
+        #[arg(long)]
+        mask: Option<String>,
+        #[arg(long)]
+        skellam_kind: Option<u8>,
+        #[arg(long, default_value_t = 0)]
+        skellam_a: i16,
+        #[arg(long, default_value_t = 0)]
+        skellam_b: i16,
+    },
     Delegate { market: String },
     Commit {
         market: String,
         /// 64-char hex journal `trades_root`.
         root: String,
     },
-    Undelegate { market: String },
+    Undelegate {
+        market: String,
+        #[arg(long)]
+        mask: Option<String>,
+        #[arg(long)]
+        skellam_kind: Option<u8>,
+        #[arg(long, default_value_t = 0)]
+        skellam_a: i16,
+        #[arg(long, default_value_t = 0)]
+        skellam_b: i16,
+    },
     /// Dump the trading-implied PDF $p_k$ and face $E_k$ (they are not the same).
     Pdf { market: String },
     /// Public desk: traders, stake, L_max, C_R, then the implied PDF.
@@ -161,6 +184,13 @@ enum MarketCmd {
         market: String,
         #[arg(long, default_value = "01")]
         mask: String,
+        /// Skellam / football typed line (home/draw/away/totals/…). Overrides `--mask`.
+        #[arg(long)]
+        kind: Option<u8>,
+        #[arg(long, default_value_t = 0)]
+        a: i16,
+        #[arg(long, default_value_t = 0)]
+        b: i16,
         #[arg(long, default_value_t = 1)]
         shares: i64,
     },
@@ -213,6 +243,39 @@ enum TradeCmd {
         #[arg(long)]
         gateway: Option<String>,
     },
+    BuySkellam {
+        market: String,
+        shares: i64,
+        /// 0 Home / 1 Draw / 2 Away / 3 Over / 4 Under / 5 BTTS-Y / 6 BTTS-N / 7 Exact …
+        #[arg(long, default_value_t = 0)]
+        kind: u8,
+        #[arg(long, default_value_t = 0)]
+        a: i16,
+        #[arg(long, default_value_t = 0)]
+        b: i16,
+        #[arg(long, default_value_t = 0)]
+        nonce: u64,
+        #[arg(long)]
+        session: Option<PathBuf>,
+        #[arg(long)]
+        gateway: Option<String>,
+    },
+    SellSkellam {
+        market: String,
+        shares: i64,
+        #[arg(long, default_value_t = 0)]
+        kind: u8,
+        #[arg(long, default_value_t = 0)]
+        a: i16,
+        #[arg(long, default_value_t = 0)]
+        b: i16,
+        #[arg(long, default_value_t = 0)]
+        nonce: u64,
+        #[arg(long)]
+        session: Option<PathBuf>,
+        #[arg(long)]
+        gateway: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,8 +316,17 @@ enum ResolveCmd {
     Open { market: String },
     Submit {
         market: String,
-        /// Integer outcome for Gaussian kind=1 (cell mapper uses Q64).
+        /// Integer part of $x^*$ / atom / yes-no / home score (see `--family`).
         value: i64,
+        /// 0 Skellam 1 Gaussian 2 Lognormal 3 Dirichlet 4 Bernoulli.
+        #[arg(long, default_value_t = 1)]
+        family: u8,
+        /// 0 score pair, 1 scalar, 2 dirichlet atom, 4 yes/no.
+        #[arg(long, default_value_t = 1)]
+        kind: u8,
+        /// Away score (Skellam) or unused.
+        #[arg(long, default_value_t = 0)]
+        b: i64,
     },
     Finalize { market: String },
 }
@@ -274,9 +346,25 @@ enum SettleCmd {
         #[arg(long)]
         owner: Option<String>,
     },
+    PayoutSkellam {
+        market: String,
+        #[arg(long, default_value_t = 0)]
+        kind: u8,
+        #[arg(long, default_value_t = 0)]
+        a: i16,
+        #[arg(long, default_value_t = 0)]
+        b: i16,
+        #[arg(long)]
+        owner: Option<String>,
+    },
     /// Open the board vault (amount is always 0).
     FundCm {
         market: String,
+    },
+    /// After undelegate, debit the L1 user vault for ER fills on this set.
+    SyncVault {
+        market: String,
+        mask: String,
     },
 }
 
@@ -314,6 +402,10 @@ fn parse_mask(hex: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+fn mask_bytes(hex: &str, n: u16) -> Result<Vec<u8>> {
+    quote::pad_mask(&parse_mask(hex)?, n as usize).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 fn parse_root(hex: &str) -> Result<[u8; 32]> {
     let h = hex.trim().trim_start_matches("0x");
     if h.len() != 64 {
@@ -326,11 +418,22 @@ fn parse_root(hex: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
+fn load_grid_parts(rpc: &RpcClient, market: &Pubkey, n: u16) -> Result<Vec<client::market::state::Grid>> {
+    let mut parts = Vec::new();
+    for ix in 0..client::market::state::Grid::shard_count(n) {
+        let acc = rpc
+            .get_account(&client::grid_shard_pda(market, ix as u8))
+            .with_context(|| format!("grid shard {ix}"))?;
+        parts.push(client::decode_grid(&acc.data).map_err(|e| anyhow::anyhow!("{e}"))?);
+    }
+    Ok(parts)
+}
+
 fn load_book(rpc: &RpcClient, market: &Pubkey) -> Result<(quote::Book, u16, u16)> {
     let mkt = client::decode_market(&rpc.get_account(market).context("market")?.data)
         .map_err(|e| anyhow::anyhow!(e))?;
-    let grid = client::decode_grid(&rpc.get_account(&client::grid_pda(market)).context("grid")?.data)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let parts = load_grid_parts(rpc, market, mkt.n)?;
+    let (p0, theta, exposure, _) = client::concat_grid_shards(&parts);
     let mut trading_revenue = mkt.trading_revenue;
     let mut premium_payable = 0u64;
     if let Ok(bacc) = rpc.get_account(&client::board(market)) {
@@ -349,9 +452,9 @@ fn load_book(rpc: &RpcClient, market: &Pubkey) -> Result<(quote::Book, u16, u16)
     Ok((
         quote::Book::from_grid(
             mkt.beta,
-            &grid.p0,
-            &grid.theta,
-            &grid.exposure,
+            &p0,
+            &theta,
+            &exposure,
             trading_revenue,
             premium_payable,
             0,
@@ -505,8 +608,346 @@ fn send_via_gateway(
     anyhow::bail!("gateway receipt still pending after timeout nonce={nonce}")
 }
 
+fn account_delegated(rpc: &RpcClient, pk: &Pubkey) -> bool {
+    rpc.get_account(pk)
+        .ok()
+        .map(|a| a.owner == client::market::DELEGATION_PROGRAM_ID)
+        .unwrap_or(false)
+}
+
+fn market_is_delegated(rpc: &RpcClient, market: &Pubkey) -> bool {
+    let Ok(acc) = rpc.get_account(market) else {
+        return false;
+    };
+    if acc.owner == client::market::DELEGATION_PROGRAM_ID {
+        return true;
+    }
+    client::decode_market(&acc.data)
+        .map(|m| m.delegated)
+        .unwrap_or(false)
+}
+
+fn ensure_session(url: &str, kp: &Keypair, owner: Pubkey) -> Result<()> {
+    if account_delegated(
+        &RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed()),
+        &client::session_pda(&owner),
+    ) {
+        return Ok(());
+    }
+    let sig = send(url, kp, client::delegate_session(owner))?;
+    println!("delegate_session {sig}");
+    Ok(())
+}
+
+fn undelegate_seat_on_er(
+    l1: &str,
+    er: &str,
+    kp: &Keypair,
+    owner: Pubkey,
+    market: Pubkey,
+    set_hash: [u8; 32],
+) -> Result<()> {
+    let er_url = er_rpc(l1, er);
+    let pos = client::position_pda(&market, &owner, &set_hash);
+    let nonce = client::nonce_pda(&owner, &market);
+    if account_delegated(
+        &RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed()),
+        &pos,
+    ) {
+        let sig = send(er_url, kp, client::undelegate_seat(kp.pubkey(), owner, market, set_hash))?;
+        println!("undelegate_seat {sig}");
+        wait_owned_by_market(l1, &[pos, nonce], 80)?;
+    }
+    Ok(())
+}
+
+fn undelegate_seats_for_market(l1: &str, er: &str, kp: &Keypair, market: Pubkey) -> Result<()> {
+    if er.is_empty() {
+        return Ok(());
+    }
+    let er_rpc_c = RpcClient::new_with_commitment(er.to_string(), CommitmentConfig::confirmed());
+    let Ok(rows) = er_rpc_c.get_program_accounts(&client::market::ID) else {
+        return Ok(());
+    };
+    for (_, acc) in rows {
+        let Ok(pos) = client::decode_position(&acc.data) else { continue };
+        if pos.market != market {
+            continue;
+        }
+        if let Err(e) = undelegate_seat_on_er(l1, er, kp, pos.owner, market, pos.set_hash) {
+            eprintln!("undelegate_seat {} {market}: {e}", pos.owner);
+        }
+    }
+    Ok(())
+}
+
+fn sync_vault_on_l1(
+    l1: &str,
+    kp: &Keypair,
+    owner: Pubkey,
+    market: Pubkey,
+    set_hash: [u8; 32],
+) -> Result<()> {
+    let rpc = RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed());
+    let pos = client::position_pda(&market, &owner, &set_hash);
+    for _ in 0..40 {
+        let pos_ok = rpc
+            .get_account(&pos)
+            .ok()
+            .map(|a| a.owner == client::market::ID)
+            .unwrap_or(false);
+        let mkt_ok = rpc
+            .get_account(&market)
+            .ok()
+            .map(|a| a.owner == client::market::ID)
+            .unwrap_or(false);
+        if pos_ok && mkt_ok {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    wait_owned_by_market(l1, &[pos, market], 80)?;
+    let sig = send(l1, kp, client::sync_vault(kp.pubkey(), owner, market, set_hash))?;
+    println!("sync_vault {sig}");
+    Ok(())
+}
+
+fn rpc_market_n(url: &str, market: &Pubkey) -> Result<u16> {
+    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let mkt = client::decode_market(&rpc.get_account(market).context("market")?.data)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(mkt.n)
+}
+
+fn intent_already_queued(s: &str) -> bool {
+    s.contains("NotDelegated")
+        || s.contains("6025")
+        || s.contains("0xbbf")
+        || s.contains("0xBBF")
+}
+
+fn send_undelegate_shard(er: &str, kp: &Keypair, me: Pubkey, shard: Pubkey) -> Result<()> {
+    match send(er, kp, client::undelegate_shard(me, shard)) {
+        Ok(sig) => {
+            println!("undelegate_shard {sig} shard={shard}");
+            Ok(())
+        }
+        Err(e) => {
+            if intent_already_queued(&e.to_string()) {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn undelegate_shard_until_home(
+    er: &str,
+    l1: &str,
+    kp: &Keypair,
+    me: Pubkey,
+    shard: Pubkey,
+    label: &str,
+    tries: u32,
+) -> Result<()> {
+    if account_owned_by_market(l1, &shard) {
+        println!("home {label}={shard}");
+        return Ok(());
+    }
+    // 16-cell shards are 1101B and need the committor writeback buffer.
+    // Do not create the SDK Delegate buffer ["buffer", source]: that PDA is
+    // not the committor buffer and pushed local writeback onto a crash.
+    send_undelegate_shard(er, kp, me, shard)?;
+    for t in 0..tries {
+        if account_owned_by_market(l1, &shard) {
+            println!("home {label}={shard}");
+            return Ok(());
+        }
+        if t > 0 && t % 8 == 0 {
+            if let Err(e) = send_undelegate_shard(er, kp, me, shard) {
+                let s = e.to_string();
+                if !intent_already_queued(&s) {
+                    eprintln!("retry undelegate_shard {label}: {s}");
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    anyhow::bail!("{label} {shard} still not home after undelegate")
+}
+
+fn undelegate_extra_shards(er: &str, l1: &str, kp: &Keypair, me: Pubkey, market: Pubkey, n: u16) -> Result<()> {
+    for ix in 1..client::market::state::Grid::shard_count(n) {
+        let shard = client::grid_shard_pda(&market, ix as u8);
+        undelegate_shard_until_home(er, l1, kp, me, shard, &format!("shard{ix}"), 80)?;
+    }
+    Ok(())
+}
+
+fn wait_book_home(l1: &str, er: &str, kp: &Keypair, me: Pubkey, market: Pubkey, n: u16) -> Result<()> {
+    let grid = client::grid_pda(&market);
+    for t in 0..240u32 {
+        if account_owned_by_market(l1, &market) {
+            break;
+        }
+        if t > 0 && t % 8 == 0 {
+            match send(er, kp, client::undelegate_book(me, market)) {
+                Ok(sig) => eprintln!("retry undelegate_book {sig}"),
+                Err(e) => {
+                    let s = e.to_string();
+                    if !intent_already_queued(&s) {
+                        eprintln!("retry undelegate_book: {s}");
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if t + 1 == 240 && !account_owned_by_market(l1, &market) {
+            anyhow::bail!("L1 market still not home after undelegate");
+        }
+    }
+    if !account_owned_by_market(l1, &grid) {
+        undelegate_shard_until_home(er, l1, kp, me, grid, "shard0", 240)?;
+    } else {
+        println!("home shard0={grid}");
+    }
+    undelegate_extra_shards(er, l1, kp, me, market, n)?;
+    Ok(())
+}
+
+fn settle_grid_of(rpc: &RpcClient, market: Pubkey) -> Result<Pubkey> {
+    let mkt = client::decode_market(&rpc.get_account(&market).context("market")?.data)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let rec = client::decode_resolution(
+        &rpc.get_account(&client::record_pda(&market))
+            .context("record")?
+            .data,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(client::winning_shard(
+        market,
+        mkt.n,
+        rec.family,
+        rec.k_max,
+        mkt.extra.a,
+        mkt.extra.b,
+        rec.final_outcome.kind,
+        rec.final_outcome.a,
+        rec.final_outcome.b,
+    ))
+}
+
+fn wait_owned_by_market(l1: &str, pks: &[Pubkey], tries: u32) -> Result<()> {
+    let rpc = RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed());
+    for _ in 0..tries {
+        let all = pks.iter().all(|pk| {
+            rpc.get_account(pk)
+                .ok()
+                .map(|a| a.owner == client::market::ID)
+                .unwrap_or(false)
+        });
+        if all {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    anyhow::bail!("L1 owner still not market program after undelegate")
+}
+
+fn account_owned_by_market(url: &str, pk: &Pubkey) -> bool {
+    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    rpc.get_account(pk)
+        .ok()
+        .map(|a| a.owner == client::market::ID)
+        .unwrap_or(false)
+}
+
+#[allow(dead_code)]
+fn settle_grid_key(l1: &str, market: Pubkey) -> Pubkey {
+    let dump = client::grid_dump_pda(&market);
+    let rpc = RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed());
+    if rpc
+        .get_account(&dump)
+        .ok()
+        .map(|a| a.owner == client::market::ID && a.data.len() >= 75)
+        .unwrap_or(false)
+    {
+        dump
+    } else {
+        client::grid_pda(&market)
+    }
+}
+
+fn rescue_grid_from_er(l1: &str, er: &str, kp: &Keypair, market: Pubkey) -> Result<()> {
+    let grid = client::grid_pda(&market);
+    if account_owned_by_market(l1, &grid) {
+        return Ok(());
+    }
+    let er_rpc = if er.is_empty() { l1 } else { er };
+    let er_client = RpcClient::new_with_commitment(er_rpc.to_string(), CommitmentConfig::confirmed());
+    let data = er_client
+        .get_account(&grid)
+        .map_err(|e| anyhow::anyhow!("ER grid {grid}: {e}"))?
+        .data;
+    require_dump_grown(l1, kp, market, data.len())?;
+    let mut off = 0usize;
+    while off < data.len() {
+        let end = (off + 800).min(data.len());
+        let sig = send(
+            l1,
+            kp,
+            client::write_grid_dump(kp.pubkey(), market, off as u32, data[off..end].to_vec()),
+        )?;
+        eprintln!("ok {sig} write-grid-dump {off}..{end}");
+        off = end;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn require_dump_grown(l1: &str, kp: &Keypair, market: Pubkey, need: usize) -> Result<()> {
+    let rpc = RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed());
+    let dump = client::grid_dump_pda(&market);
+    loop {
+        let blen = rpc.get_account(&dump).map(|a| a.data.len()).unwrap_or(0);
+        if blen >= need {
+            return Ok(());
+        }
+        let sig = send(l1, kp, client::prepare_grid_dump(kp.pubkey(), market))?;
+        eprintln!("ok {sig} prepare-grid-dump {blen}->{need}");
+    }
+}
+
+fn settle_seat_on_l1(
+    l1: &str,
+    er: &str,
+    kp: &Keypair,
+    owner: Pubkey,
+    market: Pubkey,
+    set_hash: [u8; 32],
+) -> Result<()> {
+    undelegate_seat_on_er(l1, er, kp, owner, market, set_hash)?;
+    sync_vault_on_l1(l1, kp, owner, market, set_hash)
+}
+
+fn ensure_seat(url: &str, kp: &Keypair, owner: Pubkey, market: Pubkey, set_hash: [u8; 32]) -> Result<()> {
+    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let pos = client::position_pda(&market, &owner, &set_hash);
+    let nonce = client::nonce_pda(&owner, &market);
+    if account_delegated(&rpc, &pos) && account_delegated(&rpc, &nonce) {
+        return Ok(());
+    }
+    let sig = send(url, kp, client::open_seat(kp.pubkey(), owner, market, set_hash))?;
+    println!("open_seat {sig}");
+    let sig = send(url, kp, client::delegate_seat(kp.pubkey(), owner, market, set_hash))?;
+    println!("delegate_seat {sig}");
+    Ok(())
+}
+
 fn trade_cmd(
     url: &str,
+    er_url: &str,
     owner_kp: &Keypair,
     owner: Pubkey,
     market: String,
@@ -518,35 +959,131 @@ fn trade_cmd(
     is_buy: bool,
 ) -> Result<()> {
     let market = Pubkey::from_str(&market)?;
-    let set_mask = parse_mask(&mask)?;
-    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let n = rpc_market_n(url, &market)?;
+    let set_mask = mask_bytes(&mask, n)?;
+    let l1 = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let on_er = market_is_delegated(&l1, &market);
+    if on_er {
+        if er_url.is_empty() {
+            anyhow::bail!("market is delegated; pass --er-url");
+        }
+        ensure_seat(url, owner_kp, owner, market, client::market::ids::set_hash(&set_mask))?;
+        if session.is_some() {
+            ensure_session(url, owner_kp, owner)?;
+        }
+    }
+    let fill_url = if on_er { er_url } else { url };
+    let rpc = RpcClient::new_with_commitment(fill_url.to_string(), CommitmentConfig::confirmed());
+    let nonce = next_nonce(&rpc, &owner, &market, nonce)?;
+    let q = Q64::from_int(shares).raw();
+    let (ixs, payer_owned): (Vec<solana_sdk::instruction::Instruction>, Option<Keypair>) =
+        if let Some(path) = session {
+            let sk = read_keypair_file(&path).map_err(|e| anyhow::anyhow!("session {path:?}: {e}"))?;
+            let ixs = client::fill_set_ixs(
+                owner,
+                sk.pubkey(),
+                Some(client::session_pda(&owner)),
+                market,
+                set_mask,
+                q,
+                nonce,
+                is_buy,
+                on_er,
+            );
+            (ixs, Some(sk))
+        } else {
+            (
+                client::fill_set_ixs(owner, owner, None, market, set_mask, q, nonce, is_buy, on_er),
+                None,
+            )
+        };
+    let payer = payer_owned.as_ref().unwrap_or(owner_kp);
+    let mut last = String::new();
+    let single = ixs.len() == 1;
+    for ix in ixs {
+        last = if single {
+            if let Some(gw) = gateway.as_ref() {
+                send_via_gateway(gw, fill_url, payer, ix, &[], owner, market, nonce)?
+            } else {
+                send_ixs(fill_url, payer, vec![ix], &[])?
+            }
+        } else {
+            send_ixs(fill_url, payer, vec![ix], &[])?
+        };
+    }
+    println!("ok {last} shares={shares} nonce={nonce} trader={}", payer.pubkey());
+    Ok(())
+}
+
+fn trade_skellam_cmd(
+    url: &str,
+    er_url: &str,
+    owner_kp: &Keypair,
+    owner: Pubkey,
+    market: String,
+    kind: u8,
+    a: i16,
+    b: i16,
+    shares: i64,
+    nonce: u64,
+    session: Option<PathBuf>,
+    gateway: Option<String>,
+    is_buy: bool,
+) -> Result<()> {
+    let market = Pubkey::from_str(&market)?;
+    let set_hash = client::market::ids::skellam_ticket(kind, a, b);
+    let l1 = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    let on_er = market_is_delegated(&l1, &market);
+    if on_er {
+        if er_url.is_empty() {
+            anyhow::bail!("market is delegated; pass --er-url");
+        }
+        ensure_seat(url, owner_kp, owner, market, set_hash)?;
+        if session.is_some() {
+            ensure_session(url, owner_kp, owner)?;
+        }
+    }
+    let fill_url = if on_er { er_url } else { url };
+    let rpc = RpcClient::new_with_commitment(fill_url.to_string(), CommitmentConfig::confirmed());
     let nonce = next_nonce(&rpc, &owner, &market, nonce)?;
     let q = Q64::from_int(shares).raw();
     let (ix, payer_owned, extras): (solana_sdk::instruction::Instruction, Option<Keypair>, Vec<Keypair>) =
         if let Some(path) = session {
             let sk = read_keypair_file(&path).map_err(|e| anyhow::anyhow!("session {path:?}: {e}"))?;
             let ix = if is_buy {
-                client::buy_set_session(owner, sk.pubkey(), market, set_mask, q, nonce)
+                if on_er {
+                    client::buy_skellam_set_session_er(owner, sk.pubkey(), market, kind, a, b, q, nonce)
+                } else {
+                    client::buy_skellam_set_session(owner, sk.pubkey(), market, kind, a, b, q, nonce)
+                }
+            } else if on_er {
+                client::sell_skellam_set_session_er(owner, sk.pubkey(), market, kind, a, b, q, nonce)
             } else {
-                client::sell_set_session(owner, sk.pubkey(), market, set_mask, q, nonce)
+                client::sell_skellam_set_session(owner, sk.pubkey(), market, kind, a, b, q, nonce)
             };
             (ix, Some(sk), vec![])
         } else {
             let ix = if is_buy {
-                client::buy_set(owner, market, set_mask, q, nonce)
+                if on_er {
+                    client::buy_skellam_set_er(owner, market, kind, a, b, q, nonce)
+                } else {
+                    client::buy_skellam_set(owner, market, kind, a, b, q, nonce)
+                }
+            } else if on_er {
+                client::sell_skellam_set_er(owner, market, kind, a, b, q, nonce)
             } else {
-                client::sell_set(owner, market, set_mask, q, nonce)
+                client::sell_skellam_set(owner, market, kind, a, b, q, nonce)
             };
             (ix, None, vec![])
         };
     let payer = payer_owned.as_ref().unwrap_or(owner_kp);
     let extra_refs: Vec<&Keypair> = extras.iter().collect();
     let sig = if let Some(gw) = gateway {
-        send_via_gateway(&gw, url, payer, ix, &extra_refs, owner, market, nonce)?
+        send_via_gateway(&gw, fill_url, payer, ix, &extra_refs, owner, market, nonce)?
     } else {
-        send_ixs(url, payer, vec![ix], &extra_refs)?
+        send_ixs(fill_url, payer, vec![ix], &extra_refs)?
     };
-    println!("ok {sig} shares={shares} nonce={nonce} trader={}", payer.pubkey());
+    println!("ok {sig} skellam kind={kind} a={a} b={b} shares={shares} nonce={nonce} trader={}", payer.pubkey());
     Ok(())
 }
 
@@ -554,8 +1091,78 @@ fn send(url: &str, payer: &Keypair, ix: solana_sdk::instruction::Instruction) ->
     send_ixs(url, payer, vec![ix], &[])
 }
 
+fn er_rpc<'a>(l1: &'a str, er: &'a str) -> &'a str {
+    if er.is_empty() {
+        l1
+    } else {
+        er
+    }
+}
+
+fn already_in_use(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("already in use")
+        || m.contains("already initialized")
+        || m.contains("custom program error: 0x0")
+}
+
+fn record_open(rpc: &RpcClient, market: &Pubkey) -> bool {
+    rpc.get_account(&client::record_pda(market))
+        .map(|a| a.data.len() > 8)
+        .unwrap_or(false)
+}
+
+fn fetch_program_markets(url: &str) -> Vec<(Pubkey, Vec<u8>)> {
+    let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    match rpc.get_program_accounts(&client::market::ID) {
+        Ok(rows) => rows.into_iter().map(|(k, a)| (k, a.data)).collect(),
+        Err(e) => {
+            eprintln!("get_program_accounts {url}: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// L1 Market-owned accounts miss delegated books (owner = DELeGG). Merge ER
+/// copies and any journal market still sitting on ER.
+fn merge_market_accounts(url: &str, er_url: &str, journal: &journal::Journal) -> Vec<(Pubkey, Vec<u8>)> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<Pubkey, Vec<u8>> = BTreeMap::new();
+    for (k, d) in fetch_program_markets(url) {
+        map.insert(k, d);
+    }
+    if !er_url.is_empty() {
+        for (k, d) in fetch_program_markets(er_url) {
+            map.insert(k, d);
+        }
+        let er = RpcClient::new_with_commitment(er_url.to_string(), CommitmentConfig::confirmed());
+        for name in journal.listed_markets() {
+            let Ok(pk) = Pubkey::from_str(&name) else { continue };
+            if map.contains_key(&pk) {
+                continue;
+            }
+            if let Ok(acc) = er.get_account(&pk) {
+                map.insert(pk, acc.data);
+            }
+        }
+    }
+    map.into_iter().collect()
+}
+
+fn session_rpc<'a>(l1: &'a str, er: &'a str, owner: &Pubkey) -> &'a str {
+    if account_delegated(
+        &RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed()),
+        &client::session_pda(owner),
+    ) {
+        er_rpc(l1, er)
+    } else {
+        l1
+    }
+}
+
 fn keeper_once(
     url: &str,
+    er_url: &str,
     kp: &Keypair,
     journal: &journal::Journal,
     heartbeat: &PathBuf,
@@ -568,29 +1175,27 @@ fn keeper_once(
     let mut last = "scan".to_string();
     let mut last_market = String::new();
     let mut ok = true;
-    let accounts = match rpc.get_program_accounts(&client::market::ID) {
-        Ok(a) => a,
-        Err(e) => {
-            notify::write_heartbeat(
-                heartbeat,
-                &notify::Heartbeat {
-                    slot,
-                    ts: now,
-                    last: format!("rpc {e}"),
-                    market: String::new(),
-                    ok: false,
-                },
-            )?;
-            return Ok(());
-        }
-    };
-    for (key, acc) in accounts {
-        let Ok(mkt) = client::decode_market(&acc.data) else { continue };
+    let accounts = merge_market_accounts(url, er_url, journal);
+    if accounts.is_empty() {
+        notify::write_heartbeat(
+            heartbeat,
+            &notify::Heartbeat {
+                slot,
+                ts: now,
+                last: "rpc empty".into(),
+                market: String::new(),
+                ok: false,
+            },
+        )?;
+        return Ok(());
+    }
+    for (key, data) in accounts {
+        let Ok(mkt) = client::decode_market(&data) else { continue };
         let market = key;
         if mkt.delegated {
             let root = journal.trades_root(&market.to_string()).unwrap_or([0u8; 32]);
             if root != mkt.trades_root {
-                match send(url, kp, client::commit_book(me, market, root)) {
+                match send(if er_url.is_empty() { url } else { er_url }, kp, client::commit_book(me, market, root)) {
                     Ok(sig) => {
                         last = "commit".into();
                         last_market = market.to_string();
@@ -614,7 +1219,12 @@ fn keeper_once(
         let trading = mkt.status == 1;
         let halted = mkt.status == 2;
         if trading && now >= mkt.close_ts {
-            match send(url, kp, client::halt(me, market)) {
+            let halt_url = if mkt.delegated || account_delegated(&rpc, &market) {
+                er_rpc(url, er_url)
+            } else {
+                url
+            };
+            match send(halt_url, kp, client::halt(me, market)) {
                 Ok(sig) => {
                     last = "close".into();
                     last_market = market.to_string();
@@ -628,16 +1238,35 @@ fn keeper_once(
                     );
                     println!("close {sig} market={market}");
                     if mkt.delegated {
-                        match send(url, kp, client::undelegate_book(me, market)) {
+                        match send(if er_url.is_empty() { url } else { er_url }, kp, client::undelegate_book(me, market)) {
                             Ok(s2) => {
                                 last = "undelegate".into();
                                 println!("undelegate {s2} market={market}");
                             }
                             Err(e) => eprintln!("undelegate {market}: {e}"),
                         }
+                        if let Err(e) = wait_book_home(
+                            url,
+                            if er_url.is_empty() { url } else { er_url },
+                            kp,
+                            me,
+                            market,
+                            mkt.n,
+                        ) {
+                            ok = false;
+                            eprintln!("undelegate wait {market}: {e}");
+                        }
                     }
-                    if let Err(e) = send(url, kp, client::resolve_open(me, market)) {
-                        eprintln!("resolve_open {market}: {e}");
+                    if let Err(e) = undelegate_seats_for_market(url, er_url, kp, market) {
+                        eprintln!("seats {market}: {e}");
+                    }
+                    if !record_open(&rpc, &market) {
+                        if let Err(e) = send(url, kp, client::resolve_open(me, market)) {
+                            let msg = e.to_string();
+                            if !already_in_use(&msg) {
+                                eprintln!("resolve_open {market}: {e}");
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -649,7 +1278,7 @@ fn keeper_once(
                 }
             }
         } else if mkt.delegated && (halted || now >= mkt.close_ts) {
-            match send(url, kp, client::undelegate_book(me, market)) {
+            match send(if er_url.is_empty() { url } else { er_url }, kp, client::undelegate_book(me, market)) {
                 Ok(sig) => {
                     last = "undelegate".into();
                     last_market = market.to_string();
@@ -661,6 +1290,20 @@ fn keeper_once(
                         eprintln!("undelegate {market}: {e}");
                     }
                 }
+            }
+            if let Err(e) = wait_book_home(
+                url,
+                if er_url.is_empty() { url } else { er_url },
+                kp,
+                me,
+                market,
+                mkt.n,
+            ) {
+                ok = false;
+                eprintln!("undelegate wait {market}: {e}");
+            }
+            if let Err(e) = undelegate_seats_for_market(url, er_url, kp, market) {
+                eprintln!("seats {market}: {e}");
             }
         }
     }
@@ -709,39 +1352,34 @@ fn finish_grid(url: &str, payer: &Keypair, market: Pubkey, n: u16) -> Result<()>
         .and_then(|a| client::decode_market(&a.data).ok())
         .map(|m| m.n)
         .unwrap_or(n);
-    let grid = client::grid_pda(&market);
-    let need = client::grid_space(n);
-    let tries = client::grid_grow_steps(n)
-        .saturating_add(client::grid_mass_steps(n))
-        .saturating_add(5)
-        .max(1);
-    for _ in 0..tries {
-        if let Ok(acc) = rpc.get_account(&grid) {
-            if let Ok(g) = client::decode_grid(&acc.data) {
-                if g.p0.len() == n as usize && g.weights.len() == n as usize && g.z != 0 && acc.data.len() >= need {
-                    return Ok(());
-                }
-                if acc.data.len() < need {
-                    send(url, payer, client::grow_grid(payer.pubkey(), market))?;
-                    continue;
-                }
-                if g.p0.len() < n as usize {
-                    send(url, payer, client::write_grid_mass(payer.pubkey(), market))?;
-                    continue;
-                }
-                if g.z == 0 {
-                    send(url, payer, client::seal_grid(payer.pubkey(), market))?;
-                    continue;
-                }
-            }
-        } else {
-            send(url, payer, client::grow_grid(payer.pubkey(), market))?;
+    let count = client::market::state::Grid::shard_count(n);
+    for ix in 1..count {
+        let shard = client::grid_shard_pda(&market, ix as u8);
+        if rpc.get_account(&shard).is_err() {
+            send(url, payer, client::create_grid_shard(payer.pubkey(), market, ix as u8))?;
         }
+        send(url, payer, client::write_grid_shard(payer.pubkey(), market, ix as u8))?;
+    }
+    let grid = client::grid_pda(&market);
+    let local0 = client::market::state::Grid::shard_len(n, 0) as usize;
+    let need = client::market::state::Grid::space(local0);
+    send(url, payer, client::write_grid_mass(payer.pubkey(), market))?;
+    let extra = count.saturating_sub(1);
+    if extra > 16 {
+        let extras: Vec<u8> = (1..count).map(|i| i as u8).collect();
+        for chunk in extras.chunks(16) {
+            send(url, payer, client::accum_seal(payer.pubkey(), market, chunk))?;
+        }
+        for chunk in extras.chunks(16) {
+            send(url, payer, client::apply_seal(payer.pubkey(), market, chunk))?;
+        }
+    } else {
+        send(url, payer, client::seal_grid_n(payer.pubkey(), market, n))?;
     }
     let acc = rpc.get_account(&grid).context("grid after finish")?;
     let g = client::decode_grid(&acc.data).map_err(|e| anyhow::anyhow!("{e}"))?;
     anyhow::ensure!(
-        g.p0.len() == n as usize && g.weights.len() == n as usize && g.z != 0 && acc.data.len() >= need,
+        g.p0.len() == local0 && g.weights.len() == local0 && g.z != 0 && acc.data.len() >= need,
         "grid not sealed n={n} p0={} z={} bytes={}",
         g.p0.len(),
         g.z,
@@ -793,8 +1431,15 @@ fn main() -> Result<()> {
                 .map(Pubkey::from_str)
                 .transpose()?
                 .unwrap_or_default();
+            let session = client::session_pda(&me);
+            let l1 = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let url = if account_delegated(&l1, &session) {
+                session_rpc(&opt.url, &opt.er_url, &me)
+            } else {
+                opt.url.as_str()
+            };
             let sig = send(
-                &opt.url,
+                url,
                 &kp,
                 client::open_session(
                     me,
@@ -806,18 +1451,19 @@ fn main() -> Result<()> {
                 ),
             )?;
             println!(
-                "ok {sig} session={} authority={} expires_ts={expires} remaining={usdc}",
-                client::session_pda(&me),
+                "ok {sig} session={session} authority={} expires_ts={expires} remaining={usdc}",
                 auth.pubkey()
             );
         }
         Cmd::Session(SessionCmd::Renew { hours, usdc }) => {
             let expires = wall_unix() + hours.saturating_mul(3600).max(60);
-            let sig = send(&opt.url, &kp, client::renew_session(me, expires, usdc))?;
+            let rpc = session_rpc(&opt.url, &opt.er_url, &me);
+            let sig = send(rpc, &kp, client::renew_session(me, expires, usdc))?;
             println!("ok {sig} session={} expires_ts={expires} remaining={usdc}", client::session_pda(&me));
         }
         Cmd::Session(SessionCmd::Revoke) => {
-            let sig = send(&opt.url, &kp, client::revoke_session(me))?;
+            let rpc = session_rpc(&opt.url, &opt.er_url, &me);
+            let sig = send(rpc, &kp, client::revoke_session(me))?;
             println!("ok {sig} revoked session={}", client::session_pda(&me));
         }
         Cmd::Faucet { amount, mint_authority } => {
@@ -936,6 +1582,7 @@ fn main() -> Result<()> {
                 alpha,
             };
             let sig = send(&opt.url, &kp, client::create_dirichlet(me, id_hash, n, args))?;
+            finish_grid(&opt.url, &kp, market, n)?;
             print_created(&sig, market, close_ts, challenge_secs);
         }
         Cmd::Market(MarketCmd::CreateBernoulli {
@@ -986,39 +1633,128 @@ fn main() -> Result<()> {
                 dc_rho: 0,
             };
             let sig = send(&opt.url, &kp, client::create_skellam(me, id_hash, n, args))?;
+            finish_grid(&opt.url, &kp, market, n)?;
             print_created(&sig, market, close_ts, challenge_secs);
         }
-        Cmd::Market(MarketCmd::Close { market }) => {
+        Cmd::Market(MarketCmd::Close { market, mask, skellam_kind, skellam_a, skellam_b }) => {
             let market = Pubkey::from_str(&market)?;
-            let sig = send(&opt.url, &kp, client::halt(me, market))?;
             let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
-            let delegated = rpc
-                .get_account(&market)
-                .ok()
-                .and_then(|a| client::decode_market(&a.data).ok())
-                .map(|m| m.delegated)
-                .unwrap_or(false);
-            if delegated {
-                let sig2 = send(&opt.url, &kp, client::undelegate_book(me, market))?;
-                println!("ok {sig} halted; undelegate {sig2}");
+            let delegated = market_is_delegated(&rpc, &market);
+            let halt_url = if delegated {
+                er_rpc(&opt.url, &opt.er_url)
             } else {
-                println!("ok {sig} halted");
+                opt.url.as_str()
+            };
+            let halt = send(halt_url, &kp, client::halt(me, market));
+            let already = halt
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .map(|s| s.contains("NotTrading") || s.contains("6010"))
+                .unwrap_or(false);
+            if let Err(e) = &halt {
+                if !already {
+                    return Err(anyhow::anyhow!("{e}"));
+                }
+                eprintln!("halt already stopped (ok)");
+            }
+            let n = rpc_market_n(&opt.url, &market).or_else(|_| {
+                if delegated {
+                    rpc_market_n(er_rpc(&opt.url, &opt.er_url), &market)
+                } else {
+                    Err(anyhow::anyhow!("market n"))
+                }
+            })?;
+            let set_hash = if let Some(kind) = skellam_kind {
+                Some(client::market::ids::skellam_ticket(kind, skellam_a, skellam_b))
+            } else {
+                mask
+                    .as_deref()
+                    .map(|hex| mask_bytes(hex, n))
+                    .transpose()?
+                    .map(|m| client::market::ids::set_hash(&m))
+            };
+            if let Some(set_hash) = set_hash {
+                undelegate_seat_on_er(&opt.url, &opt.er_url, &kp, me, market, set_hash)?;
+            }
+            undelegate_seats_for_market(&opt.url, &opt.er_url, &kp, market)?;
+            if delegated {
+                let und = send(er_rpc(&opt.url, &opt.er_url), &kp, client::undelegate_book(me, market));
+                match &und {
+                    Ok(sig2) => println!("ok halted; undelegate {sig2}"),
+                    Err(e) => {
+                        let s = e.to_string();
+                        if s.contains("NotDelegated") || s.contains("6025") {
+                            eprintln!("undelegate already done (ok)");
+                        } else {
+                            return Err(anyhow::anyhow!("{e}"));
+                        }
+                    }
+                }
+                wait_book_home(&opt.url, er_rpc(&opt.url, &opt.er_url), &kp, me, market, n)?;
+                if let Some(set_hash) = set_hash {
+                    sync_vault_on_l1(&opt.url, &kp, me, market, set_hash)?;
+                }
+            } else {
+                let grid = client::grid_pda(&market);
+                if account_owned_by_market(&opt.url, &grid) {
+                    println!("ok halted");
+                    println!("home shard0={grid}");
+                } else {
+                    println!("ok halted");
+                    wait_book_home(&opt.url, er_rpc(&opt.url, &opt.er_url), &kp, me, market, n)?;
+                }
+                if let Some(set_hash) = set_hash {
+                    sync_vault_on_l1(&opt.url, &kp, me, market, set_hash)?;
+                }
             }
         }
         Cmd::Market(MarketCmd::Delegate { market }) => {
             let market = Pubkey::from_str(&market)?;
+            let n = rpc_market_n(&opt.url, &market)?;
             let sig = send(&opt.url, &kp, client::delegate_book(me, market))?;
             println!("ok {sig} delegated");
+            for ix in 1..client::market::state::Grid::shard_count(n) {
+                let s = send(&opt.url, &kp, client::delegate_grid_shard(me, market, ix as u8))?;
+                println!("ok {s} delegated shard={ix}");
+            }
         }
         Cmd::Market(MarketCmd::Commit { market, root }) => {
             let market = Pubkey::from_str(&market)?;
-            let sig = send(&opt.url, &kp, client::commit_book(me, market, parse_root(&root)?))?;
+            let sig = send(er_rpc(&opt.url, &opt.er_url), &kp, client::commit_book(me, market, parse_root(&root)?))?;
             println!("ok {sig} commit");
         }
-        Cmd::Market(MarketCmd::Undelegate { market }) => {
+        Cmd::Market(MarketCmd::Undelegate { market, mask, skellam_kind, skellam_a, skellam_b }) => {
             let market = Pubkey::from_str(&market)?;
-            let sig = send(&opt.url, &kp, client::undelegate_book(me, market))?;
-            println!("ok {sig} undelegated");
+            let n = rpc_market_n(&opt.url, &market)?;
+            let set_hash = if let Some(kind) = skellam_kind {
+                Some(client::market::ids::skellam_ticket(kind, skellam_a, skellam_b))
+            } else {
+                mask
+                    .as_deref()
+                    .map(|hex| mask_bytes(hex, n))
+                    .transpose()?
+                    .map(|m| client::market::ids::set_hash(&m))
+            };
+            if let Some(set_hash) = set_hash {
+                undelegate_seat_on_er(&opt.url, &opt.er_url, &kp, me, market, set_hash)?;
+            }
+            let und = send(er_rpc(&opt.url, &opt.er_url), &kp, client::undelegate_book(me, market));
+            match und {
+                Ok(sig) => println!("ok {sig} undelegated"),
+                Err(e) => {
+                    let s = e.to_string();
+                    if s.contains("NotDelegated") || s.contains("6025") {
+                        eprintln!("undelegate already done (ok)");
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+            wait_book_home(&opt.url, er_rpc(&opt.url, &opt.er_url), &kp, me, market, n)?;
+            if let Some(set_hash) = set_hash {
+                sync_vault_on_l1(&opt.url, &kp, me, market, set_hash)?;
+            }
         }
         Cmd::Market(MarketCmd::Info { market }) => {
             let market = Pubkey::from_str(&market)?;
@@ -1075,12 +1811,31 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Market(MarketCmd::Quote { market, mask, shares }) => {
+        Cmd::Market(MarketCmd::Quote { market, mask, kind, a, b, shares }) => {
             let market = Pubkey::from_str(&market)?;
             let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
             let (book, n, fee_bps) = load_book(&rpc, &market)?;
-            let bytes = parse_mask(&mask)?;
-            let in_set = quote::decode_mask(&bytes, n as usize).map_err(|e| anyhow::anyhow!(e))?;
+            let in_set = if let Some(kind) = kind {
+                let mkt = client::decode_market(&rpc.get_account(&market).context("market")?.data)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if mkt.family != client::market::state::Family::Skellam as u8 {
+                    anyhow::bail!("--kind is a Skellam / football line");
+                }
+                let k_max = if mkt.extra.u2 == 0 {
+                    client::market::state::FOOTBALL_K_MAX as u32
+                } else {
+                    mkt.extra.u2 as u32
+                };
+                let mut masks = client::math::football::skellam_masks(kind, a, b, k_max)
+                    .ok_or_else(|| anyhow::anyhow!("bad skellam line kind={kind} a={a} b={b}"))?;
+                if masks.len() != 1 {
+                    anyhow::bail!("quarter line is two half-lines; quote each half");
+                }
+                masks.remove(0)
+            } else {
+                quote::decode_mask(&mask_bytes(&mask, n)?, n as usize)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+            };
             let q = if shares > 0 { shares } else { 1 };
             let v = book.view(&in_set, Q64::from_int(q));
             let t = quote::ticket_from_view(&v, q, fee_bps);
@@ -1108,10 +1863,16 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Trade(TradeCmd::BuySet { market, mask, shares, nonce, session, gateway }) => {
-            trade_cmd(&opt.url, &kp, me, market, mask, shares, nonce, session, gateway, true)?;
+            trade_cmd(&opt.url, &opt.er_url, &kp, me, market, mask, shares, nonce, session, gateway, true)?;
         }
         Cmd::Trade(TradeCmd::SellSet { market, mask, shares, nonce, session, gateway }) => {
-            trade_cmd(&opt.url, &kp, me, market, mask, shares, nonce, session, gateway, false)?;
+            trade_cmd(&opt.url, &opt.er_url, &kp, me, market, mask, shares, nonce, session, gateway, false)?;
+        }
+        Cmd::Trade(TradeCmd::BuySkellam { market, shares, kind, a, b, nonce, session, gateway }) => {
+            trade_skellam_cmd(&opt.url, &opt.er_url, &kp, me, market, kind, a, b, shares, nonce, session, gateway, true)?;
+        }
+        Cmd::Trade(TradeCmd::SellSkellam { market, shares, kind, a, b, nonce, session, gateway }) => {
+            trade_skellam_cmd(&opt.url, &opt.er_url, &kp, me, market, kind, a, b, shares, nonce, session, gateway, false)?;
         }
         Cmd::Risk(RiskCmd::Open { market }) => {
             let market = Pubkey::from_str(&market)?;
@@ -1138,17 +1899,25 @@ fn main() -> Result<()> {
             let sig = send(&opt.url, &kp, client::resolve_open(me, market))?;
             println!("ok {sig}");
         }
-        Cmd::Resolve(ResolveCmd::Submit { market, value }) => {
+        Cmd::Resolve(ResolveCmd::Submit { market, value, family, kind, b }) => {
             let market = Pubkey::from_str(&market)?;
+            let a = match family {
+                0 | 3 | 4 => value as i128,
+                _ => Q64::from_int(value).raw(),
+            };
+            let b = match family {
+                0 => b as i128,
+                _ => 0,
+            };
             let outcome = client::resolution::Outcome {
-                family: 1,
-                kind: 1,
-                a: Q64::from_int(value).raw(),
-                b: 0,
+                family,
+                kind,
+                a,
+                b,
                 shares: [0; 8],
             };
             let sig = send(&opt.url, &kp, client::submit_result(me, market, outcome, [0; 32]))?;
-            println!("ok {sig}");
+            println!("ok {sig} family={family} kind={kind} a={value} b={b}");
         }
         Cmd::Resolve(ResolveCmd::Finalize { market }) => {
             let market = Pubkey::from_str(&market)?;
@@ -1160,9 +1929,18 @@ fn main() -> Result<()> {
             let sig = send(&opt.url, &kp, client::fund_cm(me, market, 0))?;
             println!("ok {sig} board={}", client::board(&market));
         }
+        Cmd::Settle(SettleCmd::SyncVault { market, mask }) => {
+            let market = Pubkey::from_str(&market)?;
+            let n = rpc_market_n(&opt.url, &market)?;
+            let set_hash = client::market::ids::set_hash(&mask_bytes(&mask, n)?);
+            let sig = send(&opt.url, &kp, client::sync_vault(me, me, market, set_hash))?;
+            println!("ok {sig} synced vault for mask={mask}");
+        }
         Cmd::Settle(SettleCmd::Begin { market, risk, pool }) => {
             let market = Pubkey::from_str(&market)?;
-            let sig = send(&opt.url, &kp, client::begin_settle_ex(market, risk, pool))?;
+            let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let grid = settle_grid_of(&rpc, market)?;
+            let sig = send(&opt.url, &kp, client::begin_settle_on(market, risk, pool, grid))?;
             println!("ok {sig}");
         }
         Cmd::Settle(SettleCmd::Payout { market, mask, owner }) => {
@@ -1171,9 +1949,33 @@ fn main() -> Result<()> {
                 .map(|s| Pubkey::from_str(&s))
                 .transpose()?
                 .unwrap_or(me);
-            let set_mask = parse_mask(&mask)?;
-            let sig = send(&opt.url, &kp, client::payout(me, market, owner, set_mask))?;
+            let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let n = rpc_market_n(&opt.url, &market)?;
+            let set_mask = mask_bytes(&mask, n)?;
+            let set_hash = client::market::ids::set_hash(&set_mask);
+            undelegate_seat_on_er(&opt.url, &opt.er_url, &kp, owner, market, set_hash)?;
+            sync_vault_on_l1(&opt.url, &kp, owner, market, set_hash)?;
+            let grid = settle_grid_of(&rpc, market)?;
+            let sig = send(&opt.url, &kp, client::payout_on(me, market, owner, set_mask, grid))?;
             println!("ok {sig}");
+        }
+        Cmd::Settle(SettleCmd::PayoutSkellam { market, kind, a, b, owner }) => {
+            let market = Pubkey::from_str(&market)?;
+            let owner = owner
+                .map(|s| Pubkey::from_str(&s))
+                .transpose()?
+                .unwrap_or(me);
+            let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let set_hash = client::market::ids::skellam_ticket(kind, a, b);
+            undelegate_seat_on_er(&opt.url, &opt.er_url, &kp, owner, market, set_hash)?;
+            sync_vault_on_l1(&opt.url, &kp, owner, market, set_hash)?;
+            let grid = settle_grid_of(&rpc, market)?;
+            let sig = send(
+                &opt.url,
+                &kp,
+                client::payout_skellam_on(me, market, owner, kind, a, b, grid),
+            )?;
+            println!("ok {sig} payout-skellam kind={kind} a={a} b={b}");
         }
         Cmd::Keeper {
             once,
@@ -1197,7 +1999,7 @@ fn main() -> Result<()> {
             });
             let journal = journal::Journal::open(&replica, &object)?;
             loop {
-                keeper_once(&opt.url, &kp, &journal, &heartbeat, &notify_dir)?;
+                keeper_once(&opt.url, &opt.er_url, &kp, &journal, &heartbeat, &notify_dir)?;
                 if once {
                     break;
                 }

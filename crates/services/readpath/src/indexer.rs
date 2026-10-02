@@ -7,9 +7,9 @@ use crate::store::{
 use anyhow::Result;
 use crate::store::CommitteeSnap;
 use client::{
-    board, committee_pda, decode_board, decode_claim, decode_committee, decode_grid, decode_layer, decode_market,
-    decode_pool, decode_position, decode_quote, decode_resolution, decode_risk_book, decode_tap, grid_pda,
-    risk_book,
+    board, committee_pda, concat_grid_shards, decode_board, decode_claim, decode_committee, decode_grid,
+    decode_layer, decode_market, decode_pool, decode_position, decode_quote, decode_resolution, decode_risk_book,
+    decode_tap, grid_shard_pda, risk_book,
 };
 use math::settle::usdc;
 use math::Q64;
@@ -76,6 +76,7 @@ pub fn project(
         extra_a: 0,
         extra_b: 0,
         extra_u2: 0,
+        delegated: false,
     })
 }
 
@@ -265,17 +266,34 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
         store.clear_committee();
     }
     store.replace_positions(tickets);
-    let live: HashSet<String> = accounts
+    let mut live: HashSet<String> = accounts
         .iter()
         .filter_map(|(key, acc)| decode_market(&acc.data).ok().map(|_| key.to_string()))
         .collect();
     for (key, acc) in accounts {
         let Ok(mkt) = decode_market(&acc.data) else { continue };
-        let gacc = match rpc.get_account(&grid_pda(&key)).await {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        let Ok(grid) = decode_grid(&gacc.data) else { continue };
+        let count = client::market::state::Grid::shard_count(mkt.n);
+        let mut parts = Vec::new();
+        let mut missing = false;
+        for ix in 0..count {
+            match rpc.get_account(&grid_shard_pda(&key, ix as u8)).await {
+                Ok(a) => match decode_grid(&a.data) {
+                    Ok(g) => parts.push(g),
+                    Err(_) => {
+                        missing = true;
+                        break;
+                    }
+                },
+                Err(_) => {
+                    missing = true;
+                    break;
+                }
+            }
+        }
+        if missing {
+            continue;
+        }
+        let (p0, theta, exposure, _) = concat_grid_shards(&parts);
         let board_decoded = match rpc.get_account(&board(&key)).await {
             Ok(bacc) => decode_board(&bacc.data).ok(),
             Err(_) => None,
@@ -293,9 +311,9 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
             mkt.status,
             mkt.n,
             mkt.beta,
-            grid.p0,
-            grid.theta,
-            grid.exposure,
+            p0,
+            theta,
+            exposure,
             mkt.trading_revenue,
             mkt.c_m,
             mkt.fee_bps,
@@ -313,6 +331,7 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
         row.extra_a = mkt.extra.a;
         row.extra_b = mkt.extra.b;
         row.extra_u2 = mkt.extra.u2;
+        row.delegated = mkt.delegated;
         if let Some(b) = board_decoded {
             row.board_phase = b.phase;
             row.rho_raw = b.rho_raw;
@@ -334,6 +353,32 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
             row.c_p_alloc = *alloc;
         }
         store.upsert(row);
+    }
+    for id in store.market_ids() {
+        if live.contains(&id) {
+            continue;
+        }
+        let Ok(pk) = id.parse::<solana_sdk::pubkey::Pubkey>() else {
+            continue;
+        };
+        let Ok(acc) = rpc.get_account(&pk).await else {
+            continue;
+        };
+        if acc.owner != client::market::DELEGATION_PROGRAM_ID {
+            continue;
+        }
+        let Some(mut row) = store.get(&id) else {
+            continue;
+        };
+        if let Ok(mkt) = decode_market(&acc.data) {
+            row.status = mkt.status;
+            row.close_ts = mkt.close_ts;
+            row.delegated = true;
+        } else {
+            row.delegated = true;
+        }
+        store.upsert(row);
+        live.insert(id);
     }
     store.retain_markets(&live);
     for (market, (traders, tickets, stake)) in stats {

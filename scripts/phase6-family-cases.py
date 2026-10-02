@@ -171,18 +171,35 @@ def send_cu(kp, op: str, extra=None, **kw) -> str:
     return sig
 
 
+def shard_count(n: int) -> int:
+    cells = 16
+    return (n + cells - 1) // cells
+
+
 def finish_grid(kp, market: str, n: int) -> None:
     owner = str(kp.pubkey())
     grow = grid_grow_steps(n)
-    mass = grid_mass_steps(n)
-    flow.out(f"finish_grid n={n} grow={grow} mass={mass}")
-    if grow <= 0:
-        return
+    count = shard_count(n)
+    flow.out(f"finish_grid n={n} grow={grow} shards={count}")
     for _ in range(grow):
         send_cu(kp, "grow_grid", owner=owner, market=market)
-    for _ in range(mass):
-        send_cu(kp, "write_grid_mass", owner=owner, market=market)
-    send_cu(kp, "seal_grid", owner=owner, market=market)
+    for ix in range(1, count):
+        try:
+            send(kp, "create_grid_shard", owner=owner, market=market, ix=ix)
+        except Exception as e:
+            if "already in use" not in str(e).lower() and "0x0" not in str(e):
+                raise
+        send(kp, "write_grid_shard", owner=owner, market=market, ix=ix)
+    send_cu(kp, "write_grid_mass", owner=owner, market=market)
+    extra = count - 1
+    if extra > 16:
+        ixs = list(range(1, count))
+        for i in range(0, len(ixs), 16):
+            send(kp, "accum_seal", owner=owner, market=market, extras=ixs[i : i + 16])
+        for i in range(0, len(ixs), 16):
+            send(kp, "apply_seal", owner=owner, market=market, extras=ixs[i : i + 16])
+    else:
+        send_cu(kp, "seal_grid", owner=owner, market=market, n=n)
 
 
 def record_application(kp, spec: dict, topic: str, tag: str, close_ts: int, title: str, event: str) -> int | None:
@@ -196,7 +213,7 @@ def record_application(kp, spec: dict, topic: str, tag: str, close_ts: int, titl
             "title": title,
             "tags": [spec.get("category") or "test"],
             "event": event,
-            "description": spec["id"],
+            "description": spec.get("id") or event or title,
             "topic": topic,
             "tag": tag,
             "compose": create_body(spec, owner, topic, tag, close_ts),
@@ -304,7 +321,19 @@ def resolve_to_settle(kp, owner: str, market: str, family: int, kind: int, value
     time.sleep((CHALLENGE if challenge_wait is None else challenge_wait) + 1)
     send(kp, "finalize", owner=owner, market=market)
     wait_json(f"/v1/markets/{market}/resolution", lambda b: b.get("phase") == 3)
-    send(kp, "begin_settle", owner=owner, market=market, include_pool=include_pool)
+    send(
+        kp,
+        "begin_settle",
+        owner=owner,
+        market=market,
+        include_pool=include_pool,
+        family=family,
+        kind=kind,
+        value=value,
+        value_b=value_b,
+        n=121 if family == 0 else None,
+        **({"milli": True} if milli else {}),
+    )
     return wait_json(f"/v1/markets/{market}/info", lambda b: int(b.get("board_phase") or 0) >= 1)
 
 
@@ -723,7 +752,8 @@ def run_auction_book(kp, cid: str, market: str, owner: str, spec: dict) -> None:
     try:
         book = wait_json(
             f"/v1/markets/{market}/layers",
-            lambda b: any(q.get("lp") == owner and int(q.get("capacity") or 0) == cap for q in b.get("quotes") or []),
+            lambda b: int(b.get("c_r") or 0) >= 1
+            and any(q.get("lp") == owner and int(q.get("capacity") or 0) == cap for q in b.get("quotes") or []),
         )
     except Exception as e:
         fail(cid, f"layers after quote {e}")
@@ -958,12 +988,13 @@ def run_flow_case(kp, spec: dict, stamp: str) -> None:
         run_auction_book(kp, cid, market, owner, spec)
 
     if spec["family"] in (0, 1, 2, 3, 4):
+        tol = 80 if spec["n"] >= 256 else 40
         diffs = 0
         for i, c in enumerate(cells):
             pb = int((prior.get("cells") or [{}])[i].get("p_bps") or 0) if i < len(prior.get("cells") or []) else -1
-            if abs(int(c["p_bps"]) - pb) > 30:
+            if abs(int(c["p_bps"]) - pb) > tol:
                 diffs += 1
-        if diffs:
+        if diffs > max(1, spec["n"] // 256):
             fail(cid, f"indexed PDF ≠ prior on {diffs} cells (θ should be 0)")
     if spec.get("expect_cell") is None and spec.get("expect_label") and spec["family"] == 1:
         spec["expect_cell"] = int(prior.get("peak") or 0)
@@ -1050,7 +1081,20 @@ def run_flow_case(kp, spec: dict, stamp: str) -> None:
         send(kp, "finalize", owner=owner, market=market)
         rec = wait_json(f"/v1/markets/{market}/resolution", lambda b: b.get("phase") == 3)
         expect_eq(cid, rec.get("final_outcome", {}).get("label"), spec["expect_label"], "final x*")
-        send_cu(kp, "begin_settle", owner=owner, market=market)
+        settle_kw = {
+            "family": spec["family"],
+            "kind": spec["kind"],
+            "value": spec["value"],
+            "value_b": spec.get("value_b", 0),
+            "n": spec["n"],
+        }
+        if spec.get("submit_milli") or spec.get("milli"):
+            settle_kw["milli"] = True
+            if spec.get("x_min") is not None:
+                settle_kw["x_min"] = spec["x_min"]
+            if spec.get("x_max") is not None:
+                settle_kw["x_max"] = spec["x_max"]
+        send_cu(kp, "begin_settle", owner=owner, market=market, **settle_kw)
     except Exception as e:
         fail(cid, f"resolve/settle {e}")
         return

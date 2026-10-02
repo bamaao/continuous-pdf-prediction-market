@@ -4,7 +4,7 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.11 |
+| Version | 1.14 |
 | Status | Product specification (features are written as fully delivered; no MVP / later-phase split) |
 | Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(c)$ at $c=\mathrm{cell}(x^*)$ (product §8.1). **Settlement gate:** write $\rho=\min(1,C_{\max}/L)$ *before* any user payout — $\rho=1$ if $C_{\max}\ge L$, else the actual ratio $C_{\max}/L$ (SRS FR-SET-03 / FR-SET-11). Do not mix implied PDF $p_k$, exposure $E$, and ticket face. One global pro-rata $\rho$ on **face** (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. Trading is the primary payout source; $C_R$ is optional. Fees go to the platform fee ledger and do not enter this prediction market’s $C_{\max}$ or $C_P$; the platform may claim them at any time. At `close_ts` both prediction fills and the risk auction stop (`risk_lock_ts \le close_ts`). Price is pure probability; coverage is displayed only. Markets are created by **distribution family**. Football is Skellam. $x^*$ only via `submit_result`. |
 
@@ -34,17 +34,13 @@ The curve evolves in a fixed order and is never rewritten by an oracle in the mi
 2. **Updated continuously during trading.** Each interval buy or sell only changes the state $\theta(x)$, then LMSR produces a new $f(x)$. Buying an interval raises density on that stretch; the rest is renormalized downward.
 3. **Frozen after close.** Trading stops and $f(x)$ no longer changes. The committee only reports the realized outcome $x^*$; it does not go back and rewrite the distribution.
 
-Users buy an arbitrary interval $I=[a,b]$. Contract payoff is:
+Users buy an arbitrary interval $I=[a,b]$, mapped to a frozen atom set $S$ (§8.1.2.1). The continuum contract is the Arrow–Debreu indicator; on-chain the same idea is $1_{c\in S}$ with $c=i^*(x^*)$:
 
 $$
-g_I(x)=1_{x\in[a,b]}
+g_S(x^*)=1_{c\in S}
 $$
 
-The market price of that interval equals the current market probability:
-
-$$
-P(X\in[a,b])=\int_a^b f(x)\,dx
-$$
+The market **price** of that claim equals the current probability mass (continuum: $\int_a^b f$; chain: $p_S$). That number is what an infinitesimal share **costs**, not what it **pays**. One share pays $1$ USDC if it hits ($\rho=1$), so the cash multiple on a small ticket is $\approx 1/p_S>1$ when $p_S<1$. Do not write the share size as $1/p_S$ (product §1.2.2 / §8.1.0).
 
 The protocol consists of two linked markets:
 
@@ -202,6 +198,62 @@ $$
 | \(C_R^{\mathrm{final}}>0\) | \(\alpha_R S\) | \(\alpha_P S=(1-\alpha_R)S\) |
 
 开通预测市场时锁定 \(\alpha_R\)（`alpha_r_bps`）。缺省 **7000 bps：70% 给风险资金方、30% 给平台**。资金方那一份再按各笔成交报价的权重 \(w_i=\) `profit_share_bps` \(\times\) 成交量摊，指令 `pay_surplus_lp`；平台一份 `pay_surplus_platform`。手续费 \(\phi\) 走 `claim_fees`，**不进** \(C_{\max}\)，也不进 \(S\)。平台日后 `fund_pool` 是自己往调节池注资，不是把手续费扫进 \(C_P\)。
+
+### 1.2.2 核心业务规则：卖的是概率，份额面值是 1（锁定）
+
+本节锁定「PDF 预测市场卖什么」。Quote、成交、公开预览、结算卡都必须用同一套名字。数学内核：`crates/math` 的 `interval_prob` / `buy_cost` / `lmsr_cost` / `ticket_face`。
+
+**卖的是区间概率，不是把 PDF 误解成别的东西。** 开通预测市场时写入先验 \(f_0\)（CPI 高斯是 \(\mu,\sigma\) 用百分点，例如中位数 \(5\%\)、离散 \(1\%\)，不是「总概率等于 \(5\%\)」）。用户买 \([a,b]\)（先按 §8.1.2.1 吸成节点集合 \(S\)）时，报价是这段概率质量：
+
+\[
+p_I=\int_a^b f_\theta(x)\,dx\qquad\text{（连续模型）},\qquad
+p_S=\sum_{k\in S}p_k\qquad\text{（链上）}.
+\]
+
+\(p_S\in(0,1)\)。成交只改 \(\theta\)，再归一化得到新的 \(f_\theta\)；下一笔用新的 \(p_S\)。委员会只报 \(x^*\)，不改分布。
+
+**对数量求导得到的是价格，不是到期赔付。** LMSR 成本 \(C_S(q)\) 对 \(q\) 的导数是边际价：
+
+\[
+P_S(q)=\frac{\partial C_S}{\partial q}=\frac{p_S e^{q/\beta}}{1-p_S+p_S e^{q/\beta}}\in(0,1),\qquad P_S(0)=p_S.
+\]
+
+到期是 Arrow–Debreu：**中了赔 1 USDC，没中赔 0**（再乘全场 \(\rho\)）。现金倍数 \(\approx 1/p_S>1\) 是「付 \(p\) 拿 \(1\)」的回报，**不是**把份额定义成 \(1/p_S\)，也不是把 \(C'(q)\) 当成结算。
+
+| 说法 | 产品里是 | 禁止 |
+| --- | --- | --- |
+| 价格 \(=\int_a^b f\) | \(p_S\)，买一丁点份额要付的钱 | 把 \(p_S\) 当中了拿多少 |
+| 价格在 \((0,1)\) | 边际价 \(P_S(q)\) | 把导数写成 payoff |
+| 赔付 \(>1\) | 付约 \(p_S\)、中了拿 \(1\)，倍数 \(\approx 1/p_S\) | 每份面值写成 \(1/p_S\) 再乘份数（变成 \(1/p_S^2\)） |
+| 份数 \(\times\) 价格 | 小单 \(\approx q\cdot p_S\) | 大单仍按 \(q\cdot p_S\) 收费（必须用 \(C_S(q)\)） |
+| 份数 \(\times\) payoff | 中了 \(\lfloor\rho\cdot q\rfloor\) | \(\lfloor\rho\cdot q/p_S\rfloor\) |
+| 分布随交易变 | \(\theta\) 更新后再报价 | 成交后改 \(p_0\) / 改 \(\mu,\sigma\) |
+
+精确应付：
+
+\[
+C_S(q)=\beta\ln\bigl((1-p_S)+p_S e^{q/\beta}\bigr)
+\]
+
+用户付 \(C_S(q)+\phi C_S(q)\)，得到 \(q\) 份冻在 \(S\) 上的券。小单 \(C_S(q)\approx q\cdot p_S\)，买得越多 \(p_S\) 被抬高，线性 \(q\cdot p_S\) 不够。
+
+例：\(p_S=0.7\)，买 \(q=10\)。大约先付 7 USDC（再加费用和滑点）。仓位仍是 10 份。\(i^*(x^*)\in S\) 且 \(\rho=1\) 拿 **10**，不是 \(10/0.7\)。VOID 退买入本金，不走 \(\rho\)。
+
+### 1.2.3 核心业务规则：用户怎么知道自己该领多少（锁定）
+
+结算后该拿多少 **不是**「价格的倒数」，也 **不是**用户自己算 \(\rho\)。一张票是冻结集合 \(S\) 上的 \(q\) 股。普通合约一股命中面值 **1 USDC**（足球四分让球见 §1.2.1）。委员会只报 \(x^*\)；`finalize` 之后 `begin_settle` 才锁死全场同一个 \(\rho\)。领取指令用链上已写的 \(\rho\) 和面值算 \(\lfloor\rho\cdot\mathrm{face}\rfloor\)，打进 UserVault。
+
+**三步读数（Quote、公开结果卡、`/portfolio` 结算票必须同一套）：**
+
+| 何时 | 用户看见什么 | 那是不是最终到手 |
+| --- | --- | --- |
+| 下单前 | 报价票：命中面值 \(q\)（普通合约）、未中 \(0\)；展示用的 \(\hat\rho\) / 覆盖率 | 否。\(\hat\rho\) 只是警告，不是结算 \(\rho\) |
+| 结果锁定后 | 公开结果卡：\(x^*\)、命中格子 \(c\)、\(L=E(c)\)、\(C_{\max}\)、已写入的 \(\rho\) | \(\rho\) 已锁。自己的票还要看 \(c\in S\) 与否 |
+| 点领取时 | 结算票：中了 \(\lfloor\rho\cdot q\rfloor\)，没中 \(0\)；VOID / 决议失败退 `cost_paid` | 是。Vault `payout` 按此入账，用户不必手算 |
+
+**自己这张票：** 仓位记下 \(q\) 和 \(S\)（区间掩码，或足球 `--kind` / \(a,b\)）。\(c\) 是离 \(x^*\) 最近的节点（§8.1.2.1）。\(c\in S\) 则 \(\mathrm{face}=q\)，否则 \(0\)。实发 \(\lfloor\rho\cdot\mathrm{face}\rfloor\)；费用若在领取时扣，再减去 \(\phi\)。资金够则 \(\rho=1\)（满面值）；不够则所有赢家同一个 \(\rho=C_{\max}/L\)，没有先到先得。
+
+一句话：该领多少 \(=\) **我的 \(q\) × 是否命中 × 全场 \(\rho\)**。不是 \(p_S\)，不是 \(q/p_S\)。
 
 ### 1.3 Business Flow Diagram
 
@@ -510,7 +562,7 @@ $$
 
 ### 4.4 How Trades Rewrite $f(x)$
 
-After open, the distribution changes only with fills. When a user buys interval $I=[a,b]$ in quantity $q$:
+After open, the distribution changes only with fills. Continuum notation below is the model; the chain buys a **frozen node set** $S$, not a length-weighted slice of $[a,b]$ (mapping: §8.1.2.1). When a user buys interval $I=[a,b]$ in quantity $q$:
 
 $$
 \theta'(x)=\theta(x)+q\cdot 1_I(x)
@@ -524,11 +576,7 @@ $$
 
 Buying $I$ pulls density up on that interval; because $Z[\theta]$ renormalizes, density outside the interval is pressed down. Selling is equivalent to $q<0$ (implementation must separately check sellable position).
 
-Let the current interval probability be:
-
-$$
-p_I=\int_I f_{\theta}(x)\,dx
-$$
+Let the current interval probability be $p_I=\int_I f_{\theta}(x)\,dx$ in the continuum, and $p_S=\sum_{k\in S}p_k$ on the grid. Quote, fill, and settle use $p_S$, not a fresh $\int_a^b$.
 
 Then that trade has a closed-form cost:
 
@@ -536,13 +584,15 @@ $$
 C_I(q)=\beta\log\bigl((1-p_I)+p_I e^{q/\beta}\bigr)
 $$
 
+On the grid this is $C_S(q)$ with $p_S$ in place of $p_I$.
+
 Marginal price:
 
 $$
 P_I(q)=\frac{p_I e^{q/\beta}}{1-p_I+p_I e^{q/\beta}}
 $$
 
-Hence $P_I(0)=p_I$. **The fill price is quoted as pure probability**; expected haircut is not baked into the price. Coverage is displayed separately; see section 8.5.
+Hence $P_I(0)=p_I$. **This derivative is the marginal fill price, not the settlement payout** (product §1.2.2). One share still pays $1$ USDC if it hits. The fill price is quoted as pure probability; expected haircut is not baked into the price. Coverage is displayed separately; see section 8.5.
 
 The same outcome gets more expensive the more it is bought. Suppose at open $p_S=0.2$ (e.g. football “exactly 1 goal” currently 20%):
 
@@ -825,7 +875,7 @@ A CPI / macro listing calls `create_gaussian_market` and writes:
 | `print_rule` | `FIRST_PRINT` | Only the first official print; later revisions do not change settlement |
 | `seasonal` | Seasonally adjusted / not | Must be bound to `series_id`; no ambiguity |
 | `x_min` / `x_max` | Domain, e.g. YoY $[-2\%,12\%]$ | Creator-specified |
-| `n_grid` | Sample count on $\Omega$ | $256$ (create + `grow_grid` + chunked `write_grid_mass` / `seal_grid`; one Solana account cannot hold 256 points in the first `create_account`, and one ix cannot compute 256 $\exp$ masses) |
+| `n_grid` | Sample count on $\Omega$ | **$256$ default** (why 256 vs 512 / 1024: §5.1.1). Create + `grow_grid` + chunked `write_grid_mass` / `seal_grid`; one Solana account cannot hold 256 points in the first `create_account`, and one ix cannot compute 256 $\exp$ masses |
 | `prior_family` | `normal` / `uniform` | `normal` |
 | `mu` / `sigma` | Prior mean and std (percentage points) | Survey median can be $\mu$, survey dispersion $\sigma$ |
 | `beta` | LMSR liquidity | Required |
@@ -844,13 +894,13 @@ $$
 
 #### 4.8.2 What Users Buy
 
-The underlying is a one-dimensional continuous PDF. Preset contracts are only interval templates:
+The underlying is a one-dimensional continuous PDF. Preset contracts are only interval templates. Each template is snapped to listing **nodes** with §8.1.2.1; the ticket is the bitmask $S$, not $\int_a^b f$.
 
 | Contract | Set |
 | --- | --- |
-| Custom interval | $I=[a,b]$ |
-| Preset bins | e.g. $<2$, $[2,2.5)$, $[2.5,3)$, $\ge 3$ |
-| Above / below $k$ | $(k,x_{\max}]$ / $[x_{\min},k]$ |
+| Custom interval | $I=[a,b]$ → inclusive nearest-node range |
+| Preset bins | e.g. $<2$, $[2,2.5)$, $[2.5,3)$, $\ge 3$ (same snap) |
+| Above / below $k$ | $(k,x_{\max}]$ / $[x_{\min},k]$ (same snap) |
 
 Do not open a separate independent board for “will it print above 2.5%”; that is just one interval on this CPI board. If it must share liquidity with “the exact YoY print”, it must live on the same `market_id`.
 
@@ -1089,25 +1139,43 @@ resolution:   committee
 
 ## 5. Engineering Representation of the PDF
 
-The chain does not integrate an arbitrary continuous curve. It grids $\Omega$ and makes $\theta(x)$ piecewise constant.
+The chain does not integrate an arbitrary continuous curve. It places **nodes** on $\Omega$ and treats each node as one LMSR atom. $\theta$ is constant on that atom. Buying $[a,b]$ never cuts an atom by length (algorithm: §8.1.2.1).
 
 ### 5.1 Step PDF / Grid
 
-1. Partition $\Omega=[x_{\min},x_{\max}]$ into $N$ equal grids (target $N=256\sim 1024$).
-2. On the $k$-th cell $J_k=[x_{k-1},x_k]$, $\theta(x)=\theta_k$ is constant.
-3. The partition function becomes a finite sum:
+1. Place $n$ nodes on $\Omega=[x_{\min},x_{\max}]$ (Gaussian default $n=256$, bound $8..1024$):
 
 $$
-Z[\theta]=\sum_{k=1}^{N}e^{\theta_k/\beta}\int_{J_k}f_0(x)\,dx
+x_i=x_{\min}+i\cdot\frac{x_{\max}-x_{\min}}{n-1},\qquad i=0,\ldots,n-1.
 $$
 
-Density inside a cell:
+   Lognormal uses the same formula on $\log x$. Prior mass $p_{0,i}$ is the truncated kernel **at node** $x_i$, then $\ell_1$-renormalized. This is not a Riemann integral of $f_0$ over a bin.
+
+2. Atom $i$ owns the Voronoi band between adjacent midpoints (the first node also owns down to $x_{\min}$, the last up to $x_{\max}$). Any print in that band maps to $i$ via nearest node.
+
+3. The partition function is a finite sum over nodes:
 
 $$
-f(x\in J_k)=\frac{e^{\theta_k/\beta}}{Z[\theta]}f_0(x)
+Z[\theta]=\sum_{i=0}^{n-1}p_{0,i}\,e^{\theta_i/\beta},\qquad
+p_i=\frac{p_{0,i}\,e^{\theta_i/\beta}}{Z[\theta]}.
 $$
 
-When a user buys cells covering $[start,end]$, update those cells’ $\theta_k$ and exposure $E_k$, then recompute the scalar $Z[\theta]$. An array or segment tree is fine; complexity is about $O(\log N)$ to $O(N)$, acceptable inside an Ephemeral Rollup.
+When a user draws $[a,b]$, snap both ends with `interval_index`, take the inclusive node range $S$, then add $q$ to $\theta_k$ and $E_k$ for every $k\in S$. Complexity is $O(|S|)$ on the locked shards, acceptable inside an Ephemeral Rollup.
+
+#### 5.1.1 \(n=256/512/1024\) 格子够不够（锁定）
+
+产品高斯默认 **\(n=256\)**。\(512\)、\(1024\) 更细，但不是因为 \(256\)「不够用」才要上。两端最多偏半步；规格要警告的是 \(n<32\)（步长大于 \(\sigma\)，先验塌到 \(1\)–\(2\) 格），不是 \(256\)。
+
+以 CPI 参考盘 \(\Omega=[-2,12]\)、\(\sigma=0.35\) 为例（宽度 \(14\) 百分点）：
+
+| \(n\) | 步长 \((x_{\max}-x_{\min})/(n-1)\) | 和 \(\sigma\) 比 | 什么时候用 |
+| --- | --- | --- | --- |
+| \(<32\) | \(n=32\) 时 \(\approx 0.45>\sigma\) | 先验塌掉 | 拒绝或强警告（SRS FR-MKT-15） |
+| **\(256\)（默认）** | \(\approx 0.055\) | 一步远小于 \(\sigma\)，约 \(6\) 个节点盖住一个 \(\sigma\)；半步误差 \(\approx 0.027\) | CPI / 宏观默认。开通预测市场写这个 |
+| \(512\) | \(\approx 0.027\) | 再细一倍 | 用户经常买极窄区间，或 \(\Omega\) 很宽而 \(\sigma\) 很小 |
+| \(1024\)（上限） | \(\approx 0.014\) | 更细 | 同上，且分片更多、成交/收尾更慢 |
+
+MoM 一类更窄的 \(\Omega\)（例如 \([-1,2]\)、\(\sigma=0.15\)）在 \(n=256\) 上步长 \(\approx 0.012\)，仍然小于 \(\sigma\)。只有「区间宽度接近步长」时才需要加密。链上硬范围是 \(8..1024\)；\(8\) 是账户下限，**不是**给用户开的高斯默认。
 
 ### 5.2 No Parameterized AMM
 
@@ -1417,14 +1485,14 @@ Worked CPI ticket: $S=$ cells for print in $[0.3,0.4]$, $p_S=0.7$, user buys $q=
 - Official print $0.35$ → $c\in S$ → face $10$. If $\rho=1$, pay $10$ USDC. If $\rho=0.8$, pay $8$ USDC.
 - Official print $0.50$ → miss → pay $0$.
 
-$p_S$ is how much **one infinitesimal share costs**. Face is how much **one share pays if it hits**. Those are different numbers except in the degenerate case $p_S=1$.
+$p_S$ is how much **one infinitesimal share costs**. Face is how much **one share pays if it hits**. Those are different numbers except in the degenerate case $p_S=1$. The cash multiple $\approx 1/p_S>1$ is display / intuition only: it SHALL NOT rescale $q$ or the hit payout. Vocabulary lock: product §1.2.2.
 
 The same arithmetic applies to every family and every template (only the definition of $S$ and of $c$ changes):
 
 | Board / line | $S$ | Hit when | Tiny 1-share cost | $\rho=1$ payout for $q$ shares |
 | --- | --- | --- | --- | --- |
-| CPI / Gaussian interval $[a,b]$ | nodes in $[a,b]$ | print maps into $S$ | $\approx p_S$ | $q$ USDC |
-| Lognormal / BTC interval | log-grid nodes in the band | $x^*\in S$ | $\approx p_S$ | $q$ USDC |
+| CPI / Gaussian interval $[a,b]$ | inclusive nearest-node range (§8.1.2.1) | $i^*(x^*)\in S$ | $\approx p_S$ | $q$ USDC |
+| Lognormal / BTC interval | same on the log grid | $i^*(\log x^*)\in S$ | $\approx p_S$ | $q$ USDC |
 | Bernoulli YES or NO | that one atom | YES or NO | $\approx p_{\mathrm{YES}}$ or $p_{\mathrm{NO}}$ | $q$ USDC |
 | Dirichlet winner / TOP_N / share band | those atoms | reported atom $\in S$ | $\approx p_S$ | $q$ USDC |
 | Football 1X2 / totals / BTTS / exact / half AH | `skellam_masks` | score cell $\in S$ | $\approx p_S$ | $q$ USDC |
@@ -1447,12 +1515,64 @@ Committee `submit_result` writes $x^*$ only. It SHALL NOT rewrite $p0$, $\theta$
 
 The UI may show a continuous interval $[a,b]$ or a named line (home, over 2.5). At fill the client/program maps that intent to a set $S$ of grid atoms:
 
-- 1-D Gaussian / lognormal: bitmask of nodes (same nodes `outcome_cell` / `interval_index` will use)
+- 1-D Gaussian / lognormal: bitmask from §8.1.2.1 (same `interval_index` / `outcome_cell` as settle)
 - Dirichlet atoms / Bernoulli: bitmask of those atoms
 - Football typed line: `skellam_masks(kind,a,b,k_{\max})` — one set, or two sets for a quarter line
 - Custom union: `buy_set` bitmask
 
 The position stores $(S,q)$ (or a typed key that expands to the same masks). Settlement SHALL NOT re-integrate $[a,b]$ and SHALL NOT invent a new $S$.
+
+**Where the mask is used (same $S$ end to end).** The bitmask is the product ticket, not a storage trick:
+
+| Step | What the user sees | What the system uses |
+| --- | --- | --- |
+| Select | PDF bars, or a typed line (胜 / Over 2.5 / YES) | Bits: cell $k$ is in $S$ iff bit $k=1$ |
+| Quote | $C_S(q)$, $p_S$ | Sum / LMSR only over those bits |
+| Fill | Buy set / Buy line | `buy_set` / `buy_skellam_set` carries the mask (or kind that expands to the same bits) |
+| Ticket | One row in Portfolio | PDA seeds include `set_hash(mask)`. Same owner + market + $S$ = same position |
+| Claim | 领取 | Payout must present the same mask (or recover it from the fill journal / typed Skellam). The chain stores the hash, not a redraw of $[a,b]$ |
+
+A **full mask** is every bit 1 (buy the whole grid). That is a legal $S$, used in tests and if someone actually buys every atom. Everyday tickets are a contiguous node range or a typed-line set.
+
+How one fill is *split across transactions* when $S$ touches too many shards is an implementation limit (technical architecture §6.3). Product-visible fact only: a very wide $S$ may take several confirmed transactions; after `close_ts`, bringing shards home to L1 is serial. Delay is allowed. The frozen $S$ does not change.
+
+##### 8.1.2.1 1-D interval $\to$ node set (Gaussian / lognormal)
+
+The drawn interval is **not** a length-weighted continuous contract. LMSR atoms are the listing **nodes** (product §5.1, SRS FR-MKT-15):
+
+$$
+x_i=x_{\min}+i\cdot\frac{x_{\max}-x_{\min}}{n-1},\qquad i=0,\ldots,n-1.
+$$
+
+Lognormal: the same formula on $\log x$ (then $X_i=e^{x_i}$). There is no half-atom: $a$ and $b$ inside one node's Voronoi band still buy that **whole** node.
+
+**Nearest node** — `crates/math::outcome::interval_index`, identical to settle `outcome_cell`:
+
+$$
+i^*(x)=\mathrm{clamp}\Bigl(\mathrm{round}\bigl((x-x_{\min})\cdot(n-1)/(x_{\max}-x_{\min})\bigr),\;0,\;n-1\Bigr).
+$$
+
+Lognormal substitutes $\log x$, $\log x_{\min}$, $\log x_{\max}$. $x<x_{\min}$ clamps to $0$; $x>x_{\max}$ clamps to $n-1$. On-chain Q64 rounding is add $2^{-1}$ then take the integer part (half-integers go to the higher index). $n<2$ or $x_{\max}\le x_{\min}$ is illegal.
+
+Node $i$ **owns** the band between adjacent midpoints: first node also owns $[x_{\min},\mathrm{mid}(x_0,x_1))$, last node owns $(\mathrm{mid}(x_{n-2},x_{n-1}),x_{\max}]$. A print anywhere in that band maps to $i$.
+
+**Buy $[a,b]$** (require $a\le b$; if the UI sends them swapped, swap before indexing):
+
+1. $i_a=i^*(a)$, $i_b=i^*(b)$. If $i_a>i_b$, swap.
+2. $S=\{i_a,i_a+1,\ldots,i_b\}$ (inclusive). Empty $S$ SHALL be rejected.
+3. Quote $p_S=\sum_{k\in S}p_k$, charge $C_S(q)$. Write $q$ onto $\theta_k$ and $E_k$ for every $k\in S$. Liability does not scale with $|S|$ — only one node realizes.
+4. Freeze the bitmask on the position. Hit iff $c=i^*(x^*)\in S$.
+
+Preset bins (`<2`, $[2,2.5)$, above $k$, …) use this same snap, then the inclusive node range. Quote, fill, and payout SHALL NOT compute $\int_a^b f(x)\,dx$ and SHALL NOT pay a fraction of $q$ because $[a,b]$ covers only part of a Voronoi band.
+
+**Worked example.** Nodes $6.0,6.1,\ldots,10.0$ ($x_{\min}=6$, step $0.1$). User draws $[5.5,7.8]$:
+
+| Endpoint | $i^*$ | Why |
+| --- | --- | --- |
+| $5.5$ | $0$ (node $6.0$) | below $\Omega$, clamp |
+| $7.8$ | node $7.8$ | exactly on a node |
+
+$S=\{6.0,6.1,\ldots,7.8\}$ (19 atoms). Print $5.9$ still maps to $6.0$ (hit). Print $7.85$ maps to $7.9$ (miss). The sliver $[5.5,6)$ is not a separate contract. If both ends sit in one band (e.g. $[6.12,6.18]$ around node $6.1$), $S$ is that singleton and the ticket is the whole atom.
 
 #### 8.1.3 Fill update (every LMSR leg)
 
@@ -1475,8 +1595,8 @@ $$
 | Family | $x^*$ reported as | $c$ |
 | --- | --- | --- |
 | Skellam | score $(i^*,j^*)$ | $(i^*\wedge k_{\max},\; j^*\wedge k_{\max})$ on the $11\times 11$ table |
-| Gaussian | scalar | nearest listing node in $[x_{\min},x_{\max}]$ |
-| Lognormal | positive scalar | nearest node on the log grid |
+| Gaussian | scalar | $i^*(x^*)$ (§8.1.2.1) |
+| Lognormal | positive scalar | $i^*$ on the log grid (§8.1.2.1) |
 | Dirichlet (atom / TOP_N) | winner or combination id | that atom index |
 | Bernoulli | YES $=1$ / NO $=0$ | that atom |
 
@@ -1583,7 +1703,7 @@ $$
 \rho=\min\left(1,\;\frac{C_{\max}}{L}\right)
 $$
 
-USDC paid to a ticket is $\rho\cdot\mathrm{face}_j$ (section 8.1.5), not automatically $\rho\cdot q_j$. All winners use the same $\rho$. Dust is $\lfloor\rho\cdot\mathrm{face}_j\rfloor$; remainder stays in reserves.
+USDC paid to a ticket is $\rho\cdot\mathrm{face}_j$ (section 8.1.5), not automatically $\rho\cdot q_j$. All winners use the same $\rho$. Dust is $\lfloor\rho\cdot\mathrm{face}_j\rfloor$; remainder stays in reserves. How a holder reads the number on the ticket: **§1.2.3**.
 
 ### 8.4 First-Come-First-Served Is Forbidden
 
@@ -2195,7 +2315,10 @@ Implementation must follow the conventions below. There is no remaining fork of 
 | --- | --- |
 | Reject for insufficient funds? | Do not reject |
 | Settlement liability | $L=E(x^*)$, not $L_{\max}$ |
-| Claim unit | Fill size $q$ is **shares** on the bought interval. Payout is $\rho\cdot q$ if $x^*$ hits, else $0$ |
+| Claim unit | Fill size $q$ is **shares** on frozen $S$. Face is $1$ USDC per ordinary share if it hits. Payout is $\rho\cdot q$ if $i^*(x^*)\in S$, else $0$. Not $q/p_S$. How the holder reads it: §1.2.3 |
+| Price vs payoff | Price $=p_S=\int_I f$ (grid: $\sum_{k\in S}p_k$). $\partial C/\partial q$ is still price. Hit pays $1$ per share. $1/p_S$ is the cash multiple, not the share definition (§1.2.2) |
+| Gaussian $n$ | Default $256$. $512$/$1024$ are finer, not required for CPI $\sigma$ vs $\Omega$. $n<32$ warn/reject. Floor $8$ is not a product default (§5.1.1) |
+| 1-D interval $[a,b]$ | Snap both ends with `interval_index`; $S$ is the inclusive node range. No partial node, no $\int_a^b$ at fill or settle (§8.1.2.1) |
 | Haircut method | If $C_{\max}<L$, one global $\rho=C_{\max}/L$ on every hitting share; FIFO forbidden |
 | $C_{\max}$ | $R_{\text{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$; $C_R$, $C_P$ may each be $0$ |
 | Trading fee | Listing locks `fee_bps` + `fee_timing`. At fill: $\phi\cdot C_S$ now. At claim: $\phi$ of the winner’s payout. Never $C_P$. `claim_fees` anytime |

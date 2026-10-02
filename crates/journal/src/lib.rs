@@ -103,6 +103,24 @@ impl Journal {
         Ok(self.replay(market)?.1)
     }
 
+    /// Base58 market ids that have a replica or object-store log.
+    pub fn listed_markets(&self) -> Vec<String> {
+        let mut names = std::collections::BTreeSet::new();
+        for dir in [&self.replica, &self.object] {
+            let Ok(rd) = fs::read_dir(dir) else { continue };
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    names.insert(stem.to_string());
+                }
+            }
+        }
+        names.into_iter().collect()
+    }
+
     /// Append to both copies. Returns the new `trades_root`.
     pub fn append(
         &self,

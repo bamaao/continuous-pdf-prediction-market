@@ -31,38 +31,51 @@ export function noncePda(owner: PublicKey, market: PublicKey): PublicKey {
   )[0];
 }
 
-/** Borsh size of `Grid` — must match `market::state::Grid::space`. */
+/** Borsh size of one `Grid` shard — must match `market::state::Grid::space`. */
 export function gridSpace(n: number): number {
-  return 75 + 64 * n;
+  return 77 + 64 * n;
 }
 
 export const GRID_CREATE_CAP = 10_240;
-export const GRID_PRIOR_CHUNK = 256;
+export const GRID_PRIOR_CHUNK = 64;
+export const GRID_SHARD_CELLS = 16;
+const GRID_HDR = 61;
+const GRID_Z_OFF = 45;
+
+export function shardCount(n: number): number {
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return Math.ceil(n / GRID_SHARD_CELLS);
+}
+
+export function shardLen(n: number, ix: number): number {
+  const start = ix * GRID_SHARD_CELLS;
+  return Math.min(GRID_SHARD_CELLS, Math.max(0, n - start));
+}
 
 export function gridGrowSteps(n: number): number {
   if (!Number.isFinite(n) || n < 2) return 0;
-  const need = gridSpace(n);
+  const need = gridSpace(shardLen(n, 0));
   if (need <= GRID_CREATE_CAP) return 0;
   return Math.ceil((need - GRID_CREATE_CAP) / GRID_CREATE_CAP);
 }
 
 export function gridMassSteps(n: number): number {
   if (!Number.isFinite(n) || n < 2) return 0;
-  return Math.ceil(n / GRID_PRIOR_CHUNK);
+  return Math.ceil(shardLen(n, 0) / GRID_PRIOR_CHUNK);
 }
 
-/** Borsh `p0.len` sits at byte 59 after the 8-byte discriminator. */
+/** Borsh `p0.len` after disc+market+n+start+bump+z. */
 export function gridP0Len(data: Uint8Array): number {
-  if (data.length < 63) return 0;
-  return data[59]! | (data[60]! << 8) | (data[61]! << 16) | (data[62]! << 24);
+  if (data.length < GRID_HDR + 4) return 0;
+  return data[GRID_HDR]! | (data[GRID_HDR + 1]! << 8) | (data[GRID_HDR + 2]! << 16) | (data[GRID_HDR + 3]! << 24);
 }
 
-/** `Grid.z` is i128 LE at offset 43. Non-zero means `seal_grid` has normalized $P_0$. */
+/** `Grid.z` is i128 LE at offset 45. Non-zero on shard 0 means `seal_grid` finished. */
 export function gridZ(data: Uint8Array): bigint {
-  if (data.length < 59) return 0n;
+  if (data.length < GRID_Z_OFF + 16) return 0n;
   let x = 0n;
   for (let i = 0; i < 16; i++) {
-    x |= BigInt(data[43 + i]!) << BigInt(8 * i);
+    x |= BigInt(data[GRID_Z_OFF + i]!) << BigInt(8 * i);
   }
   return x;
 }
@@ -74,7 +87,17 @@ export function marketN(data: Uint8Array): number {
 }
 
 export function gridPda(market: PublicKey): PublicKey {
-  return PublicKey.findProgramAddressSync([Buffer.from("grid"), market.toBuffer()], MARKET_ID)[0];
+  return gridShardPda(market, 0);
+}
+
+export function gridShardPda(market: PublicKey, ix: number): PublicKey {
+  if (ix <= 0) {
+    return PublicKey.findProgramAddressSync([Buffer.from("grid"), market.toBuffer()], MARKET_ID)[0];
+  }
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("grid"), market.toBuffer(), Buffer.from([ix & 0xff])],
+    MARKET_ID,
+  )[0];
 }
 
 export function riskBookPda(market: PublicKey): PublicKey {

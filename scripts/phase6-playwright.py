@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import json
+import os
 import sys
 
 from playwright.sync_api import expect, sync_playwright
@@ -10,8 +11,21 @@ from playwright.sync_api import expect, sync_playwright
 BASE = "http://127.0.0.1:3000"
 SEED = "Seed111111111111111111111111111111111111111"
 SKEL = "Skel111111111111111111111111111111111111111"
-OUT = Path(__file__).resolve().parents[1] / "tmp" / "phase6-pw"
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "tmp" / "phase6-pw"
 OUT.mkdir(parents=True, exist_ok=True)
+ENV = ROOT / "tmp" / "phase6.env"
+
+
+def env_market() -> str:
+    m = os.environ.get("PHASE6_MARKET", "").strip()
+    if m:
+        return m
+    if ENV.exists():
+        for line in ENV.read_text(encoding="utf-8").splitlines():
+            if line.startswith("PHASE6_MARKET="):
+                return line.split("=", 1)[1].strip()
+    return ""
 
 
 def shot(page, name: str):
@@ -24,7 +38,7 @@ def main() -> int:
         page = browser.new_page(viewport={"width": 1400, "height": 900})
 
         page.goto(BASE + "/", wait_until="networkidle")
-        expect(page.get_by_role("heading", name="Open books")).to_be_visible()
+        expect(page.get_by_role("heading", name="Live markets")).to_be_visible()
         expect(page.get_by_role("heading", level=2).first).to_be_visible()
         expect(page.get_by_text("The row heading is the market name")).to_be_visible()
         expect(page.get_by_text("Fills are public on Solana")).to_be_visible()
@@ -35,7 +49,7 @@ def main() -> int:
         expect(page.get_by_text("payable").first).to_be_visible()
         expect(page.get_by_label("Search")).to_be_visible()
         expect(page.get_by_role("button", name="Search")).to_be_visible()
-        expect(page.get_by_text("books · page")).to_be_visible()
+        expect(page.get_by_text("markets · page")).to_be_visible()
         page.goto(BASE + "/?limit=1", wait_until="networkidle")
         if page.get_by_role("link", name="Next").count():
             page.get_by_role("link", name="Next").click()
@@ -82,17 +96,21 @@ def main() -> int:
         page.get_by_role("link", name="Committee").click()
         page.wait_for_load_state("networkidle")
         expect(page.get_by_role("heading", name="Committee")).to_be_visible()
-        expect(page.get_by_text("No oracle write path").first).to_be_visible()
+        expect(page.get_by_text("One protocol-wide roster").first).to_be_visible()
         expect(page.get_by_text("Submit event result")).to_be_visible()
         expect(page.get_by_label("Search markets")).to_be_visible()
         expect(page.get_by_text("Your role")).to_be_visible()
         action = page.get_by_role("button", name="Open window")
         if action.count() == 0:
             action = page.get_by_role("button", name="Submit result")
-        action.click()
-        expect(page.get_by_text("connect a wallet first")).to_be_visible()
+        if action.count():
+            action.click()
+            expect(page.get_by_text("connect a wallet first")).to_be_visible()
+        else:
+            expect(page.get_by_text("connect a wallet").first).to_be_visible()
         shot(page, "04-committee")
 
+        mid = env_market() or mid
         page.goto(BASE + f"/m/{mid}", wait_until="networkidle")
         expect(page.get_by_text("Market card")).to_be_visible()
         expect(page.get_by_text("Trading close")).to_be_visible()
@@ -121,7 +139,7 @@ def main() -> int:
         expect(page.get_by_text("Net if hit")).to_be_visible()
         expect(page.get_by_text("Book EV", exact=True)).to_be_visible()
         page.get_by_role("button", name="Buy set").click()
-        expect(page.get_by_text("connect a wallet")).to_be_visible()
+        expect(page.get_by_text("connect a wallet").first).to_be_visible()
         shot(page, "05-board")
 
         page.get_by_role("link", name="Auction", exact=True).click()
@@ -140,28 +158,28 @@ def main() -> int:
 
         page.goto(BASE + "/create", wait_until="networkidle")
         expect(page.get_by_role("heading", name="Create prediction market")).to_be_visible()
-        expect(page.get_by_text("Create a prediction market by distribution family")).to_be_visible()
+        expect(page.get_by_text("Submit a market application by distribution family")).to_be_visible()
         expect(page.get_by_text("Identity ticket")).to_be_visible()
-        expect(page.get_by_label("Listing title")).to_be_visible()
-        expect(page.get_by_label("Catalog category")).to_be_visible()
+        expect(page.get_by_label("Market title")).to_be_visible()
+        expect(page.get_by_label("Tags")).to_be_visible()
         expect(page.get_by_label("Trading event")).to_be_visible()
-        expect(page.get_by_label("Listing description")).to_be_visible()
+        expect(page.get_by_label("Description")).to_be_visible()
         expect(page.get_by_text("Prior ticket")).to_be_visible()
         expect(page.get_by_role("button", name="US CPI YoY")).to_be_visible()
-        expect(page.get_by_text("N(2.4, 0.35)", exact=False)).to_be_visible()
-        expect(page.get_by_role("button", name="Create Gaussian prediction market")).to_be_visible()
+        expect(page.get_by_text("FIRST_PRINT")).to_be_visible()
+        expect(page.get_by_role("button", name="Submit for review")).to_be_visible()
         shot(page, "08-create")
 
         page.goto(BASE + "/auctions", wait_until="networkidle")
         expect(page.get_by_role("heading", name="Auctions")).to_be_visible()
-        expect(page.get_by_text("published layers only", exact=False)).to_be_visible()
+        expect(page.locator("main")).to_contain_text("Risk auctions for live markets")
         shot(page, "09-auctions")
 
         page.goto(BASE + "/ops", wait_until="networkidle")
         expect(page.get_by_role("heading", name="Ops")).to_be_visible()
         expect(page.get_by_text("Read-only")).to_be_visible()
         expect(page.get_by_text("disabled")).to_be_visible()
-        expect(page.get_by_text("US CPI YoY persist check")).to_be_visible()
+        expect(page.get_by_text("Keeper close")).to_be_visible()
         shot(page, "10-ops")
 
         page.goto(BASE + "/lp", wait_until="networkidle")
@@ -172,7 +190,6 @@ def main() -> int:
         page.goto(BASE + f"/resolve/{mid}", wait_until="networkidle")
         expect(page.get_by_text("Resolution")).to_be_visible()
         expect(page.get_by_text("Market card")).to_be_visible()
-        expect(page.get_by_role("heading", name="US CPI YoY persist check")).to_be_visible()
         expect(page.get_by_text("no oracle settler")).to_be_visible()
         expect(page.get_by_text("A trading Session cannot open, submit, challenge, or vote")).to_be_visible()
         expect(page.get_by_text("Your role")).to_be_visible()

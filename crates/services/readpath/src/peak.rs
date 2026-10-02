@@ -167,6 +167,7 @@ mod tests {
             extra_a: Q64::from_int(-2).raw(),
             extra_b: Q64::from_int(12).raw(),
             extra_u2: 0,
+            delegated: false,
         };
         let peak = peak_risk(&row);
         assert_eq!(peak.cell, 2);
@@ -216,6 +217,7 @@ mod tests {
             extra_a: Q64::from_int(-2).raw(),
             extra_b: Q64::from_int(12).raw(),
             extra_u2: 0,
+            delegated: false,
         };
         let peak = peak_risk(&row);
         assert_eq!(peak.run_lo, 1);

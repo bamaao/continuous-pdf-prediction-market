@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export default async function OpsPage() {
   let err = "";
-  let ops = {
+  let ops: Awaited<ReturnType<typeof fetchOpsStatus>> = {
     slot: 0,
     boards: 0,
     boards_with_coverage: 0,

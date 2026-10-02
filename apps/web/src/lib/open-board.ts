@@ -1,4 +1,14 @@
-import { compose, gridGrowSteps, gridMassSteps, gridP0Len, gridPda, gridSpace, gridZ, marketN, marketPubkeyFromCreateIx, saveListing } from "@cpm/sdk";
+import {
+  compose,
+  gridP0Len,
+  gridPda,
+  gridShardPda,
+  gridZ,
+  marketN,
+  marketPubkeyFromCreateIx,
+  saveListing,
+  shardCount,
+} from "@cpm/sdk";
 import { PublicKey, type Connection, type Transaction } from "@solana/web3.js";
 import { sendSigned } from "./tx";
 
@@ -136,32 +146,48 @@ async function finishGrid(
   market: string,
   nHint: number,
 ): Promise<string> {
-  const macc = await args.connection.getAccountInfo(new PublicKey(market));
+  const mpk = new PublicKey(market);
+  const macc = await args.connection.getAccountInfo(mpk);
   if (!macc) return "";
   const n = marketN(macc.data) || nHint;
   if (n < 2) return "";
-  const grid = gridPda(new PublicKey(market));
-  const need = gridSpace(n);
+  const count = shardCount(n);
+  const extra = Math.max(0, count - 1);
   let sig = "";
-  const tries = Math.max(1, gridGrowSteps(n) + gridMassSteps(n) + 5);
-  for (let i = 0; i < tries; i++) {
-    const acc = await args.connection.getAccountInfo(grid);
-    if (acc && acc.data.length >= need && gridP0Len(acc.data) === n && gridZ(acc.data) !== 0n) {
-      return sig;
-    }
-    const op =
-      !acc || acc.data.length < need
-        ? "grow_grid"
-        : gridP0Len(acc.data) < n
-          ? "write_grid_mass"
-          : "seal_grid";
+  const sendOp = async (body: Record<string, unknown>) => {
     sig = await sendSigned(args.connection, args.signTransaction, args.owner, [
-      await compose(args.api, { op, owner, market }),
+      await compose(args.api, { owner, market, ...body }),
     ]);
+  };
+  for (let ix = 1; ix < count; ix++) {
+    const shard = gridShardPda(mpk, ix);
+    const acc = await args.connection.getAccountInfo(shard);
+    if (!acc) {
+      try {
+        await sendOp({ op: "create_grid_shard", ix });
+      } catch (e) {
+        const msg = String(e);
+        if (!/already in use|0x0/i.test(msg)) throw e;
+      }
+    }
+    await sendOp({ op: "write_grid_shard", ix });
   }
-  const acc = await args.connection.getAccountInfo(grid);
-  if (!acc || acc.data.length < need || gridP0Len(acc.data) !== n || gridZ(acc.data) === 0n) {
-    throw new Error(`grid not sealed (n=${n}, have ${acc ? gridP0Len(acc.data) : 0})`);
+  await sendOp({ op: "write_grid_mass" });
+  if (extra > 16) {
+    const extras = Array.from({ length: extra }, (_, i) => i + 1);
+    for (let i = 0; i < extras.length; i += 16) {
+      await sendOp({ op: "accum_seal", extras: extras.slice(i, i + 16) });
+    }
+    for (let i = 0; i < extras.length; i += 16) {
+      await sendOp({ op: "apply_seal", extras: extras.slice(i, i + 16) });
+    }
+  } else {
+    await sendOp({ op: "seal_grid", n });
+  }
+  const grid = await args.connection.getAccountInfo(gridPda(mpk));
+  const local0 = Math.min(16, n);
+  if (!grid || gridP0Len(grid.data) !== local0 || gridZ(grid.data) === 0n) {
+    throw new Error(`grid not sealed (n=${n}, shard0 p0=${grid ? gridP0Len(grid.data) : 0})`);
   }
   return sig;
 }

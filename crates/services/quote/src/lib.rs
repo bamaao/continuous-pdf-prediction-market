@@ -220,15 +220,25 @@ pub fn q_bps_renorm(qs: &[Q64]) -> Vec<u64> {
     bps
 }
 
-/// Bitmask → membership, same layout as `market::mask`.
-pub fn decode_mask(bytes: &[u8], n: usize) -> Result<Vec<bool>, &'static str> {
+/// Pad a short bitmask to `ceil(n/8)` zeros. Longer than `n` is rejected.
+pub fn pad_mask(bytes: &[u8], n: usize) -> Result<Vec<u8>, &'static str> {
     if n == 0 {
         return Err("empty grid");
     }
     let need = n.div_ceil(8);
-    if bytes.len() != need {
+    if bytes.len() > need {
         return Err("bad mask length");
     }
+    let mut out = vec![0u8; need];
+    out[..bytes.len()].copy_from_slice(bytes);
+    Ok(out)
+}
+
+/// Bitmask → membership, same layout as `market::mask`.
+/// A short mask is the low cells (`01` on n=121 is cell 0).
+pub fn decode_mask(bytes: &[u8], n: usize) -> Result<Vec<bool>, &'static str> {
+    let bytes = pad_mask(bytes, n)?;
+    let need = bytes.len();
     let mut out = vec![false; n];
     let mut any = false;
     for i in 0..n {
@@ -326,6 +336,15 @@ mod tests {
     fn mask_cell0() {
         let bits = decode_mask(&[0b0000_0001], 8).unwrap();
         assert!(bits[0] && bits[1..].iter().all(|b| !*b));
+    }
+
+    #[test]
+    fn short_mask_is_low_cells() {
+        let bits = decode_mask(&[0x01], 121).unwrap();
+        assert_eq!(bits.len(), 121);
+        assert!(bits[0] && bits[1..].iter().all(|b| !*b));
+        assert_eq!(pad_mask(&[0x01], 121).unwrap().len(), 16);
+        assert!(decode_mask(&[0x01; 17], 121).is_err());
     }
 
     #[test]

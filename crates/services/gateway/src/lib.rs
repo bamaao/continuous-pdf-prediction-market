@@ -14,6 +14,7 @@ use journal::Journal;
 use serde::{Deserialize, Serialize};
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcSendTransactionConfig;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_sdk::transaction::Transaction;
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ const MAX_TX_BYTES: usize = 4096;
 #[derive(Clone)]
 pub struct AppState {
     pub rpc: String,
+    pub er_rpc: String,
     pub store: FileStore,
     pub limit: RateLimit,
     pub journal: Option<Journal>,
@@ -81,10 +83,14 @@ pub fn reject_secrets(v: &serde_json::Value) -> bool {
 }
 
 pub fn router(rpc: String, receipt_dir: PathBuf) -> Router {
-    router_with_journal(rpc, receipt_dir, None)
+    router_with_er(rpc, String::new(), receipt_dir, None)
 }
 
 pub fn router_with_journal(rpc: String, receipt_dir: PathBuf, journal: Option<Journal>) -> Router {
+    router_with_er(rpc, String::new(), receipt_dir, journal)
+}
+
+pub fn router_with_er(rpc: String, er_rpc: String, receipt_dir: PathBuf, journal: Option<Journal>) -> Router {
     let store = FileStore::open(&receipt_dir).expect("receipt dir");
     Router::new()
         .route("/v1/health", get(health))
@@ -94,6 +100,7 @@ pub fn router_with_journal(rpc: String, receipt_dir: PathBuf, journal: Option<Jo
         .layer(CorsLayer::permissive())
         .with_state(AppState {
             rpc,
+            er_rpc,
             store,
             limit: RateLimit::new(20, Duration::from_secs(10)),
             journal,
@@ -162,6 +169,23 @@ async fn submit(
     Ok(Json(rec))
 }
 
+const DLP: &str = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh";
+
+fn rpc_for_market(st: &AppState, market: &str) -> RpcClient {
+    if st.er_rpc.is_empty() {
+        return RpcClient::new(st.rpc.clone());
+    }
+    if let Ok(pk) = Pubkey::from_str(market) {
+        let l1 = RpcClient::new(st.rpc.clone());
+        if let Ok(acc) = l1.get_account(&pk) {
+            if acc.owner.to_string() == DLP {
+                return RpcClient::new(st.er_rpc.clone());
+            }
+        }
+    }
+    RpcClient::new(st.rpc.clone())
+}
+
 fn forward(st: AppState, key: String) {
     let Some(row) = st.store.get(&key) else { return };
     if row.receipt.status == "confirmed" {
@@ -175,7 +199,7 @@ fn forward(st: AppState, key: String) {
         mark_failed(&st, &key, row, "bad stored tx");
         return;
     };
-    let rpc = RpcClient::new(st.rpc.clone());
+    let rpc = rpc_for_market(&st, &row.receipt.market);
     let cfg = RpcSendTransactionConfig {
         skip_preflight: true,
         ..Default::default()
@@ -225,7 +249,7 @@ async fn receipt(State(st): State<AppState>, Query(q): Query<ReceiptQ>) -> Resul
         }
     }
     if let Some(sig) = q.sig.as_ref() {
-        let rpc = RpcClient::new(st.rpc.clone());
+        let rpc = rpc_for_market(&st, q.market.as_deref().unwrap_or(""));
         let parsed = Signature::from_str(sig).map_err(|_| StatusCode::BAD_REQUEST)?;
         let statuses = rpc.get_signature_statuses(&[parsed]).map_err(|_| StatusCode::BAD_GATEWAY)?;
         let confirmed = statuses

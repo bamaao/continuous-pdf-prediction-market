@@ -17,4 +17,4 @@
 3. Notify records are `{ts,kind,market}` only.
 4. `apps/android-twa` has a TWA manifest and no business routes.
 
-SRS §11 full release checklist is **out of this slice** (needs CI + ER drill). Email/Web Push providers stay optional env later.
+SRS §11 full release checklist is **out of this slice** (needs CI + ER drill).

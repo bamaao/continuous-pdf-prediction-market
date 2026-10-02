@@ -1,4 +1,4 @@
-//! Keeper heartbeat and notify log. Payload is `market_id` only (FR-NTF-01).
+//! Keeper heartbeat and in-app inbox log. Records are `{ts,kind,market}` only (FR-UI-21).
 
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -130,7 +130,9 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].market, "MktAAA");
         let raw = serde_json::to_value(&rows[0]).unwrap();
-        assert!(raw.get("email").is_none());
+        let mut keys: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["kind", "market", "ts"]);
         assert!(raw.get("owner").is_none());
     }
 }

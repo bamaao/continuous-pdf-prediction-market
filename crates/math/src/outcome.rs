@@ -1,4 +1,5 @@
 //! Map a finalized $x^*$ onto the grid cell whose $E$ is $L$.
+//! 1-D $[a,b]$ uses the same `interval_index` on both ends (product §8.1.2.1).
 
 use crate::football;
 use crate::q64::Q64;

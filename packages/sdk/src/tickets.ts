@@ -160,3 +160,40 @@ export function loadInbox(): InboxItem[] {
     return [];
   }
 }
+
+export type NotifyEvent = { ts: number; kind: string; market: string };
+
+export function notifyKeysOnly(ev: unknown): ev is NotifyEvent {
+  if (!ev || typeof ev !== "object") return false;
+  const o = ev as Record<string, unknown>;
+  const keys = Object.keys(o).sort();
+  return (
+    keys.length === 3 &&
+    keys[0] === "kind" &&
+    keys[1] === "market" &&
+    keys[2] === "ts" &&
+    typeof o.kind === "string" &&
+    typeof o.market === "string" &&
+    typeof o.ts === "number" &&
+    o.market.length > 0
+  );
+}
+
+export async function fetchNotify(api: string): Promise<NotifyEvent[]> {
+  const r = await fetch(`${api}/v1/notify`);
+  if (!r.ok) throw new Error(`notify ${r.status}`);
+  const j = (await r.json()) as { events?: unknown[] };
+  return (j.events ?? []).filter(notifyKeysOnly);
+}
+
+export function ingestNotifyEvents(events: NotifyEvent[]): InboxItem[] {
+  for (const ev of events) {
+    pushInbox({
+      id: `ntf-${ev.ts}-${ev.kind}-${ev.market}`,
+      title: ev.kind,
+      market: ev.market,
+      ts: ev.ts < 1e12 ? ev.ts * 1000 : ev.ts,
+    });
+  }
+  return loadInbox();
+}

@@ -283,42 +283,47 @@ def run_ui(kp: Keypair) -> int:
         page.get_by_role("link", name="Create", exact=True).click()
         page.wait_for_load_state("networkidle")
         page.get_by_label("n_grid / atoms").select_option("8")
+        page.get_by_label("Market title").fill(f"PW Gaussian {stamp}")
+        page.get_by_label("Tags").fill("macro, test")
+        page.get_by_label("Trading event").fill(f"flow event {stamp}")
+        page.get_by_label("Description").fill("Playwright flow: first official print. Extra time does not count.")
         page.get_by_label("Topic / series (on-chain id)").fill(f"pw{stamp}")
         page.get_by_label("Tag / release").fill("flow")
-        page.get_by_label("Close in seconds").fill("180")
-        page.get_by_role("button", name="Create Gaussian prediction market").click()
+        page.get_by_label("Or seconds from now").fill("180")
+        page.get_by_role("button", name="Submit for review").click()
         g_market = None
         try:
-            wait_text(page, "create_gaussian", timeout_ms=45_000)
-            body = page.locator("body").inner_text()
-            if "failed" in body.lower() and "create_gaussian" not in body:
-                raise RuntimeError(body[-400:])
-            out("create gaussian " + body.split("create_gaussian")[-1][:90])
-            link = page.get_by_role("link", name="Open market").first
-            expect(link).to_be_visible()
+            wait_text(page, "审核通过后由评审方开通预测市场", timeout_ms=45_000)
+            out("application submitted")
+            page.get_by_role("link", name="审核").click()
+            page.wait_for_load_state("networkidle")
+            page.locator("li").filter(has_text=f"PW Gaussian {stamp}").get_by_role("button", name="批准并开通预测市场").click()
+            link = page.get_by_role("link", name="进入预测市场", exact=True)
+            expect(link).to_be_visible(timeout=90_000)
             href = link.get_attribute("href") or ""
             g_market = href.split("/m/")[-1]
+            out("review opened " + (g_market or "")[:12])
         except Exception as e:
-            FINDINGS.append(f"create gaussian failed: {e} | {note_or_err(page)}")
+            FINDINGS.append(f"create/review gaussian failed: {e} | {note_or_err(page)}")
             out("create gaussian FAIL " + str(e))
             failed += 1
         shot(page, "03-create-g")
 
         if g_market:
-            page.get_by_role("link", name="Open market").first.click()
-            page.wait_for_load_state("networkidle")
+            page.goto(BASE + f"/m/{g_market}", wait_until="networkidle")
             page.get_by_role("button", name="Open session").wait_for(timeout=15_000)
+            bars = page.locator("div.flex.h-64.items-end button")
             for _ in range(20):
-                if page.locator("button[title^='cell ']").count() >= 2:
+                if bars.count() >= 2:
                     break
                 page.wait_for_timeout(500)
                 page.reload(wait_until="networkidle")
-            if page.locator("button[title^='cell ']").count() < 2:
+            if bars.count() < 2:
                 FINDINGS.append(f"gaussian board {g_market} has no PDF bars after create")
                 failed += 1
             else:
-                page.locator("button[title^='cell ']").nth(0).click()
-                page.locator("button[title^='cell ']").nth(1).click()
+                bars.nth(0).click()
+                bars.nth(1).click()
                 try:
                     page.wait_for_function(
                         """() => document.body.innerText.includes('C_S(q)') && !document.body.innerText.includes('C_S(q)\\n—')""",
@@ -360,37 +365,45 @@ def run_ui(kp: Keypair) -> int:
             shot(page, "06-resolve")
 
         page.goto(BASE + "/create", wait_until="networkidle")
-        page.get_by_role("button", name="Skellam Football", exact=False).click()
+        page.get_by_role("button", name="Skellam").first.click()
+        page.get_by_label("Market title").fill(f"PW Skellam {stamp}")
+        page.get_by_label("Tags").fill("football, test")
+        page.get_by_label("Trading event").fill(f"flow match {stamp}")
+        page.get_by_label("Description").fill("Playwright Skellam: full-time score. Extra time does not count.")
         page.get_by_label("Topic / series (on-chain id)").fill(f"sk{stamp}")
-        page.get_by_label("Close in seconds").fill("180")
-        page.get_by_role("button", name="Create Skellam prediction market").click()
+        page.get_by_label("Or seconds from now").fill("180")
+        page.get_by_role("button", name="Submit for review").click()
         s_market = None
         try:
-            wait_text(page, "create_skellam", timeout_ms=45_000)
-            href = page.get_by_role("link", name="Open market").first.get_attribute("href") or ""
+            wait_text(page, "审核通过后由评审方开通预测市场", timeout_ms=45_000)
+            page.get_by_role("link", name="审核").click()
+            page.wait_for_load_state("networkidle")
+            page.locator("li").filter(has_text=f"PW Skellam {stamp}").get_by_role("button", name="批准并开通预测市场").click()
+            link = page.get_by_role("link", name="进入预测市场", exact=True)
+            expect(link).to_be_visible(timeout=90_000)
+            href = link.get_attribute("href") or ""
             s_market = href.split("/m/")[-1]
-            out("create skellam " + str(s_market))
+            out("review opened skellam " + (s_market or "")[:12])
         except Exception as e:
-            FINDINGS.append(f"create skellam failed: {e} | {note_or_err(page)}")
+            FINDINGS.append(f"create/review skellam failed: {e} | {note_or_err(page)}")
             out("create skellam FAIL " + str(e))
             failed += 1
         shot(page, "07-create-s")
 
         if s_market:
-            page.get_by_role("link", name="Open market").first.click()
-            page.wait_for_load_state("networkidle")
+            page.goto(BASE + f"/m/{s_market}", wait_until="networkidle")
             page.get_by_role("button", name="Open session").wait_for(timeout=15_000)
             for _ in range(20):
-                if page.get_by_role("button", name="1X2 Home").count():
+                if page.get_by_role("button", name="胜", exact=True).count():
                     break
                 page.wait_for_timeout(500)
                 page.reload(wait_until="networkidle")
-            if page.get_by_role("button", name="1X2 Home").count():
-                page.get_by_role("button", name="1X2 Home").click()
+            if page.get_by_role("button", name="胜", exact=True).count():
+                page.get_by_role("button", name="胜", exact=True).click()
                 page.wait_for_timeout(800)
                 btn = page.get_by_role("button", name="Buy line")
                 if btn.count() == 0:
-                    FINDINGS.append("typed 1X2 Home did not switch button to Buy line")
+                    FINDINGS.append("typed 胜 did not switch button to Buy line")
                     failed += 1
                 else:
                     btn.click()

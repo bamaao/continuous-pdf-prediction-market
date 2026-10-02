@@ -4,8 +4,8 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.4 |
-| Corresponding product | `product-specification.md` v1.6 |
+| Version | 1.6 |
+| Corresponding product | `product-specification.md` v1.13 |
 | Corresponding system | `system-architecture.md` |
 
 This document answers: which frameworks, which middleware, and how the core algorithms are implemented.
@@ -68,8 +68,6 @@ A real-money prediction book will be rejected by the App Store / Play as gamblin
 | iPhone | Open the same site in Safari; “Add to Home Screen” for PWA; or open in Phantom / Solflare **in-app browsers** (wallet already connected; best experience) |
 | Android | Same PWA / wallet WebView; for an icon install, download the official-site **TWA APK** (Trusted Web Activity: Chrome runs the same site fullscreen, **not via Play**) |
 | Solana Seeker and similar | Open the same URL from the wallet or a dApp directory |
-
-Push: Web Push (PWA) + email / in-app. Do not depend on an APNs store package. iOS Web Push is available only on a PWA already added to the home screen; product copy must say so.
 
 Quotes: `crates/math` → WASM, computed in the browser. No Flutter FFI.
 
@@ -191,7 +189,6 @@ Legal and regional switches are ops configuration (disable trading by jurisdicti
 | Quote Engine | Standalone process, in-memory grid | Subscribes to Indexer or ER accounts |
 | Indexer | tokio tasks | gRPC yellowstone |
 | Keeper | tokio + cron/slot clock | Fires L1 transactions at the due slot |
-| Notifier | Consumes NATS | Templated messages |
 
 Process model: each service is its own binary, a K8s Deployment. Quote and Trading are **not** co-located with the Indexer.
 
@@ -310,9 +307,14 @@ $$
 P_S(q)=\frac{p_S e^{q/\beta}}{1-p_S+p_S e^{q/\beta}}
 $$
 
+$P_S(q)=\partial C_S/\partial q$ is the **marginal price** (in $(0,1)$), not the settlement payoff. One ordinary share still pays $1$ USDC if $c\in S$ (product §1.2.2). $p_S$ is the probability mass of $S$ (the discrete $\int_I f$). Do not mint $q\leftarrow q/p_S$ or pay $q/p_S$.
+
 Steps (ER `buy_set` / `buy_skellam_set`):
 
-1. Resolve $S$: typed Skellam template → mask via `crates/math::football`; or caller bitmask
+1. Resolve $S$:
+   - Gaussian / lognormal interval $[a,b]$: `interval_index` on both ends (log axis for lognormal), then inclusive node range (product §8.1.2.1). Not $\int_a^b$.
+   - Typed Skellam template → mask via `crates/math::football`
+   - Else caller bitmask
 2. Validate $S$, balance ≥ $C+\phi C$
 3. Compute $p_S$, $C_S(q)$ in `crates/math` (one LMSR)
 4. For $k\in S$: $\theta_k\leftarrow\theta_k+q$, $E_k\leftarrow E_k+q$
@@ -336,6 +338,7 @@ Engineering:
 - 1-D intervals maintain $\sum p0 e^{\theta/\beta}$ with a segment tree; one buy/sell is $O(\log N)$
 - Football sets (home-win is about half the table) can even brute-force in $(11\times11)$ blocks and still be enough for ER
 - All `exp/ln` go through LUTs; overflow saturates to the maximum legal Q64.64 value and rejects out-of-range $q$
+- **Mask → shards (protocol split, not a product disable).** Grid cells live 16 per shard. The fill locks shard 0 plus every extra shard that has a 1-bit (`WIDE_EXTRA_LIMIT` / `WIDE_BATCH` = 16). Solana caps a transaction at 64 accounts; MagicBlock allows one commit/undelegate intent per transaction. A typical interval is one `buy_set`. A mask that spans more than 16 extra shards (e.g. n=1024 full mask → 64 shards) is the **same** fill, split: `wide_begin` → accum in 16-shard batches → apply → finish. After `close_ts`, undelegate / L1 writeback is one shard per transaction, in order. This is delay. Quote, $\theta$, $E$, and the frozen $S$ are unchanged.
 
 ### 6.4 Coverage and $\rho$
 

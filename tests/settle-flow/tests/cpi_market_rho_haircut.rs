@@ -290,49 +290,15 @@ async fn deposit_create_cpi_buy_submit_settle_same_rho() {
     let set_mask = mask_cell0();
     let set_h = market::ids::set_hash(&set_mask);
     for (trader, qty) in [(&alice, Q_A), (&bob, Q_B)] {
-        let (pos, _) = Pubkey::find_program_address(
-            &[
-                market::state::POS_SEED,
-                market_pda.as_ref(),
-                trader.pubkey().as_ref(),
-                set_h.as_ref(),
-            ],
-            &market::ID,
-        );
-        let (uv, _) = Pubkey::find_program_address(&[vault::USER_SEED, trader.pubkey().as_ref()], &vault::ID);
         send_signed(
             &mut ctx,
-            vec![Instruction {
-                program_id: market::ID,
-                accounts: market::accounts::Trade {
-                    trader: trader.pubkey(),
-                    owner: trader.pubkey(),
-                    session: None,
-                    market: market_pda,
-                    grid: grid_pda,
-                    position: pos,
-                    board,
-                    user_vault: uv,
-                    nonce_acc: Pubkey::find_program_address(
-                        &[
-                            market::session::NONCE_SEED,
-                            trader.pubkey().as_ref(),
-                            market_pda.as_ref(),
-                        ],
-                        &market::ID,
-                    )
-                    .0,
-                    vault_program: vault::ID,
-                    system_program: system_program::ID,
-                }
-                .to_account_metas(None),
-                data: market::instruction::BuySet {
-                    set_mask: set_mask.clone(),
-                    q_raw: q(qty),
-                    nonce: 1,
-                }
-                .data(),
-            }],
+            vec![client::buy_set(
+                trader.pubkey(),
+                market_pda,
+                set_mask.clone(),
+                q(qty),
+                1,
+            )],
             &[trader],
         )
         .await;
@@ -412,6 +378,8 @@ async fn deposit_create_cpi_buy_submit_settle_same_rho() {
                     grid: grid_pda,
                     record,
                     risk_book: None,
+                    pool: None,
+                    tap: None,
                 }
                 .to_account_metas(None);
                 metas.retain(|m| m.pubkey != Pubkey::default());
@@ -455,6 +423,7 @@ async fn deposit_create_cpi_buy_submit_settle_same_rho() {
                 accounts: vault::accounts::Payout {
                     payer: trader.pubkey(),
                     board,
+                    market: market_pda,
                     grid: grid_pda,
                     record,
                     position: pos,

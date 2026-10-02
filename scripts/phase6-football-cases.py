@@ -21,7 +21,7 @@ else:
     spec.loader.exec_module(fc)
 
 K_MAX = 10
-FOOTBALL_CLOSE = 100
+FOOTBALL_CLOSE = 180
 OUT = ROOT / "tmp" / "phase6-football"
 
 
@@ -129,8 +129,11 @@ def _create_skellam(kp, owner: str, topic: str, tag: str, title: str, cid: str, 
         "c_m": c_m,
         "challenge_secs": 3,
         "report_window_secs": 800,
+        "id": cid,
     }
+    fc.record_application(kp, create, topic, tag, close_ts, title, cid)
     fc.send(kp, **fc.create_body(create, owner, topic, tag, close_ts))
+    fc.finish_grid(kp, market, 121)
     fc.send(kp, "fund_cm", owner=owner, market=market, amount=0)
     try:
         fc.send(kp, "risk_open_book", owner=owner, market=market)
@@ -149,9 +152,9 @@ def run_shared_theta(kp, stamp: str) -> None:
     cid = "football-shared-theta"
     owner = str(kp.pubkey())
     topic = f"th{stamp}"
-    close_ts = int(time.time()) + 20
+    close_ts = int(time.time()) + FOOTBALL_CLOSE
     try:
-        market = _create_skellam(kp, owner, topic, "th", "Football shared θ", cid, close_ts)
+        market = _create_skellam(kp, owner, topic, "th", f"Football shared θ {stamp}", f"{cid}-{stamp}", close_ts)
     except Exception as e:
         fc.fail(cid, f"create {e}")
         return
@@ -214,9 +217,12 @@ def run_football_board(kp, spec: dict, stamp: str) -> None:
         "lambda_home": 1400,
         "lambda_away": 1100,
         "c_m": 0,
+        "id": cid,
     }
     try:
+        fc.record_application(kp, create, topic, tag, close_ts, spec["title"], cid)
         fc.send(kp, **fc.create_body(create, owner, topic, tag, close_ts))
+        fc.finish_grid(kp, market, 121)
         fc.send(kp, "fund_cm", owner=owner, market=market, amount=0)
         try:
             fc.send(kp, "risk_open_book", owner=owner, market=market)
@@ -443,7 +449,6 @@ def isolated_cases() -> list[dict]:
 
 def run_isolated_matrix(kp, stamp: str) -> None:
     owner = str(kp.pubkey())
-    close_ts = int(time.time()) + FOOTBALL_CLOSE
     built: list[dict] = []
     for i, spec in enumerate(isolated_cases()):
         cid = spec["id"]
@@ -451,6 +456,7 @@ def run_isolated_matrix(kp, stamp: str) -> None:
         tag = f"t{i}"
         home, away = spec["score"]
         q = spec.get("q", 1)
+        close_ts = int(time.time()) + FOOTBALL_CLOSE
         if spec["via"] == "skellam":
             hit, tot = hit_parts(spec["kind"], spec.get("a", 0), spec.get("b", 0), home, away)
             want_face = ticket_face(q, hit, tot)
@@ -458,7 +464,7 @@ def run_isolated_matrix(kp, stamp: str) -> None:
             want_face = q if cell(home, away) in spec["cells"] else 0
         fc.flow.out(f"CASE {cid} x*={home}-{away} face={want_face}")
         try:
-            market = _create_skellam(kp, owner, topic, tag, cid, cid, close_ts)
+            market = _create_skellam(kp, owner, topic, tag, f"{cid} {stamp}", f"{cid} {stamp}", close_ts)
             if spec["via"] == "skellam":
                 fc.send(
                     kp,
@@ -476,10 +482,10 @@ def run_isolated_matrix(kp, stamp: str) -> None:
         except Exception as e:
             fc.fail(cid, f"create/buy {e}")
             continue
-        built.append({**spec, "market": market, "want_face": want_face, "topic": topic, "tag": tag})
+        built.append({**spec, "market": market, "want_face": want_face, "topic": topic, "tag": tag, "close_ts": close_ts})
         fc.ok(cid, f"listed {market[:8]}… face={want_face}")
 
-    remain = close_ts - time.time() + 2
+    remain = (max(b["close_ts"] for b in built) if built else time.time()) - time.time() + 2
     if remain > 0:
         fc.flow.out(f"wait close {remain:.1f}s for {len(built)} football boards")
         time.sleep(remain)
@@ -680,7 +686,7 @@ def main() -> int:
     except Exception as e:
         fc.fail("deposit", str(e))
         return 1
-    stamp = str(int(time.time()) % 10_000_000)
+    stamp = str(int(time.time() * 1000) % 10_000_000)
     run_all_football(kp, stamp)
     fc.flow.out("FINDINGS " + str(len(fc.FINDINGS)))
     for row in fc.FINDINGS:

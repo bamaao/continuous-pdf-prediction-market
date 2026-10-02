@@ -38,11 +38,11 @@ def main() -> int:
         expect(page.get_by_role("button", name="Open session")).to_be_visible(timeout=20_000)
         page.screenshot(path=str(OUT / "siws.png"), full_page=True)
 
-        page.get_by_role("link", name="Portfolio").click()
+        page.get_by_role("navigation").get_by_role("link", name="Portfolio").click()
         page.wait_for_load_state("networkidle")
         page.get_by_role("button", name="Deposit", exact=True).click()
         page.wait_for_timeout(4000)
-        expect(page.locator("text=/deposit [1-9A-HJ-NP-Za-km-z]{20,}/")).to_be_visible(timeout=20_000)
+        expect(page.get_by_text("deposit confirmed")).to_be_visible(timeout=20_000)
 
         page.get_by_role("link", name="Lobby").click()
         page.wait_for_load_state("networkidle")
@@ -54,11 +54,11 @@ def main() -> int:
         expect(page.get_by_text("confirmed")).to_be_visible(timeout=30_000)
         page.screenshot(path=str(OUT / "buy.png"), full_page=True)
 
-        page.get_by_role("link", name="Portfolio").click()
+        page.get_by_role("navigation").get_by_role("link", name="Portfolio").click()
         expect(page.get_by_role("heading", name="Portfolio")).to_be_visible(timeout=15_000)
         page.get_by_role("spinbutton").fill("1")
-        page.get_by_role("button", name="Withdraw").click()
-        expect(page.locator("text=/withdraw [1-9A-HJ-NP-Za-km-z]{20,}/")).to_be_visible(timeout=20_000)
+        page.get_by_role("button", name="Withdraw", exact=True).click()
+        expect(page.get_by_text("withdraw confirmed")).to_be_visible(timeout=20_000)
 
         page.get_by_role("button", name="Disconnect").click()
         expect(page.get_by_text("on-chain session still live")).to_be_visible()

@@ -134,6 +134,12 @@ pub mod vault {
         settle::credit_trade_inner(&mut ctx.accounts.board, &mut ctx.accounts.user, cost, fee)
     }
 
+    /// Credit unused margin from an in-board sell. Market PDA signs (CPI).
+    pub fn refund_trade(ctx: Context<CreditTrade>, cost: u64) -> Result<()> {
+        require!(ctx.accounts.board.market == ctx.accounts.market.key(), VaultError::WrongBoard);
+        settle::refund_trade_inner(&mut ctx.accounts.board, &mut ctx.accounts.user, cost)
+    }
+
     /// After `finalize`, lock $L=E(x^*)$, $C_{\max}$, one $\rho$.
     pub fn begin_settle(ctx: Context<BeginSettle>) -> Result<()> {
         let book = ctx.accounts.risk_book.as_ref().map(|a| a.as_ref().as_ref());
@@ -194,12 +200,12 @@ pub mod vault {
             VaultError::BadMask
         );
         let grid_data = ctx.accounts.grid.try_borrow_data()?;
-        let (grid_market, grid_n) = settle::parse_grid_meta(&grid_data)?;
+        let (grid_market, _, _) = settle::parse_grid_meta(&grid_data)?;
         require!(grid_market == ctx.accounts.board.market, VaultError::WrongBoard);
         let face = settle::mask_face(
             ctx.accounts.position.q,
             &set_mask,
-            grid_n as usize,
+            ctx.accounts.market.n as usize,
             board.cell as usize,
         )?;
         let paid = settle::pay_winner_clean(
@@ -557,7 +563,8 @@ pub struct Payout<'info> {
     pub payer: Signer<'info>,
     #[account(mut, seeds = [BOARD_SEED, board.market.as_ref()], bump = board.bump)]
     pub board: Box<Account<'info, Board>>,
-    /// CHECK: market-program grid. Only n is read.
+    pub market: Box<Account<'info, views::Market>>,
+    /// CHECK: market-program grid shard that contains `board.cell`.
     #[account(owner = views::MARKET_ID)]
     pub grid: UncheckedAccount<'info>,
     pub record: Box<Account<'info, views::Resolution>>,

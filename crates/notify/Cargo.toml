@@ -3,7 +3,7 @@ name = "notify"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Keeper heartbeat + market_id-only notify log (FR-NTF-01, FR-UI-27)."
+description = "Keeper heartbeat + in-app inbox log (FR-UI-21, FR-UI-27)."
 
 [lib]
 name = "notify"

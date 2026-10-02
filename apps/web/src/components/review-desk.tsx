@@ -24,6 +24,7 @@ export function ReviewDesk() {
   const [note, setNote] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const [justOpened, setJustOpened] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const page = await listListingApplications(MARKET_API, { status });
@@ -68,6 +69,7 @@ export function ReviewDesk() {
     setNote(
       `#${opened.id} ${opened.status_name} · ${market} · ${created ? OPEN_MARKET : "预测市场已在链上，已写入大厅"} · ${sig}`,
     );
+    setJustOpened(market);
     return opened;
   }
 
@@ -157,6 +159,13 @@ export function ReviewDesk() {
         <input className="mt-1 w-full border border-rule bg-ink px-2 py-1" value={reason} onChange={(e) => setReason(e.target.value)} />
       </label>
       {note && <p className="mt-3 font-mono text-xs text-amber">{note}</p>}
+      {justOpened ? (
+        <p className="mt-2">
+          <Link href={`/m/${justOpened}`} className="font-mono text-sm text-amber">
+            进入预测市场
+          </Link>
+        </p>
+      ) : null}
       <ul className="mt-6 divide-y divide-rule border border-rule">
         {rows.map((row) => (
           <li key={row.id} className="p-4 font-mono text-xs">

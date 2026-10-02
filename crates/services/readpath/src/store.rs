@@ -59,6 +59,9 @@ pub struct MarketProj {
     /// FamilyExtra.u2 — Skellam $k_{\max}$.
     #[serde(default)]
     pub extra_u2: u8,
+    /// True while MagicBlock owns the market PDA (FR-TRD-01 fills go to ER).
+    #[serde(default)]
+    pub delegated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -310,6 +313,10 @@ impl MemoryStore {
 
     pub fn get(&self, market: &str) -> Option<MarketProj> {
         self.inner.read().expect("store").markets.get(market).cloned()
+    }
+
+    pub fn market_ids(&self) -> Vec<String> {
+        self.inner.read().expect("store").markets.keys().cloned().collect()
     }
 
     pub fn persist_listings(&self, path: impl Into<PathBuf>) {
@@ -994,6 +1001,7 @@ async fn migrate_projections(pool: &sqlx::PgPool) -> Result<()> {
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS extra_a TEXT NOT NULL DEFAULT '0'",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS extra_b TEXT NOT NULL DEFAULT '0'",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS extra_u2 SMALLINT NOT NULL DEFAULT 0",
+        "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS delegated BOOLEAN NOT NULL DEFAULT FALSE",
     ] {
         sqlx::query(sql).execute(pool).await?;
     }
@@ -1158,6 +1166,7 @@ async fn load_projections(pool: &sqlx::PgPool, mem: &MemoryStore) -> Result<()> 
             extra_a: r.try_get::<String, _>("extra_a").ok().and_then(|s| s.parse().ok()).unwrap_or(0),
             extra_b: r.try_get::<String, _>("extra_b").ok().and_then(|s| s.parse().ok()).unwrap_or(0),
             extra_u2: r.try_get::<i16, _>("extra_u2").unwrap_or(0).clamp(0, 255) as u8,
+            delegated: r.try_get::<bool, _>("delegated").unwrap_or(false),
         });
     }
     let positions = sqlx::query(
@@ -1287,10 +1296,10 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
             market, slot, family, status, n, beta, p0, theta, exposure,
             trading_revenue, premium_payable, c_m, c_r, fee_bps, fee_timing, traders, tickets,
             stake_usdc, board_phase, rho_raw, settle_cell, liability, c_p_board,
-            c_p_alloc, close_ts, risk_lock_ts, report_window_secs, extra_a, extra_b, extra_u2
+            c_p_alloc, close_ts, risk_lock_ts, report_window_secs, extra_a, extra_b, extra_u2, delegated
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
         )
         ON CONFLICT (market) DO UPDATE SET
             slot = EXCLUDED.slot,
@@ -1322,6 +1331,7 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
             extra_a = EXCLUDED.extra_a,
             extra_b = EXCLUDED.extra_b,
             extra_u2 = EXCLUDED.extra_u2,
+            delegated = EXCLUDED.delegated,
             updated_at = now()
         "#,
     )
@@ -1355,6 +1365,7 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
     .bind(row.extra_a.to_string())
     .bind(row.extra_b.to_string())
     .bind(i16::from(row.extra_u2))
+    .bind(row.delegated)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -1564,6 +1575,7 @@ mod tests {
             extra_a: 0,
             extra_b: 0,
             extra_u2: 0,
+            delegated: false,
         }
     }
 

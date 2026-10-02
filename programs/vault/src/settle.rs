@@ -115,7 +115,16 @@ pub fn credit_trade_inner(board: &mut Board, user: &mut crate::UserVault, cost: 
     Ok(())
 }
 
-const GRID_HDR: usize = 8 + 32 + 2 + 1 + 16;
+/// Return LMSR sell proceeds from the pot to unused margin. Fees stay accrued.
+pub fn refund_trade_inner(board: &mut Board, user: &mut crate::UserVault, cost: u64) -> Result<()> {
+    require!(cost > 0, VaultError::ZeroAmount);
+    require!(board.trading_revenue >= cost, VaultError::InsufficientAvailable);
+    board.trading_revenue = board.trading_revenue.checked_sub(cost).ok_or(VaultError::Overflow)?;
+    user.available = crate::accounting::credit(user.available, cost)?;
+    Ok(())
+}
+
+const GRID_HDR: usize = 8 + 32 + 2 + 2 + 1 + 16;
 
 fn grid_i128(data: &[u8], off: usize) -> Result<i128> {
     require!(data.len() >= off + 16, VaultError::BadSettle);
@@ -125,8 +134,8 @@ fn grid_i128(data: &[u8], off: usize) -> Result<i128> {
     Ok(i128::from_le_bytes(bytes))
 }
 
-/// Header only: market + n. Does not copy the four n-vecs (n=1024 is 64KiB).
-pub fn parse_grid_meta(data: &[u8]) -> Result<(Pubkey, u16)> {
+/// Header only: market + local n + start. Does not copy the four n-vecs.
+pub fn parse_grid_meta(data: &[u8]) -> Result<(Pubkey, u16, u16)> {
     require!(data.len() >= GRID_HDR + 4, VaultError::BadSettle);
     let market_bytes: [u8; 32] = data[8..40]
         .try_into()
@@ -134,15 +143,23 @@ pub fn parse_grid_meta(data: &[u8]) -> Result<(Pubkey, u16)> {
     let n_bytes: [u8; 2] = data[40..42]
         .try_into()
         .map_err(|_| error!(VaultError::BadSettle))?;
-    Ok((Pubkey::from(market_bytes), u16::from_le_bytes(n_bytes)))
+    let start_bytes: [u8; 2] = data[42..44]
+        .try_into()
+        .map_err(|_| error!(VaultError::BadSettle))?;
+    Ok((
+        Pubkey::from(market_bytes),
+        u16::from_le_bytes(n_bytes),
+        u16::from_le_bytes(start_bytes),
+    ))
 }
 
-/// Sealed `exposure[cell]` without deserializing the rest of the grid.
+/// Sealed `exposure[cell]` on the shard that contains `cell` (`cell` is global).
 pub fn parse_grid_exposure(data: &[u8], cell: usize) -> Result<i128> {
-    let (_, n) = parse_grid_meta(data)?;
+    let (_, n, start) = parse_grid_meta(data)?;
     let nu = n as usize;
-    require!(cell < nu, VaultError::BadOutcome);
-    require!(data.len() >= 75 + 64 * nu, VaultError::BadSettle);
+    require!(cell >= start as usize && cell < start as usize + nu, VaultError::BadOutcome);
+    let cell = cell - start as usize;
+    require!(data.len() >= 77 + 64 * nu, VaultError::BadSettle);
     let p0_len = u32::from_le_bytes(
         data[GRID_HDR..GRID_HDR + 4]
             .try_into()
@@ -179,13 +196,13 @@ pub fn compute_begin(
     require!(record.phase == PHASE_FINALIZED, VaultError::NotFinalized);
     require!(!record.refunds_due, VaultError::RefundsDue);
     require!(record.market == board.market, VaultError::WrongBoard);
-    let (grid_market, grid_n) = parse_grid_meta(grid_data)?;
+    let (grid_market, _, _) = parse_grid_meta(grid_data)?;
     require!(grid_market == board.market, VaultError::WrongBoard);
 
     let o = &record.final_outcome;
     let cell = outcome_cell(
         record.family,
-        grid_n as usize,
+        market.n as usize,
         record.k_max,
         market.extra.a,
         market.extra.b,
@@ -194,7 +211,7 @@ pub fn compute_begin(
         o.b,
     )
     .ok_or(VaultError::BadOutcome)?;
-    require!(cell < grid_n as usize, VaultError::BadOutcome);
+    require!(cell < market.n as usize, VaultError::BadOutcome);
     let exposure_cell = parse_grid_exposure(grid_data, cell)?;
 
     let liability = usdc(Q64::from_raw(exposure_cell));
@@ -621,6 +638,9 @@ mod tests {
             cost_paid: 20,
             claimed: false,
             bump: 0,
+            vault_owed_cost: 0,
+            vault_owed_fee: 0,
+            vault_owed_credit: 0,
         };
         let mut u = user(0, 0);
         let net = pay_winner_clean(&mut b, &pos, 100, &mut u).unwrap();
@@ -643,6 +663,9 @@ mod tests {
             cost_paid: 10,
             claimed: false,
             bump: 0,
+            vault_owed_cost: 0,
+            vault_owed_fee: 0,
+            vault_owed_credit: 0,
         };
         let mut pb = pa.clone();
         pb.q = Q64::from_int(40).raw();
@@ -671,6 +694,16 @@ mod tests {
     }
 
     #[test]
+    fn sell_returns_cost_from_pot() {
+        let mut b = board();
+        let mut u = user(10, 0);
+        refund_trade_inner(&mut b, &mut u, 12).unwrap();
+        assert_eq!(b.trading_revenue, 18);
+        assert_eq!(u.available, 22);
+        assert!(refund_trade_inner(&mut b, &mut u, 19).is_err());
+    }
+
+    #[test]
     fn void_refunds_cost_not_rho() {
         let mut b = board();
         b.phase = BOARD_REFUND;
@@ -682,6 +715,9 @@ mod tests {
             cost_paid: 12,
             claimed: false,
             bump: 0,
+            vault_owed_cost: 0,
+            vault_owed_fee: 0,
+            vault_owed_credit: 0,
         };
         let mut u = user(0, 0);
         assert_eq!(refund_position_inner(&mut b, &pos, &mut u).unwrap(), 12);

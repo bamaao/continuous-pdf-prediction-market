@@ -11,3 +11,4 @@ export * from "./siws";
 export * from "./skellam";
 export * from "./tickets";
 export * from "./vault";
+export * from "./wallet-shell";

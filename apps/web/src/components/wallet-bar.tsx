@@ -1,11 +1,13 @@
 "use client";
 
 import { clearSessionMeta, compose, deleteSessionSecret, loadSessionMeta, saveSessionMeta, saveSessionSecret, SessionMeta } from "@cpm/sdk";
+import { needsInWalletBrowse, phantomBrowseUrl, readInjectedWallet, solflareBrowseUrl } from "@cpm/sdk";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { Keypair } from "@solana/web3.js";
 import { useCallback, useEffect, useState } from "react";
 import { bytesToB64 } from "@/lib/b64";
+import { IN_WALLET_BROWSE_HINT, OPEN_IN_PHANTOM, OPEN_IN_SOLFLARE } from "@/lib/copy";
 import { MARKET_API } from "@/lib/env";
 import { sendSigned } from "@/lib/tx";
 
@@ -15,6 +17,24 @@ export function WalletBar() {
   const [siws, setSiws] = useState<"off" | "on" | "bad">("off");
   const [busy, setBusy] = useState("");
   const [meta, setMeta] = useState<SessionMeta | null>(null);
+  const [browse, setBrowse] = useState<{ phantom: string; solflare: string } | null>(null);
+
+  useEffect(() => {
+    const injected = readInjectedWallet(window);
+    if (
+      !needsInWalletBrowse({
+        userAgent: navigator.userAgent,
+        injected,
+      })
+    ) {
+      setBrowse(null);
+      return;
+    }
+    setBrowse({
+      phantom: phantomBrowseUrl(window.location.href, window.location.origin),
+      solflare: solflareBrowseUrl(window.location.href),
+    });
+  }, []);
 
   const refreshMe = useCallback(async () => {
     const r = await fetch("/api/me");
@@ -120,7 +140,19 @@ export function WalletBar() {
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <WalletMultiButton />
+      {browse ? (
+        <>
+          <p className="max-w-[18rem] font-mono text-[10px] leading-snug text-paper/55">{IN_WALLET_BROWSE_HINT}</p>
+          <a className="border border-amber px-2 py-1 font-mono text-[11px] uppercase text-amber" href={browse.phantom}>
+            {OPEN_IN_PHANTOM}
+          </a>
+          <a className="border border-rule px-2 py-1 font-mono text-[11px] uppercase" href={browse.solflare}>
+            {OPEN_IN_SOLFLARE}
+          </a>
+        </>
+      ) : (
+        <WalletMultiButton />
+      )}
       {connected && siws !== "on" && (
         <button className="border border-amber px-2 py-1 font-mono text-[11px] uppercase" onClick={signIn}>
           Sign in

@@ -95,6 +95,7 @@ pub struct Market {
 pub struct Grid {
     pub market: Pubkey,
     pub n: u16,
+    pub start: u16,
     pub bump: u8,
     pub z: i128,
     pub p0: Vec<i128>,
@@ -112,6 +113,9 @@ pub struct Position {
     pub cost_paid: u64,
     pub claimed: bool,
     pub bump: u8,
+    pub vault_owed_cost: u64,
+    pub vault_owed_fee: u64,
+    pub vault_owed_credit: u64,
 }
 
 #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, Default)]

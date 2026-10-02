@@ -203,7 +203,17 @@ def run_chain() -> None:
         fail("l1-buy-after-delegate", "expected Delegated")
     except Exception as e:
         text = str(e)
-        if "Delegated" in text or "6023" in text:
+        if any(
+            s in text
+            for s in (
+                "Delegated",
+                "6023",
+                "0xbbf",
+                "DELeGGvX",
+                "owned by a different program",
+                "AccountOwnedByWrongProgram",
+            )
+        ):
             ok("l1-buy-after-delegate", "Delegated")
         else:
             fail("l1-buy-after-delegate", text[-400:])
@@ -217,8 +227,13 @@ def run_chain() -> None:
     shutil.rmtree(replica, ignore_errors=True)
     shutil.rmtree(obj, ignore_errors=True)
     root = journal_append(replica, obj, market, owner, 1, "fill-1", bytes(32), 1)
+    er = flow.Client(os.environ.get("ER_URL", "http://127.0.0.1:7799"), commitment=flow.Confirmed)
+
+    def send_er(op: str, **kw) -> str:
+        return flow.send_ixs(er, kp, [flow.compose(op, **kw)])
+
     try:
-        cases.send(kp, "commit_book", owner=owner, market=market, evidence_hex=hex32(root))
+        send_er("commit_book", owner=owner, market=market, evidence_hex=hex32(root))
         ok("commit_book", hex32(root)[:16])
     except Exception as e:
         fail("commit_book", str(e))
@@ -240,8 +255,8 @@ def run_chain() -> None:
     else:
         ok("journal-object-survives", hex32(replayed)[:16])
     try:
-        cases.send(kp, "halt", owner=owner, market=market)
-        cases.send(kp, "undelegate_book", owner=owner, market=market)
+        send_er("halt", owner=owner, market=market)
+        send_er("undelegate_book", owner=owner, market=market)
         ok("undelegate_after_halt", "cleared")
     except Exception as e:
         fail("undelegate_after_halt", str(e))

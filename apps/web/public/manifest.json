@@ -5,5 +5,9 @@
   "display": "standalone",
   "background_color": "#12110e",
   "theme_color": "#12110e",
-  "description": "Continuous PDF prediction market. Fills are public on Solana."
+  "description": "Continuous PDF prediction market. Fills are public on Solana.",
+  "icons": [
+    { "src": "/icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
 }

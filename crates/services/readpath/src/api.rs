@@ -36,7 +36,15 @@ pub struct AppState {
 
 #[derive(Deserialize)]
 pub struct QuoteQ {
+    #[serde(default)]
     pub mask: String,
+    /// Skellam / football typed line. When set, overrides `mask`.
+    #[serde(default)]
+    pub kind: Option<u8>,
+    #[serde(default)]
+    pub a: i16,
+    #[serde(default)]
+    pub b: i16,
     #[serde(default = "one")]
     pub shares: i64,
 }
@@ -381,6 +389,21 @@ fn remember_compose_fill(st: &AppState, body: &ComposeBody) -> Option<Fill> {
 }
 
 fn hydrate_payout_fill(st: &AppState, body: &mut ComposeBody) {
+    if matches!(body.op.as_str(), "begin_settle" | "payout" | "payout_skellam") {
+        if let Some(market) = body.market.as_deref() {
+            if let Some(m) = st.store.get(market) {
+                if body.n.is_none() {
+                    body.n = Some(m.n);
+                }
+                if body.family.is_none() {
+                    body.family = Some(m.family);
+                }
+                if body.ix.is_none() && (m.board_phase >= 1 || m.settle_cell > 0) {
+                    body.ix = Some((m.settle_cell / 16) as u8);
+                }
+            }
+        }
+    }
     if body.op != "payout" && body.op != "payout_skellam" {
         return;
     }
@@ -814,8 +837,21 @@ async fn quote_one(
     Query(q): Query<QuoteQ>,
 ) -> Result<Json<QuoteJson>, StatusCode> {
     let row = st.store.get(&market).ok_or(StatusCode::NOT_FOUND)?;
-    let mask = parse_mask_hex(&q.mask)?;
-    let in_set = decode_mask(&mask, row.n as usize).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let in_set = if let Some(kind) = q.kind {
+        let k_max = if row.extra_u2 == 0 { 10 } else { row.extra_u2 as u32 };
+        let mut masks = math::football::skellam_masks(kind, q.a, q.b, k_max)
+            .ok_or(StatusCode::BAD_REQUEST)?;
+        if masks.len() != 1 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        masks.remove(0)
+    } else {
+        if q.mask.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let mask = parse_mask_hex(&q.mask)?;
+        decode_mask(&mask, row.n as usize).map_err(|_| StatusCode::BAD_REQUEST)?
+    };
     let book = row.book();
     let shares = if q.shares > 0 { q.shares } else { 1 };
     Ok(Json(view_json_ex(
@@ -1451,10 +1487,9 @@ fn catalog_listed(st: &AppState, market: &str) -> bool {
     if let Some(app) = st.store.application_by_market(market) {
         return app.status == APP_APPROVED && !app.market.trim().is_empty();
     }
-    if st.store.applications().is_empty() {
-        return true;
-    }
-    st.store.listing_of(market).is_some()
+    // On-chain / indexer boards with no application stay visible (FR-UI-07).
+    // PENDING_REVIEW / REJECTED never have a live `market` key here.
+    st.store.get(market).is_some() || st.store.listing_of(market).is_some()
 }
 
 fn listing_write_allowed(st: &AppState, market: &str, topic: &str, tag: &str) -> bool {
@@ -2310,6 +2345,13 @@ async fn committee_one(State(st): State<AppState>) -> Result<impl IntoResponse, 
 async fn compose_tracked(State(st): State<AppState>, Json(mut body): Json<ComposeBody>) -> Result<impl IntoResponse, StatusCode> {
     require_approved_create(&st, &body)?;
     require_trading_open(&st, &body)?;
+    if is_prediction_fill_op(&body.op) {
+        if let Some(market) = body.market.as_deref() {
+            if st.store.get(market).map(|r| r.delegated).unwrap_or(false) {
+                body.er = Some(true);
+            }
+        }
+    }
     hydrate_payout_fill(&st, &mut body);
     let out = compose_out(&body)?;
     if let Some(fill) = remember_compose_fill(&st, &body) {

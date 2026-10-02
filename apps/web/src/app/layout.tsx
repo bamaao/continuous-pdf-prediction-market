@@ -1,13 +1,26 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { ListingHydrate } from "@/components/listing-hydrate";
 import { Providers } from "@/components/providers";
 import { Shell } from "@/components/shell";
 import "./globals.css";
 
+export const viewport: Viewport = {
+  themeColor: "#12110e",
+};
+
 export const metadata: Metadata = {
   title: "Continuous — PDF prediction market",
   description: "Continuous PDF prediction market. Fills are public on Solana.",
   manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    title: "Continuous",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    icon: "/icon-512.png",
+    apple: "/icon-180.png",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

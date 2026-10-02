@@ -272,59 +272,13 @@ async fn delegate_rejects_l1_buy_commit_leaves_vault() {
     .unwrap();
 
     let set_mask = vec![0b0000_0001];
-    let set_h = market::ids::set_hash(&set_mask);
-    let (pos, _) = Pubkey::find_program_address(
-        &[
-            market::state::POS_SEED,
-            market_pda.as_ref(),
-            alice.pubkey().as_ref(),
-            set_h.as_ref(),
-        ],
-        &market::ID,
-    );
     let (uv, _) = Pubkey::find_program_address(&[vault::USER_SEED, alice.pubkey().as_ref()], &vault::ID);
-    let nonce_acc = Pubkey::find_program_address(
-        &[
-            market::session::NONCE_SEED,
-            alice.pubkey().as_ref(),
-            market_pda.as_ref(),
-        ],
-        &market::ID,
-    )
-    .0;
-    let buy = |nonce: u64| Instruction {
-        program_id: market::ID,
-        accounts: market::accounts::Trade {
-            trader: alice.pubkey(),
-            owner: alice.pubkey(),
-            session: None,
-            market: market_pda,
-            grid: grid_pda,
-            position: pos,
-            board,
-            user_vault: uv,
-            nonce_acc,
-            vault_program: vault::ID,
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-        data: market::instruction::BuySet {
-            set_mask: set_mask.clone(),
-            q_raw: q(1),
-            nonce,
-        }
-        .data(),
-    };
+    let buy = |nonce: u64| client::buy_set(alice.pubkey(), market_pda, set_mask.clone(), q(1), nonce);
     send(&mut ctx, vec![buy(1)], &[&alice]).await.unwrap();
 
     send(
         &mut ctx,
-        vec![halt_ix(
-            creator.pubkey(),
-            market_pda,
-            committee,
-            market::instruction::DelegateBook {}.data(),
-        )],
+        vec![client::delegate_book(creator.pubkey(), market_pda)],
         &[&creator],
     )
     .await
@@ -333,7 +287,9 @@ async fn delegate_rejects_l1_buy_commit_leaves_vault() {
     let err = send(&mut ctx, vec![buy(2)], &[&alice]).await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("Custom(6023)") || msg.contains("Delegated"),
+        msg.contains("Custom(6023)")
+            || msg.contains("Custom(6024)")
+            || msg.contains("Delegated"),
         "want Delegated, got {msg}"
     );
 
@@ -342,12 +298,7 @@ async fn delegate_rejects_l1_buy_commit_leaves_vault() {
     let root = [9u8; 32];
     send(
         &mut ctx,
-        vec![halt_ix(
-            creator.pubkey(),
-            market_pda,
-            committee,
-            market::instruction::CommitBook { trades_root: root }.data(),
-        )],
+        vec![client::commit_book(creator.pubkey(), market_pda, root)],
         &[&creator],
     )
     .await
@@ -371,12 +322,7 @@ async fn delegate_rejects_l1_buy_commit_leaves_vault() {
     .unwrap();
     send(
         &mut ctx,
-        vec![halt_ix(
-            creator.pubkey(),
-            market_pda,
-            committee,
-            market::instruction::UndelegateBook {}.data(),
-        )],
+        vec![client::undelegate_book(creator.pubkey(), market_pda)],
         &[&creator],
     )
     .await

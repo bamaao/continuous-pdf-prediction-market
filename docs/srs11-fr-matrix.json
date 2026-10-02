@@ -1,0 +1,1195 @@
+{
+  "version": 1,
+  "count": 134,
+  "entries": [
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-02"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/football.rs",
+        "scripts/phase6-football-cases.py"
+      ],
+      "id": "FR-MKT-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/live-magicblock-e2e.py",
+        "programs/market/src/lib.rs"
+      ],
+      "id": "FR-MKT-06"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-07"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-08"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-09"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-10"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-11"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-12"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-13"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-14"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-15"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-16"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-17"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-18"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-19"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-20"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-21"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/prior.rs",
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase6-family-cases.py"
+      ],
+      "id": "FR-MKT-22"
+    },
+    {
+      "kind": "manual",
+      "evidence": [
+        "docs/srs11-manual.md",
+        "scripts/wallet-shell-playwright.py"
+      ],
+      "id": "FR-WAL-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/market/src/session.rs",
+        "programs/vault/src/lib.rs",
+        "crates/services/gateway/src/lib.rs",
+        "packages/sdk/src/session-store.ts"
+      ],
+      "id": "FR-WAL-02"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/vault/src/lib.rs",
+        "packages/sdk/src/vault.ts",
+        "scripts/srs11-local.py"
+      ],
+      "id": "FR-WAL-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/market/src/session.rs",
+        "programs/vault/src/lib.rs",
+        "crates/services/gateway/src/lib.rs",
+        "packages/sdk/src/session-store.ts"
+      ],
+      "id": "FR-WAL-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/market/src/session.rs",
+        "programs/vault/src/lib.rs",
+        "crates/services/gateway/src/lib.rs",
+        "packages/sdk/src/session-store.ts"
+      ],
+      "id": "FR-WAL-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/market/src/session.rs",
+        "programs/vault/src/lib.rs",
+        "crates/services/gateway/src/lib.rs",
+        "packages/sdk/src/session-store.ts"
+      ],
+      "id": "FR-WAL-06"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/market/src/session.rs",
+        "programs/vault/src/lib.rs",
+        "crates/services/gateway/src/lib.rs",
+        "packages/sdk/src/session-store.ts"
+      ],
+      "id": "FR-WAL-07"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "apps/web/src/lib/localnet-wallet.ts",
+        "packages/sdk/src/session-store.ts",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-WAL-08"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/services/gateway/src/lib.rs",
+        "crates/services/gateway/src/store.rs"
+      ],
+      "id": "FR-WAL-09"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-02"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/math/src/settle.rs"
+      ],
+      "id": "FR-TRD-13"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-06"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-07"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-08"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/services/gateway/src/lib.rs",
+        "scripts/srs11-local.py"
+      ],
+      "id": "FR-TRD-09"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/lmsr.rs",
+        "crates/services/quote/src/lib.rs",
+        "scripts/live-magicblock-e2e.py",
+        "crates/services/gateway/src/lib.rs"
+      ],
+      "id": "FR-TRD-10"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/football.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-TRD-11"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/outcome.rs",
+        "docs/product-specification.md"
+      ],
+      "id": "FR-TRD-12"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/risk/src/matching.rs",
+        "crates/math/src/auction.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RSK-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/risk/src/matching.rs",
+        "crates/math/src/auction.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RSK-02"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/risk/src/matching.rs",
+        "crates/math/src/auction.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RSK-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/risk/src/matching.rs",
+        "crates/math/src/auction.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RSK-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/risk/src/matching.rs",
+        "crates/math/src/auction.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RSK-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/risk/src/matching.rs",
+        "crates/math/src/auction.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RSK-06"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/risk/src/matching.rs",
+        "crates/math/src/auction.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RSK-07"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/risk/src/matching.rs",
+        "crates/math/src/auction.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RSK-08"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/live-magicblock-e2e.py",
+        "scripts/phase8-keeper.py"
+      ],
+      "id": "FR-HAL-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/resolution/src/machine.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RES-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/resolution/src/machine.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RES-02"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/resolution/src/machine.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RES-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/resolution/src/machine.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RES-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/resolution/src/machine.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-RES-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-02"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-06"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-07"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-08"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-09"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-10"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
+      ],
+      "id": "FR-SET-11"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/srs11-dur-drill.py",
+        "crates/journal/src/lib.rs"
+      ],
+      "id": "FR-DUR-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/journal/src/lib.rs",
+        "scripts/srs11-dur-drill.py",
+        "scripts/phase7-journal.py"
+      ],
+      "id": "FR-DUR-02"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/journal/src/lib.rs",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-DUR-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/services/readpath/src/lib.rs",
+        "docs/srs11-manual.md",
+        "scripts/srs11-dur-drill.py"
+      ],
+      "id": "FR-DUR-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/journal/src/lib.rs",
+        "scripts/srs11-dur-drill.py",
+        "scripts/phase7-journal.py"
+      ],
+      "id": "FR-DUR-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/journal/src/lib.rs",
+        "scripts/srs11-dur-drill.py",
+        "scripts/phase7-journal.py"
+      ],
+      "id": "FR-DUR-06"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "apps/web/src"
+      ],
+      "id": "FR-UI-01"
+    },
+    {
+      "kind": "manual",
+      "evidence": [
+        "docs/srs11-manual.md",
+        "apps/android-twa/twa-manifest.json"
+      ],
+      "id": "FR-UI-02"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-07"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-08"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-09"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-10"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-11"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-12"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-13"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-14"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-15"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-16"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-17"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-18"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-19"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-20"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-21"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-22"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-23"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-24"
+    },
+    {
+      "kind": "removed",
+      "evidence": [
+        "docs/software-requirements-specification.md"
+      ],
+      "id": "FR-UI-25"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-26"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-27"
+    },
+    {
+      "kind": "manual",
+      "evidence": [
+        "docs/srs11-manual.md",
+        "crates/cli/src/main.rs"
+      ],
+      "id": "FR-UI-28"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-29"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-30"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-31"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-32"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-33"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-34"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-35"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-36"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-37"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-38"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-39"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-40"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-41"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-42"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-43"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-44"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-45"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "scripts/phase6-playwright.py",
+        "scripts/phase6-flow-playwright.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "FR-UI-46"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/cli/src/main.rs",
+        "scripts/live-magicblock-e2e.py"
+      ],
+      "id": "FR-CLI-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/services/readpath/src/indexer.rs",
+        "crates/services/readpath/src/bin/indexer.rs"
+      ],
+      "id": "FR-IDX-01"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "apps/web/package.json",
+        "scripts/srs11-local.py"
+      ],
+      "id": "CR-01"
+    },
+    {
+      "kind": "manual",
+      "evidence": [
+        "docs/srs11-manual.md",
+        "scripts/srs11-local.py"
+      ],
+      "id": "CR-02"
+    },
+    {
+      "kind": "manual",
+      "evidence": [
+        "docs/srs11-manual.md"
+      ],
+      "id": "CR-03"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/market/Cargo.toml",
+        "programs/market/src/lib.rs"
+      ],
+      "id": "CR-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/vault/src/lib.rs",
+        "programs/resolution/src/lib.rs"
+      ],
+      "id": "CR-05"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "apps/web/package.json",
+        "scripts/srs11-local.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "CR-06"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "apps/web/package.json",
+        "scripts/srs11-local.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "CR-07"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/vault/src/mint.rs",
+        "scripts/srs11-local.py"
+      ],
+      "id": "CR-08"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/vault/src/lib.rs",
+        "docs/srs11-manual.md"
+      ],
+      "id": "CR-09"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "apps/web/package.json",
+        "scripts/srs11-local.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "CR-10"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "apps/web/package.json",
+        "scripts/srs11-local.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "CR-11"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "apps/web/package.json",
+        "scripts/srs11-local.py",
+        "docs/srs11-manual.md"
+      ],
+      "id": "CR-12"
+    }
+  ]
+}

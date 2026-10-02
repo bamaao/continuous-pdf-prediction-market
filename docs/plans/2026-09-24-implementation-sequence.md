@@ -21,7 +21,7 @@
 | Trading Gateway + Session | Hot writes |
 | Next.js (one site) | Last consumer of stable IDL + APIs |
 | MagicBlock Delegate / Commit / journal | After instructions work on local validator |
-| Keeper, Notifier, official TWA | After the loop is real |
+| Keeper, in-app inbox, official TWA | After the loop is real |
 
 | Do not start now | Why |
 | --- | --- |
@@ -144,10 +144,10 @@ Local check: `scripts/phase6-playwright.py` (UI + SIWS copy + desk stats + pre-b
 
 ---
 
-## Phase 8 — Keeper, notify, TWA
+## Phase 8 — Keeper, inbox, TWA
 
 - Keeper: close, Commit, open report window, idempotent
-- Notifier: email / Web Push (`market_id` only)
+- In-app inbox: keeper events `{ts,kind,market}` via `GET /v1/notify` (FR-UI-21)
 - Official Android TWA wrapper (no new business code)
 - Staging + production config isolation
 

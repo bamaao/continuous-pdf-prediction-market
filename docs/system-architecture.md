@@ -81,8 +81,7 @@ No App Store / Play, and no Flutter / RN. Phones use **the same Next.js stack**:
 - Safari / Chrome, or Add to Home Screen **PWA**
 - **In-wallet browser** (Phantom / Solflare) opening this site — the primary mobile path
 - Android home-screen icon: official-site **TWA APK**, not via Play
-- Push: Web Push + email / in-app; no store APNs package
-- In-play boards: WebSocket in the foreground; Web Push to pull the user back when backgrounded
+- In-play boards: WebSocket in the foreground; chrome Inbox for close / commit / settle alerts
 
 There is only one BFF / gateway contract. Distribution is in `technical-architecture.md` sections 2.2 / 2.9.
 
@@ -119,8 +118,7 @@ A standalone Web console (can also be embedded in the main site): markets awaiti
 | **Risk Auction API** | Layers, order book, quote pre-check; fill instructions still go on-chain | Medium |
 | **Resolution API** | Reporting window, evidence upload, challenge state; assemble on-chain instructions | No |
 | **Indexer** | Subscribe to ER + L1 logs; write Postgres | Yes (consume) |
-| **Notifier** | Email / in-app / Web Push | No |
-| **Keeper** | Time-based halt, undelegate, open the reporting window, missed-window alerts | No, but must be highly available |
+| **Keeper** | Time-based halt, undelegate, open the reporting window; writes inbox events | No, but must be highly available |
 | **Object Store gateway** | Committee evidence, event graphics, rules PDFs | No |
 
 On-chain programs (not traditional microservices, but part of the system):
@@ -440,8 +438,8 @@ Funds safety answers “can money be moved.” Data security answers “who can 
 | --- | --- | --- | --- |
 | Public ledger | Market params, $f$ / $P$, fills, $E$, $x^*$, $\rho$, payouts | **Must be public** | Recomputable; do not encrypt the book |
 | Secret | Program upgrade keys, Keeper / committee hot keys, KMS, RPC tokens, DB passwords | Not public | Least privilege, hardware or cloud KMS, audit |
-| Restricted | User email / push tokens, IP, devices, KYC (if any), original committee evidence | Not on-chain | Encrypted at rest, access audit, time-limited deletion |
-| Internal | Logs, traces, metric tags | Not public | Redact: wallets may remain; IP/email do not enter logs by default |
+| Restricted | IP, devices, KYC (if any), original committee evidence | Not on-chain | Encrypted at rest, access audit, time-limited deletion |
+| Internal | Logs, traces, metric tags | Not public | Redact: wallets may remain; IP does not enter logs by default |
 
 There is no “private position” on-chain. A user’s order is public. Product copy must say so; do not promise on-chain anonymity.
 
@@ -478,10 +476,9 @@ PG uses separate roles: Indexer write-only, API read-only on necessary tables; n
 
 ### 12.5 Logs, privacy, compliance
 
-- Default log fields: `market_id`, `tx_sig`, truncated `pubkey`, error code; **do not log** full email, phone, ID documents, or plaintext IP (when risk control needs it: hash + short TTL)  
-- Binding table of push tokens, email, and wallets: encrypted columns, Notifier-read only  
+- Default log fields: `market_id`, `tx_sig`, truncated `pubkey`, error code; **do not log** phone, government id, or plaintext IP (when risk control needs it: hash + short TTL)  
 - If KYC is done: a separate subsystem, isolated from the trading DB; ID numbers never written on-chain  
-- Retention: finance and settlement related ≥ regulatory requirement; users may delete push bindings (after deletion, only the wallet-dimension public ledger remains)  
+- Retention: finance and settlement related ≥ regulatory requirement  
 
 ### 12.6 Injection, privilege escalation, backup leaks
 
@@ -489,12 +486,12 @@ PG uses separate roles: Indexer write-only, API read-only on necessary tables; n
 - Object-store files are fetched by hash only, not by user-controlled path traversal  
 - Committee uploads: type allowlist, size cap, antivirus / content scan before entering the bucket  
 - PG backups and log exports are treated as secret; recovery drills use redacted copies  
-- If the index DB is exfiltrated: the attacker gets fills that were already crawlable on-chain + possible emails. Therefore emails must be encrypted, and must be re-encryptable after key rotation  
+- If the index DB is exfiltrated: the attacker gets fills that were already crawlable on-chain  
 
 ### 12.7 Incidents
 
 Key leak: rotate immediately, pause upgrades, inspect Vault instruction logs.  
-PG leak: disclose scope (which data was already public on-chain), force users to rebind push, rotate DB secrets.  
+PG leak: disclose scope (which data was already public on-chain), rotate DB secrets.  
 Evidence-bucket leak: notify committee members per market, rotate bucket keys; on-chain hashes still verify authenticity.  
 
 Data security does not replace section 9 funds safety: even if the DB is stolen, it must not enable one extra USDC transfer.

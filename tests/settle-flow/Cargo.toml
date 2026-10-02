@@ -9,6 +9,7 @@ publish = false
 [dev-dependencies]
 anchor-lang = "0.32.1"
 anchor-spl = "0.32.1"
+client = { path = "../../crates/client" }
 market = { path = "../../programs/market", default-features = false, features = ["no-entrypoint"] }
 math = { path = "../../crates/math" }
 resolution = { path = "../../programs/resolution", default-features = false, features = ["no-entrypoint"] }

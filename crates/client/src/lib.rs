@@ -1,8 +1,8 @@
 //! Transaction composers. Instruction data is always `anchor_lang::InstructionData`
 //! from the on-chain crates — no second discriminator table.
 
-use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
+use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::system_program;
 
@@ -49,7 +49,193 @@ pub fn market_pda(id_hash: &[u8; 32]) -> Pubkey {
 }
 
 pub fn grid_pda(market: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[market::state::GRID_SEED, market.as_ref()], &market::ID).0
+    grid_shard_pda(market, 0)
+}
+
+pub fn grid_shard_pda(market: &Pubkey, ix: u8) -> Pubkey {
+    if ix == 0 {
+        Pubkey::find_program_address(&[market::state::GRID_SEED, market.as_ref()], &market::ID).0
+    } else {
+        Pubkey::find_program_address(&[market::state::GRID_SEED, market.as_ref(), &[ix]], &market::ID)
+            .0
+    }
+}
+
+pub fn grid_shard_ix(n: u16, cell: usize) -> u8 {
+    let _ = n;
+    (cell / market::state::Grid::SHARD_CELLS as usize) as u8
+}
+
+pub fn shard_keys(market: &Pubkey, n: u16) -> Vec<Pubkey> {
+    (0..market::state::Grid::shard_count(n))
+        .map(|i| grid_shard_pda(market, i as u8))
+        .collect()
+}
+
+pub fn concat_grid_shards(parts: &[market::state::Grid]) -> (Vec<i128>, Vec<i128>, Vec<i128>, i128) {
+    let mut p0 = Vec::new();
+    let mut theta = Vec::new();
+    let mut exposure = Vec::new();
+    let mut z = 0i128;
+    for (i, g) in parts.iter().enumerate() {
+        if i == 0 {
+            z = g.z;
+        }
+        p0.extend_from_slice(&g.p0);
+        theta.extend_from_slice(&g.theta);
+        exposure.extend_from_slice(&g.exposure);
+    }
+    (p0, theta, exposure, z)
+}
+
+pub fn winning_shard(
+    market: Pubkey,
+    n: u16,
+    family: u8,
+    k_max: u8,
+    extra_a: i128,
+    extra_b: i128,
+    kind: u8,
+    a: i128,
+    b: i128,
+) -> Pubkey {
+    let cell = math::outcome::outcome_cell(
+        family,
+        n as usize,
+        k_max,
+        extra_a,
+        extra_b,
+        kind,
+        a,
+        b,
+    )
+    .unwrap_or(0);
+    grid_shard_pda(&market, grid_shard_ix(n, cell))
+}
+
+pub fn create_grid_shard(creator: Pubkey, market: Pubkey, ix: u8) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::CreateGridShard {
+            creator,
+            market,
+            shard: grid_shard_pda(&market, ix),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::CreateGridShard { ix }.data(),
+    }
+}
+
+pub fn write_grid_shard(creator: Pubkey, market: Pubkey, ix: u8) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::WriteGridShard {
+            creator,
+            market,
+            shard: grid_shard_pda(&market, ix),
+        }
+        .to_account_metas(None),
+        data: market::instruction::WriteGridShard { ix }.data(),
+    }
+}
+
+fn push_extra_shards(accounts: &mut Vec<AccountMeta>, market: &Pubkey, n: u16) {
+    let count = market::state::Grid::shard_count(n);
+    for ix in 1..count {
+        accounts.push(AccountMeta::new(grid_shard_pda(market, ix as u8), false));
+    }
+}
+
+fn push_mask_shards(accounts: &mut Vec<AccountMeta>, market: &Pubkey, n: u16, mask: &[u8]) {
+    for ix in mask_extra_ixs(n, mask) {
+        accounts.push(AccountMeta::new(grid_shard_pda(market, ix), false));
+    }
+}
+
+pub const WIDE_EXTRA_LIMIT: usize = 16;
+pub const WIDE_BATCH: usize = 16;
+
+pub fn mask_extra_ixs(n: u16, mask: &[u8]) -> Vec<u8> {
+    let count = market::state::Grid::shard_count(n);
+    let mut seen = 0u128;
+    let mut out = Vec::new();
+    let cells = (n as usize).min(mask.len() * 8);
+    for cell in 0..cells {
+        if !market::mask::bit(mask, cell) {
+            continue;
+        }
+        let ix = (cell / market::state::Grid::SHARD_CELLS as usize) as u16;
+        if ix == 0 || ix >= count {
+            continue;
+        }
+        let bit = 1u128 << ix;
+        if seen & bit != 0 {
+            continue;
+        }
+        seen |= bit;
+        out.push(ix as u8);
+    }
+    out
+}
+
+pub fn needs_wide_fill(n: u16, mask: &[u8]) -> bool {
+    mask_extra_ixs(n, mask).len() > WIDE_EXTRA_LIMIT
+}
+
+pub fn accum_seal(creator: Pubkey, market: Pubkey, extras: &[u8]) -> Instruction {
+    let mut accounts = grow_grid_accounts(creator, market).to_account_metas(None);
+    for ix in extras {
+        accounts.push(AccountMeta::new(grid_shard_pda(&market, *ix), false));
+    }
+    Instruction {
+        program_id: market::ID,
+        accounts,
+        data: market::instruction::AccumSeal {}.data(),
+    }
+}
+
+pub fn apply_seal(creator: Pubkey, market: Pubkey, extras: &[u8]) -> Instruction {
+    let mut accounts = grow_grid_accounts(creator, market).to_account_metas(None);
+    for ix in extras {
+        accounts.push(AccountMeta::new(grid_shard_pda(&market, *ix), false));
+    }
+    Instruction {
+        program_id: market::ID,
+        accounts,
+        data: market::instruction::ApplySeal {}.data(),
+    }
+}
+
+pub fn grid_dump_pda(market: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[market::state::GRID_DUMP_SEED, market.as_ref()], &market::ID).0
+}
+
+pub fn prepare_grid_dump(payer: Pubkey, market: Pubkey) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::PrepareGridDump {
+            payer,
+            market,
+            dump: grid_dump_pda(&market),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::PrepareGridDump {}.data(),
+    }
+}
+
+pub fn write_grid_dump(payer: Pubkey, market: Pubkey, offset: u32, data: Vec<u8>) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::WriteGridDump {
+            payer,
+            dump: grid_dump_pda(&market),
+            market,
+        }
+        .to_account_metas(None),
+        data: market::instruction::WriteGridDump { offset, data }.data(),
+    }
 }
 
 pub fn position_pda(market: &Pubkey, owner: &Pubkey, set_hash: &[u8; 32]) -> Pubkey {
@@ -348,9 +534,15 @@ pub fn write_grid_mass(creator: Pubkey, market: Pubkey) -> Instruction {
 }
 
 pub fn seal_grid(creator: Pubkey, market: Pubkey) -> Instruction {
+    seal_grid_n(creator, market, 8)
+}
+
+pub fn seal_grid_n(creator: Pubkey, market: Pubkey, n: u16) -> Instruction {
+    let mut accounts = grow_grid_accounts(creator, market).to_account_metas(None);
+    push_extra_shards(&mut accounts, &market, n);
     Instruction {
         program_id: market::ID,
-        accounts: grow_grid_accounts(creator, market).to_account_metas(None),
+        accounts,
         data: market::instruction::SealGrid {}.data(),
     }
 }
@@ -406,7 +598,11 @@ pub fn pack_local_usdc_mint(mint_authority: &Pubkey) -> Vec<u8> {
 }
 
 pub fn buy_set(owner: Pubkey, market: Pubkey, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Instruction {
-    trade_set(owner, owner, None, market, set_mask, q_raw, nonce, true)
+    trade_set(owner, owner, None, market, set_mask, q_raw, nonce, true, false)
+}
+
+pub fn buy_set_er(owner: Pubkey, market: Pubkey, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Instruction {
+    trade_set(owner, owner, None, market, set_mask, q_raw, nonce, true, true)
 }
 
 pub fn buy_set_session(
@@ -417,11 +613,26 @@ pub fn buy_set_session(
     q_raw: i128,
     nonce: u64,
 ) -> Instruction {
-    trade_set(owner, trader, Some(session_pda(&owner)), market, set_mask, q_raw, nonce, true)
+    trade_set(owner, trader, Some(session_pda(&owner)), market, set_mask, q_raw, nonce, true, false)
+}
+
+pub fn buy_set_session_er(
+    owner: Pubkey,
+    trader: Pubkey,
+    market: Pubkey,
+    set_mask: Vec<u8>,
+    q_raw: i128,
+    nonce: u64,
+) -> Instruction {
+    trade_set(owner, trader, Some(session_pda(&owner)), market, set_mask, q_raw, nonce, true, true)
 }
 
 pub fn sell_set(owner: Pubkey, market: Pubkey, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Instruction {
-    trade_set(owner, owner, None, market, set_mask, q_raw, nonce, false)
+    trade_set(owner, owner, None, market, set_mask, q_raw, nonce, false, false)
+}
+
+pub fn sell_set_er(owner: Pubkey, market: Pubkey, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Instruction {
+    trade_set(owner, owner, None, market, set_mask, q_raw, nonce, false, true)
 }
 
 pub fn sell_set_session(
@@ -432,7 +643,26 @@ pub fn sell_set_session(
     q_raw: i128,
     nonce: u64,
 ) -> Instruction {
-    trade_set(owner, trader, Some(session_pda(&owner)), market, set_mask, q_raw, nonce, false)
+    trade_set(owner, trader, Some(session_pda(&owner)), market, set_mask, q_raw, nonce, false, false)
+}
+
+pub fn sell_set_session_er(
+    owner: Pubkey,
+    trader: Pubkey,
+    market: Pubkey,
+    set_mask: Vec<u8>,
+    q_raw: i128,
+    nonce: u64,
+) -> Instruction {
+    trade_set(owner, trader, Some(session_pda(&owner)), market, set_mask, q_raw, nonce, false, true)
+}
+
+fn mark_writable(accounts: &mut [AccountMeta], keys: &[Pubkey]) {
+    for m in accounts.iter_mut() {
+        if keys.iter().any(|k| k == &m.pubkey) {
+            m.is_writable = true;
+        }
+    }
 }
 
 fn trade_set(
@@ -444,22 +674,32 @@ fn trade_set(
     q_raw: i128,
     nonce: u64,
     is_buy: bool,
+    on_er: bool,
 ) -> Instruction {
     let set_h = market::ids::set_hash(&set_mask);
-    let accounts = market::accounts::Trade {
+    let board_pk = board(&market);
+    let user_vault_pk = user_vault(&owner);
+    let mut accounts = market::accounts::Trade {
         trader,
         owner,
         session,
         market,
         grid: grid_pda(&market),
         position: position_pda(&market, &owner, &set_h),
-        board: board(&market),
-        user_vault: user_vault(&owner),
+        board: board_pk,
+        user_vault: user_vault_pk,
         nonce_acc: nonce_pda(&owner, &market),
         vault_program: vault::ID,
         system_program: system_program::ID,
     }
     .to_account_metas(None);
+    let n_hint = (set_mask.len() * 8).min(1024) as u16;
+    push_mask_shards(&mut accounts, &market, n_hint, &set_mask);
+    if on_er {
+        accounts.push(AccountMeta::new_readonly(market::MAGIC_PROGRAM_ID, false));
+    } else {
+        mark_writable(&mut accounts, &[board_pk, user_vault_pk]);
+    }
     Instruction {
         program_id: market::ID,
         accounts,
@@ -471,28 +711,366 @@ fn trade_set(
     }
 }
 
+fn push_listed_shards(accounts: &mut Vec<AccountMeta>, market: &Pubkey, extras: &[u8]) {
+    for ix in extras {
+        accounts.push(AccountMeta::new(grid_shard_pda(market, *ix), false));
+    }
+}
+
+fn trade_wide(
+    owner: Pubkey,
+    trader: Pubkey,
+    session: Option<Pubkey>,
+    market: Pubkey,
+    set_mask: Vec<u8>,
+    q_raw: i128,
+    nonce: u64,
+    is_buy: bool,
+    on_er: bool,
+    extras: &[u8],
+    op: u8,
+) -> Instruction {
+    let set_h = market::ids::set_hash(&set_mask);
+    let board_pk = board(&market);
+    let user_vault_pk = user_vault(&owner);
+    let mut accounts = market::accounts::Trade {
+        trader,
+        owner,
+        session,
+        market,
+        grid: grid_pda(&market),
+        position: position_pda(&market, &owner, &set_h),
+        board: board_pk,
+        user_vault: user_vault_pk,
+        nonce_acc: nonce_pda(&owner, &market),
+        vault_program: vault::ID,
+        system_program: system_program::ID,
+    }
+    .to_account_metas(None);
+    push_listed_shards(&mut accounts, &market, extras);
+    if on_er {
+        accounts.push(AccountMeta::new_readonly(market::MAGIC_PROGRAM_ID, false));
+    } else {
+        mark_writable(&mut accounts, &[board_pk, user_vault_pk]);
+    }
+    Instruction {
+        program_id: market::ID,
+        accounts,
+        data: match op {
+            0 => market::instruction::WideBegin {
+                set_mask,
+                q_raw,
+                nonce,
+                is_buy,
+            }
+            .data(),
+            1 => market::instruction::WideAccum {
+                set_mask,
+                q_raw,
+                nonce,
+                is_buy,
+            }
+            .data(),
+            2 => market::instruction::WideApply {
+                set_mask,
+                q_raw,
+                nonce,
+                is_buy,
+            }
+            .data(),
+            _ => market::instruction::WideFinish {
+                set_mask,
+                q_raw,
+                nonce,
+                is_buy,
+            }
+            .data(),
+        },
+    }
+}
+
+pub fn fill_set_ixs(
+    owner: Pubkey,
+    trader: Pubkey,
+    session: Option<Pubkey>,
+    market: Pubkey,
+    set_mask: Vec<u8>,
+    q_raw: i128,
+    nonce: u64,
+    is_buy: bool,
+    on_er: bool,
+) -> Vec<Instruction> {
+    let n_hint = (set_mask.len() * 8).min(1024) as u16;
+    let extras = mask_extra_ixs(n_hint, &set_mask);
+    if extras.len() <= WIDE_EXTRA_LIMIT {
+        return vec![trade_set(
+            owner, trader, session, market, set_mask, q_raw, nonce, is_buy, on_er,
+        )];
+    }
+    let mut out = Vec::new();
+    let (head, tail) = extras.split_at(extras.len().min(WIDE_BATCH));
+    out.push(trade_wide(
+        owner, trader, session, market, set_mask.clone(), q_raw, nonce, is_buy, on_er, head, 0,
+    ));
+    for chunk in tail.chunks(WIDE_BATCH) {
+        out.push(trade_wide(
+            owner, trader, session, market, set_mask.clone(), q_raw, nonce, is_buy, on_er, chunk, 1,
+        ));
+    }
+    for chunk in extras.chunks(WIDE_BATCH) {
+        out.push(trade_wide(
+            owner, trader, session, market, set_mask.clone(), q_raw, nonce, is_buy, on_er, chunk, 2,
+        ));
+    }
+    out.push(trade_wide(
+        owner, trader, session, market, set_mask, q_raw, nonce, is_buy, on_er, &[], 3,
+    ));
+    out
+}
+
+pub fn open_seat(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8; 32]) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::OpenSeat {
+            trader,
+            owner,
+            market,
+            position: position_pda(&market, &owner, &set_hash),
+            nonce_acc: nonce_pda(&owner, &market),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::OpenSeat { set_hash }.data(),
+    }
+}
+
+pub fn delegate_seat(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8; 32]) -> Instruction {
+    let position = position_pda(&market, &owner, &set_hash);
+    let nonce_acc = nonce_pda(&owner, &market);
+    let mut accounts = market::accounts::DelegateSeat {
+        trader,
+        owner,
+        market,
+        position,
+        nonce_acc,
+        owner_program: market::ID,
+        delegation_program: market::DELEGATION_PROGRAM_ID,
+        system_program: system_program::ID,
+        buffer_position: buffer_pda(&position),
+        delegation_record_position: delegation_record_pda(&position),
+        delegation_metadata_position: delegation_metadata_pda(&position),
+        buffer_nonce_acc: buffer_pda(&nonce_acc),
+        delegation_record_nonce_acc: delegation_record_pda(&nonce_acc),
+        delegation_metadata_nonce_acc: delegation_metadata_pda(&nonce_acc),
+    }
+    .to_account_metas(None);
+    accounts.push(AccountMeta::new_readonly(market::LOCAL_ER_VALIDATOR, false));
+    Instruction {
+        program_id: market::ID,
+        accounts,
+        data: market::instruction::DelegateSeat { set_hash }.data(),
+    }
+}
+
+pub fn commit_seat(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8; 32]) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::CommitSeat {
+            trader,
+            owner,
+            market,
+            position: position_pda(&market, &owner, &set_hash),
+            nonce_acc: nonce_pda(&owner, &market),
+            magic_program: market::MAGIC_PROGRAM_ID,
+            magic_context: market::MAGIC_CONTEXT_ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::CommitSeat { set_hash }.data(),
+    }
+}
+
+pub fn undelegate_seat(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8; 32]) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::CommitSeat {
+            trader,
+            owner,
+            market,
+            position: position_pda(&market, &owner, &set_hash),
+            nonce_acc: nonce_pda(&owner, &market),
+            magic_program: market::MAGIC_PROGRAM_ID,
+            magic_context: market::MAGIC_CONTEXT_ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::UndelegateSeat { set_hash }.data(),
+    }
+}
+
+pub fn sync_vault(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8; 32]) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::SyncVault {
+            trader,
+            owner,
+            market,
+            position: position_pda(&market, &owner, &set_hash),
+            board: board(&market),
+            user_vault: user_vault(&owner),
+            vault_program: vault::ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::SyncVault { set_hash }.data(),
+    }
+}
+
+pub fn delegate_session(owner: Pubkey) -> Instruction {
+    let session = session_pda(&owner);
+    let mut accounts = market::accounts::DelegateSession {
+        owner,
+        session,
+        owner_program: market::ID,
+        delegation_program: market::DELEGATION_PROGRAM_ID,
+        system_program: system_program::ID,
+        buffer_session: buffer_pda(&session),
+        delegation_record_session: delegation_record_pda(&session),
+        delegation_metadata_session: delegation_metadata_pda(&session),
+    }
+    .to_account_metas(None);
+    accounts.push(AccountMeta::new_readonly(market::LOCAL_ER_VALIDATOR, false));
+    Instruction {
+        program_id: market::ID,
+        accounts,
+        data: market::instruction::DelegateSession {}.data(),
+    }
+}
+
 pub fn halt(authority: Pubkey, market: Pubkey) -> Instruction {
     book_ix(authority, market, market::instruction::Halt {}.data())
 }
 
+pub fn buffer_pda(delegated: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"buffer", delegated.as_ref()], &market::ID).0
+}
+
+pub fn prepare_delegate_buffer(payer: Pubkey, source: Pubkey) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::PrepareDelegateBuffer {
+            payer,
+            source,
+            buffer: buffer_pda(&source),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::PrepareDelegateBuffer {}.data(),
+    }
+}
+
+fn delegation_record_pda(delegated: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"delegation", delegated.as_ref()], &market::DELEGATION_PROGRAM_ID)
+        .0
+}
+
+fn delegation_metadata_pda(delegated: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"delegation-metadata", delegated.as_ref()],
+        &market::DELEGATION_PROGRAM_ID,
+    )
+    .0
+}
+
 pub fn delegate_book(authority: Pubkey, market: Pubkey) -> Instruction {
-    book_ix(authority, market, market::instruction::DelegateBook {}.data())
+    let grid = grid_pda(&market);
+    let mut accounts = market::accounts::DelegateBook {
+        authority,
+        market,
+        grid,
+        committee: committee_pda(),
+        owner_program: market::ID,
+        delegation_program: market::DELEGATION_PROGRAM_ID,
+        system_program: system_program::ID,
+        buffer_market: buffer_pda(&market),
+        delegation_record_market: delegation_record_pda(&market),
+        delegation_metadata_market: delegation_metadata_pda(&market),
+        buffer_grid: buffer_pda(&grid),
+        delegation_record_grid: delegation_record_pda(&grid),
+        delegation_metadata_grid: delegation_metadata_pda(&grid),
+    }
+    .to_account_metas(None);
+    accounts.push(AccountMeta::new_readonly(market::LOCAL_ER_VALIDATOR, false));
+    Instruction {
+        program_id: market::ID,
+        accounts,
+        data: market::instruction::DelegateBook {}.data(),
+    }
+}
+
+pub fn delegate_grid_shard(authority: Pubkey, market: Pubkey, ix: u8) -> Instruction {
+    let shard = grid_shard_pda(&market, ix);
+    let mut accounts = market::accounts::DelegateShard {
+        authority,
+        market,
+        shard,
+        owner_program: market::ID,
+        delegation_program: market::DELEGATION_PROGRAM_ID,
+        system_program: system_program::ID,
+        buffer_shard: buffer_pda(&shard),
+        delegation_record_shard: delegation_record_pda(&shard),
+        delegation_metadata_shard: delegation_metadata_pda(&shard),
+    }
+    .to_account_metas(None);
+    accounts.push(AccountMeta::new_readonly(market::LOCAL_ER_VALIDATOR, false));
+    Instruction {
+        program_id: market::ID,
+        accounts,
+        data: market::instruction::DelegateGridShard { ix }.data(),
+    }
+}
+
+pub fn undelegate_shard(authority: Pubkey, shard: Pubkey) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::CommitShard {
+            authority,
+            shard,
+            magic_program: market::MAGIC_PROGRAM_ID,
+            magic_context: market::MAGIC_CONTEXT_ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::UndelegateShard {}.data(),
+    }
 }
 
 pub fn commit_book(authority: Pubkey, market: Pubkey, trades_root: [u8; 32]) -> Instruction {
-    book_ix(
-        authority,
-        market,
-        market::instruction::CommitBook { trades_root }.data(),
-    )
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::CommitBook {
+            authority,
+            market,
+            grid: grid_pda(&market),
+            committee: committee_pda(),
+            magic_program: market::MAGIC_PROGRAM_ID,
+            magic_context: market::MAGIC_CONTEXT_ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::CommitBook { trades_root }.data(),
+    }
 }
 
 pub fn undelegate_book(authority: Pubkey, market: Pubkey) -> Instruction {
-    book_ix(
-        authority,
-        market,
-        market::instruction::UndelegateBook {}.data(),
-    )
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::CommitBook {
+            authority,
+            market,
+            grid: grid_pda(&market),
+            committee: committee_pda(),
+            magic_program: market::MAGIC_PROGRAM_ID,
+            magic_context: market::MAGIC_CONTEXT_ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::UndelegateBook {}.data(),
+    }
 }
 
 fn book_ix(authority: Pubkey, market: Pubkey, data: Vec<u8>) -> Instruction {
@@ -557,10 +1135,19 @@ pub fn begin_settle(market: Pubkey, include_risk: bool) -> Instruction {
 }
 
 pub fn begin_settle_ex(market: Pubkey, include_risk: bool, include_pool: bool) -> Instruction {
+    begin_settle_on(market, include_risk, include_pool, grid_pda(&market))
+}
+
+pub fn begin_settle_on(
+    market: Pubkey,
+    include_risk: bool,
+    include_pool: bool,
+    grid: Pubkey,
+) -> Instruction {
     let mut metas = vault::accounts::BeginSettle {
         board: board(&market),
         market,
-        grid: grid_pda(&market),
+        grid,
         record: record_pda(&market),
         risk_book: if include_risk {
             Some(risk_book(&market))
@@ -593,6 +1180,16 @@ pub fn begin_refund(market: Pubkey) -> Instruction {
 }
 
 pub fn payout(payer: Pubkey, market: Pubkey, owner: Pubkey, set_mask: Vec<u8>) -> Instruction {
+    payout_on(payer, market, owner, set_mask, grid_pda(&market))
+}
+
+pub fn payout_on(
+    payer: Pubkey,
+    market: Pubkey,
+    owner: Pubkey,
+    set_mask: Vec<u8>,
+    grid: Pubkey,
+) -> Instruction {
     let set_h = market::ids::set_hash(&set_mask);
     let pos = position_pda(&market, &owner, &set_h);
     Instruction {
@@ -600,7 +1197,8 @@ pub fn payout(payer: Pubkey, market: Pubkey, owner: Pubkey, set_mask: Vec<u8>) -
         accounts: vault::accounts::Payout {
             payer,
             board: board(&market),
-            grid: grid_pda(&market),
+            market,
+            grid,
             record: record_pda(&market),
             position: pos,
             claim: claim(&pos),
@@ -820,7 +1418,19 @@ pub fn buy_skellam_set(
     q_raw: i128,
     nonce: u64,
 ) -> Instruction {
-    trade_skellam(owner, owner, None, market, kind, a, b, q_raw, nonce, true)
+    trade_skellam(owner, owner, None, market, kind, a, b, q_raw, nonce, true, false)
+}
+
+pub fn buy_skellam_set_er(
+    owner: Pubkey,
+    market: Pubkey,
+    kind: u8,
+    a: i16,
+    b: i16,
+    q_raw: i128,
+    nonce: u64,
+) -> Instruction {
+    trade_skellam(owner, owner, None, market, kind, a, b, q_raw, nonce, true, true)
 }
 
 pub fn buy_skellam_set_session(
@@ -833,7 +1443,20 @@ pub fn buy_skellam_set_session(
     q_raw: i128,
     nonce: u64,
 ) -> Instruction {
-    trade_skellam(owner, trader, Some(session_pda(&owner)), market, kind, a, b, q_raw, nonce, true)
+    trade_skellam(owner, trader, Some(session_pda(&owner)), market, kind, a, b, q_raw, nonce, true, false)
+}
+
+pub fn buy_skellam_set_session_er(
+    owner: Pubkey,
+    trader: Pubkey,
+    market: Pubkey,
+    kind: u8,
+    a: i16,
+    b: i16,
+    q_raw: i128,
+    nonce: u64,
+) -> Instruction {
+    trade_skellam(owner, trader, Some(session_pda(&owner)), market, kind, a, b, q_raw, nonce, true, true)
 }
 
 pub fn sell_skellam_set(
@@ -845,7 +1468,19 @@ pub fn sell_skellam_set(
     q_raw: i128,
     nonce: u64,
 ) -> Instruction {
-    trade_skellam(owner, owner, None, market, kind, a, b, q_raw, nonce, false)
+    trade_skellam(owner, owner, None, market, kind, a, b, q_raw, nonce, false, false)
+}
+
+pub fn sell_skellam_set_er(
+    owner: Pubkey,
+    market: Pubkey,
+    kind: u8,
+    a: i16,
+    b: i16,
+    q_raw: i128,
+    nonce: u64,
+) -> Instruction {
+    trade_skellam(owner, owner, None, market, kind, a, b, q_raw, nonce, false, true)
 }
 
 pub fn sell_skellam_set_session(
@@ -858,7 +1493,20 @@ pub fn sell_skellam_set_session(
     q_raw: i128,
     nonce: u64,
 ) -> Instruction {
-    trade_skellam(owner, trader, Some(session_pda(&owner)), market, kind, a, b, q_raw, nonce, false)
+    trade_skellam(owner, trader, Some(session_pda(&owner)), market, kind, a, b, q_raw, nonce, false, false)
+}
+
+pub fn sell_skellam_set_session_er(
+    owner: Pubkey,
+    trader: Pubkey,
+    market: Pubkey,
+    kind: u8,
+    a: i16,
+    b: i16,
+    q_raw: i128,
+    nonce: u64,
+) -> Instruction {
+    trade_skellam(owner, trader, Some(session_pda(&owner)), market, kind, a, b, q_raw, nonce, false, true)
 }
 
 fn trade_skellam(
@@ -872,22 +1520,31 @@ fn trade_skellam(
     q_raw: i128,
     nonce: u64,
     is_buy: bool,
+    on_er: bool,
 ) -> Instruction {
     let contract = skellam_contract(kind, a, b);
-    let accounts = market::accounts::TradeSkellam {
+    let board_pk = board(&market);
+    let user_vault_pk = user_vault(&owner);
+    let mut accounts = market::accounts::TradeSkellam {
         trader,
         owner,
         session,
         market,
         grid: grid_pda(&market),
         position: skellam_position(&market, &owner, kind, a, b),
-        board: board(&market),
-        user_vault: user_vault(&owner),
+        board: board_pk,
+        user_vault: user_vault_pk,
         nonce_acc: nonce_pda(&owner, &market),
         vault_program: vault::ID,
         system_program: system_program::ID,
     }
     .to_account_metas(None);
+    push_extra_shards(&mut accounts, &market, market::state::FOOTBALL_N);
+    if on_er {
+        accounts.push(AccountMeta::new_readonly(market::MAGIC_PROGRAM_ID, false));
+    } else {
+        mark_writable(&mut accounts, &[board_pk, user_vault_pk]);
+    }
     Instruction {
         program_id: market::ID,
         accounts,
@@ -917,13 +1574,26 @@ pub fn payout_skellam(
     a: i16,
     b: i16,
 ) -> Instruction {
+    payout_skellam_on(payer, market, owner, kind, a, b, grid_pda(&market))
+}
+
+pub fn payout_skellam_on(
+    payer: Pubkey,
+    market: Pubkey,
+    owner: Pubkey,
+    kind: u8,
+    a: i16,
+    b: i16,
+    grid: Pubkey,
+) -> Instruction {
     let pos = skellam_position(&market, &owner, kind, a, b);
     Instruction {
         program_id: vault::ID,
         accounts: vault::accounts::Payout {
             payer,
             board: board(&market),
-            grid: grid_pda(&market),
+            market,
+            grid,
             record: record_pda(&market),
             position: pos,
             claim: claim(&pos),
@@ -1048,5 +1718,46 @@ pub fn refund_position(payer: Pubkey, market: Pubkey, owner: Pubkey, position: P
         }
         .to_account_metas(None),
         data: vault::instruction::RefundPosition {}.data(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn n1024_full_mask_needs_wide() {
+        let mask = vec![0xffu8; 128];
+        assert_eq!(mask_extra_ixs(1024, &mask).len(), 127);
+        assert!(needs_wide_fill(1024, &mask));
+        assert_eq!(fill_set_ixs(
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            None,
+            Pubkey::new_unique(),
+            mask,
+            1,
+            1,
+            true,
+            false,
+        ).len(), 1 + 7 + 8 + 1);
+    }
+
+    #[test]
+    fn n256_full_mask_needs_wide() {
+        let mask = vec![0xffu8; 32];
+        assert_eq!(mask_extra_ixs(256, &mask).len(), 31);
+        assert!(needs_wide_fill(256, &mask));
+        assert_eq!(fill_set_ixs(
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            None,
+            Pubkey::new_unique(),
+            mask,
+            1,
+            1,
+            true,
+            false,
+        ).len(), 1 + 1 + 2 + 1);
     }
 }

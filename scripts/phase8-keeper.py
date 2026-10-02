@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,8 @@ def keeper() -> str:
             str(CPM),
             "--url",
             flow.RPC,
+            "--er-url",
+            os.environ.get("ER_URL", "http://127.0.0.1:7799"),
             "--keypair",
             str(KP),
             "keeper",
@@ -124,7 +127,7 @@ def run_live() -> None:
         return
     kp = flow.fund_chain()
     owner = str(kp.pubkey())
-    stamp = str(int(time.time()) % 10_000_000)
+    stamp = str(int(time.time() * 1000) % 10_000_000)
     spec = {
         "id": "phase8-keeper",
         "family": 4,

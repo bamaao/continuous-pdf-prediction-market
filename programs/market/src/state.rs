@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 
 pub const MARKET_SEED: &[u8] = b"market";
 pub const GRID_SEED: &[u8] = b"grid";
+pub const GRID_DUMP_SEED: &[u8] = b"gdump";
 pub const POS_SEED: &[u8] = b"pos";
 pub const COMMITTEE_SEED: &[u8] = b"committee";
 
@@ -70,10 +71,24 @@ pub struct Market {
     /// Journal checkpoint. Not whether a fill exists (FR-DUR-02).
     pub trades_root: [u8; 32],
     pub commit_ts: i64,
+    /// Unnormalized $P_0$ sum while sealing in batches (n=1024 cannot fit every shard in one ix).
+    pub p0_sum: i128,
+    /// Bit i set after shard i's raw $P_0$ was added to `p0_sum`.
+    pub seal_bits: u128,
+    /// Wide fill (mask spans too many shards for one 64-account tx). `p0_sum` holds $\sum w_i$ while active.
+    pub wide_z0: i128,
+    pub wide_z: i128,
+    pub wide_q: i128,
+    pub wide_nonce: u64,
+    pub wide_read: u128,
+    pub wide_write: u128,
+    pub wide_tag: u64,
+    /// bit0 = active, bit1 = buy
+    pub wide_flags: u8,
 }
 
 impl Market {
-    pub const SIZE: usize = 8 + 456;
+    pub const SIZE: usize = 8 + 576;
 
     pub fn fee_on_fill(&self) -> bool {
         self.fee_timing != FEE_ON_CLAIM
@@ -122,8 +137,12 @@ pub struct FamilyExtra {
 #[account]
 pub struct Grid {
     pub market: Pubkey,
+    /// Cells stored in this shard (not the market-wide n).
     pub n: u16,
+    /// First global cell index this shard covers.
+    pub start: u16,
     pub bump: u8,
+    /// Global LMSR z. Meaningful on the shard with `start == 0`.
     pub z: i128,
     pub p0: Vec<i128>,
     pub theta: Vec<i128>,
@@ -134,13 +153,30 @@ pub struct Grid {
 impl Grid {
     /// Solana CPI `create_account` / one `realloc` may move at most 10 240 bytes.
     pub const CREATE_CAP: usize = 10_240;
-    /// Unnormalized $P_0$ nodes per `write_grid_mass`. Fast exp + $3\sigma$ window fits 256 in one ix.
-    pub const PRIOR_CHUNK: usize = 256;
+    /// Unnormalized $P_0$ nodes per `write_grid_mass`. 256 exp() does not fit 1.4M CU.
+    pub const PRIOR_CHUNK: usize = 64;
+    /// 16 cells → 1101B. Commit uses the committor writeback buffer
+    /// (`comittor_buffer` under ComtrB2). Local L1 loads a committor rebuilt
+    /// with cargo-build-sbf 3.1.13 so that path can finalize.
+    pub const SHARD_CELLS: u16 = 16;
 
-    /// Borsh layout (no padding): disc(8) + market(32) + n(2) + bump(1) + z(16)
+    /// Borsh layout (no padding): disc(8) + market(32) + n(2) + start(2) + bump(1) + z(16)
     /// + 4 × (vec_len(4) + n × i128(16)).
     pub fn space(n: usize) -> usize {
-        8 + 32 + 2 + 1 + 16 + 4 * (4 + n * 16)
+        8 + 32 + 2 + 2 + 1 + 16 + 4 * (4 + n * 16)
+    }
+
+    pub fn shard_count(n: u16) -> u16 {
+        (n + Self::SHARD_CELLS - 1) / Self::SHARD_CELLS
+    }
+
+    pub fn shard_len(n: u16, ix: u16) -> u16 {
+        let start = ix.saturating_mul(Self::SHARD_CELLS);
+        n.saturating_sub(start).min(Self::SHARD_CELLS)
+    }
+
+    pub fn shard_start(ix: u16) -> u16 {
+        ix.saturating_mul(Self::SHARD_CELLS)
     }
 
     pub fn alloc_space(n: usize) -> usize {
@@ -171,10 +207,16 @@ pub struct Position {
     pub cost_paid: u64,
     pub claimed: bool,
     pub bump: u8,
+    /// USDC cost not yet taken from `user_vault` (ER fills). Charged on L1 `sync_vault`.
+    pub vault_owed_cost: u64,
+    /// Fill fees not yet taken from `user_vault` (ER fills).
+    pub vault_owed_fee: u64,
+    /// LMSR sell proceeds not yet credited to `user_vault` (ER sells).
+    pub vault_owed_credit: u64,
 }
 
 impl Position {
-    pub const SIZE: usize = 8 + 32 + 32 + 32 + 16 + 8 + 1 + 1;
+    pub const SIZE: usize = 8 + 32 + 32 + 32 + 16 + 8 + 1 + 1 + 8 + 8 + 8;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -296,18 +338,21 @@ mod tests {
 
     #[test]
     fn create_account_holds_128_not_256() {
-        assert_eq!(Grid::space(128), 8_267);
-        assert_eq!(Grid::space(256), 16_459);
-        assert_eq!(Grid::space(1024), 65_611);
+        assert_eq!(Grid::space(16), 1_101);
+        assert_eq!(Grid::space(128), 8_269);
+        assert_eq!(Grid::space(256), 16_461);
+        assert!(Grid::space(16) <= Grid::CREATE_CAP);
         assert!(Grid::space(128) <= Grid::CREATE_CAP);
         assert!(Grid::space(256) > Grid::CREATE_CAP);
-        assert_eq!(Grid::alloc_space(256), Grid::CREATE_CAP);
-        assert_eq!(Grid::grow_steps(128), 0);
-        assert_eq!(Grid::grow_steps(256), 1);
-        assert_eq!(Grid::grow_steps(1024), 6);
-        assert_eq!(Grid::PRIOR_CHUNK, 256);
-        assert_eq!(Grid::mass_steps(256), 1);
-        assert_eq!(Grid::mass_steps(1024), 4);
+        assert_eq!(Grid::shard_count(2), 1);
+        assert_eq!(Grid::shard_count(8), 1);
+        assert_eq!(Grid::shard_count(16), 1);
+        assert_eq!(Grid::shard_count(121), 8);
+        assert_eq!(Grid::shard_count(256), 16);
+        assert_eq!(Grid::shard_count(1024), 64);
+        assert_eq!(Grid::shard_len(256, 15), 16);
+        assert_eq!(Grid::shard_len(121, 7), 9);
+        assert_eq!(Grid::PRIOR_CHUNK, 64);
     }
 
     #[test]
@@ -319,6 +364,7 @@ mod tests {
             let g = Grid {
                 market: Pubkey::default(),
                 n: n as u16,
+                start: 0,
                 bump: 255,
                 z: 1,
                 p0: vec![0; n],
@@ -329,11 +375,12 @@ mod tests {
             let mut buf = Vec::new();
             g.try_serialize(&mut buf).unwrap();
             assert_eq!(buf.len(), Grid::space(n), "n={n}");
-            assert_eq!(u32::from_le_bytes(buf[59..63].try_into().unwrap()) as usize, n);
+            assert_eq!(u32::from_le_bytes(buf[61..65].try_into().unwrap()) as usize, n);
         }
         let empty = Grid {
             market: Pubkey::default(),
             n: 256,
+            start: 0,
             bump: 1,
             z: 0,
             p0: vec![],
@@ -343,8 +390,8 @@ mod tests {
         };
         let mut buf = Vec::new();
         empty.try_serialize(&mut buf).unwrap();
-        assert_eq!(buf.len(), 75);
-        assert_eq!(u32::from_le_bytes(buf[59..63].try_into().unwrap()), 0);
+        assert_eq!(buf.len(), 77);
+        assert_eq!(u32::from_le_bytes(buf[61..65].try_into().unwrap()), 0);
     }
 
     #[test]
@@ -382,6 +429,16 @@ mod tests {
             delegated: false,
             trades_root: [0; 32],
             commit_ts: 0,
+            p0_sum: 0,
+            seal_bits: 0,
+            wide_z0: 0,
+            wide_z: 0,
+            wide_q: 0,
+            wide_nonce: 0,
+            wide_read: 0,
+            wide_write: 0,
+            wide_tag: 0,
+            wide_flags: 0,
         };
         let mut buf = Vec::new();
         m.try_serialize(&mut buf).unwrap();
