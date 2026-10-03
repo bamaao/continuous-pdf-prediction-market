@@ -322,7 +322,7 @@ Steps (ER `buy_set` / `buy_skellam_set`):
 6. Debit $C$; fee $\phi C$ recorded on the platform fee ledger (`fees_accrued`). `claim_fees` credits the platform UserVault at any time. Fees never enter $C_P$.
 7. Emit event: new $p$, new $L_{\max}$
 
-Repeated buys of the same $S$ raise $p_S$ and raise $C$. That is the algorithm, not a manual markup.
+Repeated buys of the same $S$ raise $p_S$ and raise $C$. That is the algorithm, not a manual markup and not wall-clock time. Overlapping hot intervals get more expensive; disjoint / cold intervals can get cheaper; sells press $C$ down. Trader copy: product §1.2.4 / FR-UI-47.
 
 Football-specific (SHALL):
 

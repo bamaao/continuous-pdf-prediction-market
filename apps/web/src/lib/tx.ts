@@ -31,6 +31,15 @@ export async function sendSigned(
   return sig;
 }
 
+export type GatewayTicket = {
+  set_hash?: string;
+  mask?: string;
+  kind?: string;
+  skellam_kind?: number;
+  a?: number;
+  b?: number;
+};
+
 export async function submitGateway(
   connection: Connection,
   signTransaction: (tx: Transaction) => Promise<Transaction>,
@@ -39,6 +48,7 @@ export async function submitGateway(
   market: PublicKey,
   nonce: number,
   ixs: TransactionInstruction[],
+  ticket?: GatewayTicket,
 ): Promise<{ status: string; sig: string }> {
   const bh = await connection.getLatestBlockhash("confirmed");
   const tx = new Transaction({ feePayer: payer, recentBlockhash: bh.blockhash });
@@ -58,6 +68,12 @@ export async function submitGateway(
       owner: owner.toBase58(),
       market: market.toBase58(),
       nonce,
+      ...(ticket?.set_hash ? { set_hash: ticket.set_hash } : {}),
+      ...(ticket?.mask ? { mask: ticket.mask } : {}),
+      ...(ticket?.kind ? { kind: ticket.kind } : {}),
+      ...(ticket?.skellam_kind != null ? { skellam_kind: ticket.skellam_kind } : {}),
+      ...(ticket?.a != null ? { a: ticket.a } : {}),
+      ...(ticket?.b != null ? { b: ticket.b } : {}),
     }),
   });
   const body = await r.json();

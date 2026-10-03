@@ -32,6 +32,9 @@ pub struct ComposeBody {
     pub expires_ts: Option<i64>,
     #[serde(default)]
     pub remaining_usdc: Option<u64>,
+    /// Top up session signer lamports when creating SessionTokenV2.
+    #[serde(default)]
+    pub top_up: Option<bool>,
     #[serde(default)]
     pub whitelist: Option<String>,
     #[serde(default)]
@@ -124,6 +127,12 @@ pub struct ComposeBody {
     pub fee_bps: Option<u16>,
     #[serde(default)]
     pub fee_timing: Option<u8>,
+    /// Skellam prior: 0=independent Poisson, 1=Dixon–Coles, 2=uniform.
+    #[serde(default)]
+    pub prior_kind: Option<u8>,
+    /// Dixon–Coles ρ (milli when `milli=true`, e.g. 100 → 0.1).
+    #[serde(default)]
+    pub dc_rho: Option<i64>,
     /// Protocol fee claimant. If omitted, `PLATFORM_PUBKEY` or the create signer (local only).
     #[serde(default)]
     pub platform: Option<String>,
@@ -150,6 +159,9 @@ pub struct ComposeOut {
     pub program_id: String,
     pub keys: Vec<CompKey>,
     pub data_b64: String,
+    /// Present when `buy_set` / `sell_set` must split into wide fill ixs (n large).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ixs: Option<Vec<ComposeOut>>,
 }
 
 pub fn pack(ix: Instruction) -> ComposeOut {
@@ -165,6 +177,7 @@ pub fn pack(ix: Instruction) -> ComposeOut {
             })
             .collect(),
         data_b64: base64::engine::general_purpose::STANDARD.encode(ix.data),
+        ixs: None,
     }
 }
 
@@ -371,7 +384,23 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
                 white,
             ))
         }
+        "create_session_token" => {
+            let authority = pk(body.authority.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            let expires = body.expires_ts.ok_or(StatusCode::BAD_REQUEST)?;
+            // fee_payer defaults to owner (compose payer).
+            Ok(client::create_session_token_v2(
+                owner,
+                authority,
+                owner,
+                expires,
+                body.top_up.unwrap_or(true),
+            ))
+        }
         "revoke_session" => Ok(client::revoke_session(owner)),
+        "revoke_session_token" => {
+            let authority = pk(body.authority.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::revoke_session_token_v2(owner, authority, owner))
+        }
         "renew_session" => {
             let expires = body.expires_ts.ok_or(StatusCode::BAD_REQUEST)?;
             let usdc = body.remaining_usdc.unwrap_or(20_000);
@@ -473,41 +502,7 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
                 settle_grid(market, body),
             ))
         }
-        "buy_set" | "sell_set" => {
-            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
-            let mask = mask_hex(body.mask.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
-            let q = Q64::from_int(body.shares.unwrap_or(1)).raw();
-            let nonce = body.nonce.unwrap_or(1);
-            let sell = body.op == "sell_set";
-            let on_er = body.er.unwrap_or(false);
-            if let Some(trader) = body.trader.as_deref() {
-                let t = pk(trader)?;
-                if t != owner {
-                    return Ok(if sell {
-                        if on_er {
-                            client::sell_set_session_er(owner, t, market, mask, q, nonce)
-                        } else {
-                            client::sell_set_session(owner, t, market, mask, q, nonce)
-                        }
-                    } else if on_er {
-                        client::buy_set_session_er(owner, t, market, mask, q, nonce)
-                    } else {
-                        client::buy_set_session(owner, t, market, mask, q, nonce)
-                    });
-                }
-            }
-            Ok(if sell {
-                if on_er {
-                    client::sell_set_er(owner, market, mask, q, nonce)
-                } else {
-                    client::sell_set(owner, market, mask, q, nonce)
-                }
-            } else if on_er {
-                client::buy_set_er(owner, market, mask, q, nonce)
-            } else {
-                client::buy_set(owner, market, mask, q, nonce)
-            })
-        }
+        "buy_set" | "sell_set" => fill_set_from_body(owner, body).map(|mut ixs| ixs.remove(0)),
         "payout" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             let mask = mask_hex(body.mask.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
@@ -597,15 +592,17 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
                     let id_hash = client::market::ids::skellam(&topic, scope);
                     let n = client::market::state::FOOTBALL_N;
                     let milli = body.milli.unwrap_or(false);
+                    let dc = body.dc_rho.unwrap_or(0);
+                    let prior_kind = body.prior_kind.unwrap_or(if dc != 0 { 1 } else { 0 });
                     let args = client::market::state::SkellamArgs {
                         common: create_common(owner, body, id_hash, n)?,
                         topic,
                         score_scope: scope,
                         kickoff_ts: body.close_ts.unwrap_or(0),
-                        prior_kind: 0,
+                        prior_kind,
                         lambda_home: q_scaled(body.lambda_home.unwrap_or(if milli { 1_400 } else { 1 }), milli),
                         lambda_away: q_scaled(body.lambda_away.unwrap_or(if milli { 1_100 } else { 1 }), milli),
-                        dc_rho: 0,
+                        dc_rho: q_scaled(dc, milli),
                     };
                     Ok(client::create_skellam(owner, id_hash, n, args))
                 }
@@ -757,8 +754,43 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
     }
 }
 
+fn fill_set_from_body(owner: Pubkey, body: &ComposeBody) -> Result<Vec<Instruction>, StatusCode> {
+    let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+    let mask = mask_hex(body.mask.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+    let q = Q64::from_int(body.shares.unwrap_or(1)).raw();
+    let nonce = body.nonce.unwrap_or(1);
+    let is_buy = body.op == "buy_set";
+    let on_er = body.er.unwrap_or(false);
+    let (trader, session) = match body.trader.as_deref() {
+        Some(t) => {
+            let t = pk(t)?;
+            if t != owner {
+                (t, Some(client::session_pda(&owner)))
+            } else {
+                (owner, None)
+            }
+        }
+        None => (owner, None),
+    };
+    Ok(client::fill_set_ixs(
+        owner, trader, session, market, mask, q, nonce, is_buy, on_er,
+    ))
+}
+
+pub fn build_ixs(body: &ComposeBody) -> Result<Vec<Instruction>, StatusCode> {
+    if body.op == "buy_set" || body.op == "sell_set" {
+        return fill_set_from_body(pk(&body.owner)?, body);
+    }
+    Ok(vec![build(body)?])
+}
+
 pub fn compose_out(body: &ComposeBody) -> Result<ComposeOut, StatusCode> {
-    Ok(pack(build(body)?))
+    let ixs = build_ixs(body)?;
+    let mut out = pack(ixs[0].clone());
+    if ixs.len() > 1 {
+        out.ixs = Some(ixs.into_iter().map(pack).collect());
+    }
+    Ok(out)
 }
 
 pub async fn compose(Json(body): Json<ComposeBody>) -> Result<Json<ComposeOut>, StatusCode> {
@@ -804,6 +836,32 @@ mod tests {
         .unwrap();
         assert_eq!(a.data, b.data);
         assert!(a.accounts.iter().any(|m| m.pubkey == client::session_pda(&owner)));
+        assert!(a.accounts.iter().any(|m| m.pubkey == client::session_token_v2_pda(&owner, &trader)));
+    }
+
+    #[test]
+    fn wide_session_buy_compose_splits_and_carries_token() {
+        let owner = Pubkey::new_unique();
+        let trader = Pubkey::new_unique();
+        let market = Pubkey::new_unique();
+        let token = client::session_token_v2_pda(&owner, &trader);
+        let mask = "ff".repeat(128);
+        let out = compose_out(&ComposeBody {
+            op: "buy_set".into(),
+            owner: owner.to_string(),
+            trader: Some(trader.to_string()),
+            market: Some(market.to_string()),
+            mask: Some(mask),
+            shares: Some(1),
+            nonce: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+        let ixs = out.ixs.expect("n=1024 full mask must split");
+        assert!(ixs.len() > 1);
+        for ix in &ixs {
+            assert!(ix.keys.iter().any(|k| k.pubkey == token.to_string()));
+        }
     }
 
     #[test]

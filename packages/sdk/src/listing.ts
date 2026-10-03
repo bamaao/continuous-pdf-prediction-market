@@ -100,24 +100,24 @@ export function familyFallbackTitle(family?: number | null): string {
 export function defaultDescription(family: number): string {
   return (
     [
-      "写清对阵、赛事和结算规则。例：阿森纳 vs 切尔西，英超。结算为常规时间（含补时）终场比分，不含加时/点球。溢出格为 10+。开球后仍可交易。",
-      "写清哪一次官方公布、单位和修订是否结算。例：2026-03 美国 CPI 同比首次官方打印。之后的修订不结算。",
-      "写清观察时刻、价格源和 price_rule。例：观察时刻 Coinbase BTC-USD 收盘价。开通预测市场时锁定规则，之后不改。",
-      "写清认证结果和版式。当选人是原子；前 n 名是组合；得票份额是单形格子（k 个候选人、bins 等分），不是另开一个族。α_i=1。",
-      "写清 YES 的定义和截止。例：截止时刻该事件已发生则为 YES，否则 NO。",
-    ][family] ?? "写清事件、结算规则和数据来源，方便交易的人判断。"
+      "State the match, competition, and settlement. Example: Arsenal vs Chelsea, Premier League. Settles on full-time score (including stoppage time), not extra time or penalties. Overflow cell is 10+. Trading continues after kickoff.",
+      "State which official print, the unit, and whether revisions settle. Example: 2026-03 US CPI YoY first official print. Later revisions do not settle.",
+      "State the observation time, price source, and price_rule. Example: Coinbase BTC-USD close at observation time. The rule is locked when the prediction market opens and does not change.",
+      "State the certified result and layout. Winner is atoms; top-n is combinations; vote share is a simplex grid (k candidates, bins), not a second family. α_i=1.",
+      "State the YES definition and deadline. Example: YES if the event has occurred by the deadline, otherwise NO.",
+    ][family] ?? "State the event, settlement rule, and data source so traders can judge the market."
   );
 }
 
 export function defaultEvent(family: number): string {
   return (
     [
-      "阿森纳 vs 切尔西 — 英超常规时间比分",
-      "美国 CPI 同比首次官方公布",
-      "BTC-USD 观察时刻收盘价",
-      "选举认证获胜者",
-      "截止时刻事件是否已发生",
-    ][family] ?? "写清这场在预测什么"
+      "Arsenal vs Chelsea — Premier League full-time score",
+      "US CPI YoY first official print",
+      "BTC-USD close at observation time",
+      "Certified election winner",
+      "Whether the event has occurred by the deadline",
+    ][family] ?? "State what this prediction market is about"
   );
 }
 

@@ -19,6 +19,7 @@ client = { path = "../client" }
 journal = { path = "../journal" }
 notify = { path = "../notify" }
 quote = { path = "../services/quote" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 solana-client = "2.2"
 solana-sdk = "2.2"

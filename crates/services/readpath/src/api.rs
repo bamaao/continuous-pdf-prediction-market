@@ -261,8 +261,10 @@ fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Brute-force recover frozen mask from `set_hash` for small grids (FR-UI-41).
+/// `n≤20` (~1M) is a last-resort path; large boards use PG fill_journal + durable journal.
 fn recover_mask(n: u16, want: &str) -> Option<String> {
-    if n == 0 || n > 16 {
+    if n == 0 || n > 20 {
         return None;
     }
     let want = want.trim_start_matches("0x").to_ascii_lowercase();
@@ -296,34 +298,134 @@ fn recover_skellam(want: &str) -> Option<(u8, i64, i64)> {
     None
 }
 
+fn durable_journal() -> Option<journal::Journal> {
+    let replica = std::env::var("JOURNAL_REPLICA_DIR").unwrap_or_else(|_| "journal-replica".into());
+    let object = std::env::var("JOURNAL_OBJECT_DIR").unwrap_or_else(|_| "journal-object".into());
+    journal::Journal::open(replica, object).ok()
+}
+
+fn persist_fill_journal(row: &FillMeta) {
+    let Some(j) = durable_journal() else {
+        return;
+    };
+    let side = journal::TicketSide {
+        set_hash: Some(row.set_hash.clone()).filter(|s| !s.is_empty()),
+        mask: Some(row.mask.clone()).filter(|s| !s.is_empty()),
+        kind: Some(row.kind.clone()).filter(|s| !s.is_empty()),
+        skellam_kind: row.skellam_kind,
+        a: row.a,
+        b: row.b,
+    };
+    if side.mask.is_none() && side.skellam_kind.is_none() {
+        return;
+    }
+    let sig = format!("fill:{}", row.set_hash);
+    if let Err(e) = j.append_ticket(&row.market, &row.owner, 0, &sig, side) {
+        eprintln!("durable journal ticket: {e}");
+    }
+}
+
+/// Recover frozen $S$ from the durable (replica+object) journal — works for any $n$.
+fn fill_from_durable_journal(owner: &str, market: &str, want: &str) -> Option<FillMeta> {
+    let j = durable_journal()?;
+    let (rows, _) = j.replay(market).ok()?;
+    let want = want.trim_start_matches("0x").to_ascii_lowercase();
+    for rec in rows.into_iter().rev() {
+        if rec.owner != owner {
+            continue;
+        }
+        if let (Some(kind), Some(a), Some(b)) = (rec.skellam_kind, rec.a, rec.b) {
+            let h = hex32(&client::market::ids::skellam_ticket(kind, a as i16, b as i16));
+            let stored = rec
+                .set_hash
+                .as_deref()
+                .unwrap_or("")
+                .trim_start_matches("0x")
+                .to_ascii_lowercase();
+            if h == want || (!stored.is_empty() && stored == want) {
+                return Some(FillMeta {
+                    owner: owner.into(),
+                    market: market.into(),
+                    set_hash: want.to_string(),
+                    kind: "skellam".into(),
+                    mask: rec.mask.unwrap_or_default(),
+                    skellam_kind: Some(kind),
+                    a: Some(a),
+                    b: Some(b),
+                });
+            }
+        }
+        if let Some(mask) = rec.mask.as_deref() {
+            if mask.is_empty() {
+                continue;
+            }
+            if let Ok(bytes) = crate::compose::mask_bytes(mask) {
+                let h = hex32(&client::market::ids::set_hash(&bytes));
+                let stored = rec
+                    .set_hash
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim_start_matches("0x")
+                    .to_ascii_lowercase();
+                if h == want || (!stored.is_empty() && stored == want) {
+                    return Some(FillMeta {
+                        owner: owner.into(),
+                        market: market.into(),
+                        set_hash: want.to_string(),
+                        kind: rec.kind.unwrap_or_else(|| "mask".into()),
+                        mask: hex_bytes(&bytes),
+                        skellam_kind: rec.skellam_kind,
+                        a: rec.a,
+                        b: rec.b,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
 fn fill_for(st: &AppState, owner: &str, market: &str, set_hash: &str, family: u8, n: u16) -> Option<FillMeta> {
-    if let Some(row) = st.store.fill_of(owner, market, set_hash) {
+    let hash = set_hash.trim_start_matches("0x").to_ascii_lowercase();
+    if let Some(row) = st.store.fills_of(owner, market, &hash) {
+        return Some(row);
+    }
+    // Durable journal (gateway / dual-write) — any $n$, survives Postgres wipe.
+    if let Some(row) = fill_from_durable_journal(owner, market, &hash) {
+        st.store.set_fill(row.clone());
         return Some(row);
     }
     if family == 0 {
-        if let Some((kind, a, b)) = recover_skellam(set_hash) {
-            return Some(FillMeta {
+        if let Some((kind, a, b)) = recover_skellam(&hash) {
+            let row = FillMeta {
                 owner: owner.into(),
                 market: market.into(),
-                set_hash: set_hash.trim_start_matches("0x").to_ascii_lowercase(),
+                set_hash: hash.clone(),
                 kind: "skellam".into(),
                 mask: String::new(),
                 skellam_kind: Some(kind),
                 a: Some(a),
                 b: Some(b),
-            });
+            };
+            st.store.set_fill(row.clone());
+            return Some(row);
         }
     }
-    recover_mask(n, set_hash).map(|mask| FillMeta {
-        owner: owner.into(),
-        market: market.into(),
-        set_hash: set_hash.trim_start_matches("0x").to_ascii_lowercase(),
-        kind: "mask".into(),
-        mask,
-        skellam_kind: None,
-        a: None,
-        b: None,
-    })
+    if let Some(mask) = recover_mask(n, &hash) {
+        let row = FillMeta {
+            owner: owner.into(),
+            market: market.into(),
+            set_hash: hash,
+            kind: "mask".into(),
+            mask,
+            skellam_kind: None,
+            a: None,
+            b: None,
+        };
+        st.store.set_fill(row.clone());
+        return Some(row);
+    }
+    None
 }
 
 fn fill_from_meta(row: &FillMeta) -> Result<Fill, crate::domain::DomainError> {
@@ -364,6 +466,7 @@ fn remember_compose_fill(st: &AppState, body: &ComposeBody) -> Option<Fill> {
                 b: None,
             };
             st.store.set_fill(row.clone());
+            persist_fill_journal(&row);
             return fill_from_meta(&row).ok();
         }
         "buy_skellam_set" | "sell_skellam_set" => {
@@ -381,11 +484,63 @@ fn remember_compose_fill(st: &AppState, body: &ComposeBody) -> Option<Fill> {
                 b: Some(i64::from(b)),
             };
             st.store.set_fill(row.clone());
+            persist_fill_journal(&row);
             return fill_from_meta(&row).ok();
         }
         _ => {}
     }
     None
+}
+
+/// After finalize, point `begin_settle` at the winning shard from the resolution record.
+/// UI only needs `{ op, owner, market }` — family / kind / cell come from projections.
+fn hydrate_begin_settle(st: &AppState, body: &mut ComposeBody) {
+    let Some(market) = body.market.as_deref() else {
+        return;
+    };
+    let Some(m) = st.store.get(market) else {
+        return;
+    };
+    if body.n.is_none() {
+        body.n = Some(m.n);
+    }
+    if body.family.is_none() {
+        body.family = Some(m.family);
+    }
+    if body.include_pool.is_none() && m.c_p_board > 0 {
+        body.include_pool = Some(true);
+    }
+    if body.ix.is_some() {
+        return;
+    }
+    if m.board_phase >= 1 || m.settle_cell > 0 {
+        body.ix = Some((m.settle_cell / 16) as u8);
+        return;
+    }
+    let Some(res) = st.store.resolution_of(market) else {
+        return;
+    };
+    if res.phase != 3 {
+        return;
+    }
+    let a: i128 = res.final_outcome.a.parse().unwrap_or(0);
+    let b: i128 = res.final_outcome.b.parse().unwrap_or(0);
+    let k_max = if m.extra_u2 > 0 { m.extra_u2 } else { 10 };
+    let cell = math::outcome::outcome_cell(
+        m.family,
+        m.n as usize,
+        k_max,
+        m.extra_a,
+        m.extra_b,
+        res.final_outcome.kind,
+        a,
+        b,
+    )
+    .unwrap_or(0);
+    body.ix = Some(client::grid_shard_ix(m.n, cell));
+    if body.kind.is_none() {
+        body.kind = Some(res.final_outcome.kind);
+    }
 }
 
 fn hydrate_payout_fill(st: &AppState, body: &mut ComposeBody) {
@@ -403,6 +558,9 @@ fn hydrate_payout_fill(st: &AppState, body: &mut ComposeBody) {
                 }
             }
         }
+    }
+    if body.op == "begin_settle" {
+        hydrate_begin_settle(st, body);
     }
     if body.op != "payout" && body.op != "payout_skellam" {
         return;
@@ -554,6 +712,76 @@ async fn resolution_one(State(st): State<AppState>, Path(market): Path<String>) 
         "has_proposed": row.proposer != zero,
         "has_challenged": row.challenger != zero,
         "has_final": row.phase == 3,
+    })))
+}
+
+#[derive(Deserialize)]
+struct EvidenceBody {
+    body: String,
+    #[serde(default)]
+    author: String,
+}
+
+fn evidence_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("EVIDENCE_DIR").unwrap_or_else(|_| "tmp/evidence".into()))
+}
+
+fn evidence_sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Off-chain evidence object (FR-UI-26 / DR-05). L1 only stores the hash.
+async fn put_evidence(
+    Path(market): Path<String>,
+    Json(body): Json<EvidenceBody>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let text = body.body.trim();
+    if text.is_empty() || text.len() > 200_000 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !market.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let hash = evidence_sha256_hex(text);
+    let dir = evidence_root().join(&market);
+    std::fs::create_dir_all(&dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let path = dir.join(format!("{hash}.txt"));
+    if !path.exists() {
+        let meta = serde_json::json!({
+            "market": market,
+            "hash": hash,
+            "author": body.author,
+            "bytes": text.len(),
+            "ts": unix_now(),
+        });
+        std::fs::write(&path, text).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let _ = std::fs::write(dir.join(format!("{hash}.json")), meta.to_string());
+    }
+    Ok(Json(serde_json::json!({
+        "market": market,
+        "hash": hash,
+        "stored": true,
+        "author": body.author,
+    })))
+}
+
+async fn get_evidence(Path((market, hash)): Path<(String, String)>) -> Result<impl IntoResponse, StatusCode> {
+    let h = hash.trim().trim_start_matches("0x").to_ascii_lowercase();
+    if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !market.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let path = evidence_root().join(&market).join(format!("{h}.txt"));
+    let text = std::fs::read_to_string(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok(Json(serde_json::json!({
+        "market": market,
+        "hash": h,
+        "body": text,
     })))
 }
 
@@ -784,7 +1012,12 @@ async fn health(State(st): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-async fn list_markets(State(st): State<AppState>, Query(q): Query<ListQ>, headers: HeaderMap) -> impl IntoResponse {
+async fn list_markets(
+    State(st): State<AppState>,
+    Query(q): Query<ListQ>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    require_index_fresh(&st)?;
     let country = request_country(&headers);
     let mut rows: Vec<_> = st
         .store
@@ -817,7 +1050,7 @@ async fn list_markets(State(st): State<AppState>, Query(q): Query<ListQ>, header
             to_list_item(m, listing, res)
         })
         .collect();
-    Json(MarketListPage {
+    Ok(Json(MarketListPage {
         page,
         limit,
         total,
@@ -828,7 +1061,7 @@ async fn list_markets(State(st): State<AppState>, Query(q): Query<ListQ>, header
         category: q.category,
         tag: q.tag,
         items,
-    })
+    }))
 }
 
 async fn quote_one(
@@ -836,6 +1069,7 @@ async fn quote_one(
     Path(market): Path<String>,
     Query(q): Query<QuoteQ>,
 ) -> Result<Json<QuoteJson>, StatusCode> {
+    require_index_fresh(&st)?;
     let row = st.store.get(&market).ok_or(StatusCode::NOT_FOUND)?;
     let in_set = if let Some(kind) = q.kind {
         let k_max = if row.extra_u2 == 0 { 10 } else { row.extra_u2 as u32 };
@@ -882,6 +1116,7 @@ pub struct BookJson {
 }
 
 async fn book_one(State(st): State<AppState>, Path(market): Path<String>) -> Result<Json<BookJson>, StatusCode> {
+    require_index_fresh(&st)?;
     let row = st.store.get(&market).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(BookJson {
         market,
@@ -906,6 +1141,7 @@ async fn preview_one(
     Path(market): Path<String>,
     Query(q): Query<QuoteQ>,
 ) -> Result<Json<math_wasm::Preview>, StatusCode> {
+    require_index_fresh(&st)?;
     let row = st.store.get(&market).ok_or(StatusCode::NOT_FOUND)?;
     let snap = math_wasm::BookSnap {
         beta_raw: row.beta.to_string(),
@@ -975,6 +1211,7 @@ async fn info_one(
     Path(market): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<InfoJson>, StatusCode> {
+    require_index_fresh(&st)?;
     let row = st.store.get(&market).ok_or(StatusCode::NOT_FOUND)?;
     if listing_geo_hidden(st.store.listing_of(&market).as_ref(), request_country(&headers).as_deref()) {
         return Err(StatusCode::FORBIDDEN);
@@ -1038,6 +1275,7 @@ async fn info_one(
 }
 
 async fn pdf_one(State(st): State<AppState>, Path(market): Path<String>) -> Result<Json<PdfJson>, StatusCode> {
+    require_index_fresh(&st)?;
     let row = st.store.get(&market).ok_or(StatusCode::NOT_FOUND)?;
     let book = row.book();
     let p = book.pdf();
@@ -1376,6 +1614,7 @@ async fn put_ticket(State(st): State<AppState>, Json(body): Json<FillMeta>) -> R
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     st.store.set_fill(row.clone());
+    persist_fill_journal(&row);
     Ok(Json(serde_json::json!({ "ok": true, "set_hash": row.set_hash })))
 }
 
@@ -1462,16 +1701,38 @@ fn request_country(headers: &HeaderMap) -> Option<String> {
             }
         }
     }
+    if let Ok(d) = std::env::var("GEOIP_DEFAULT_COUNTRY") {
+        let t = d.trim();
+        if !t.is_empty() {
+            return Some(t.to_ascii_uppercase());
+        }
+    }
+    // Fail closed: treat unknown region as blocked when a listing has blocked_regions.
+    if std::env::var("GEOIP_FAIL_CLOSED").ok().as_deref() == Some("1") {
+        return Some("__UNKNOWN__".into());
+    }
     None
 }
 
 fn listing_geo_hidden(listing: Option<&ListingMeta>, country: Option<&str>) -> bool {
-    listing
-        .map(|l| region_blocked(&l.blocked_regions, country))
-        .unwrap_or(false)
+    let Some(l) = listing else {
+        return false;
+    };
+    if l.blocked_regions.is_empty() {
+        return false;
+    }
+    match country {
+        None => false,
+        Some("__UNKNOWN__") => true,
+        Some(c) => region_blocked(&l.blocked_regions, Some(c)),
+    }
 }
 
 fn allow_unreviewed_create() -> bool {
+    // Never honor the bypass outside local.
+    if !open_review_when_empty() {
+        return false;
+    }
     std::env::var("ALLOW_UNREVIEWED_CREATE").ok().as_deref() == Some("1")
 }
 
@@ -1582,12 +1843,45 @@ fn reviewer_allowlist() -> Vec<String> {
         .collect()
 }
 
+fn operator_allowlist() -> Vec<String> {
+    std::env::var("OPERATOR_PUBKEYS")
+        .unwrap_or_default()
+        .split(|c| c == ',' || c == ' ' || c == ';')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Local: empty REVIEWER_PUBKEYS → any wallet may review (dev).
+/// staging/production: empty → nobody (fail closed).
+fn open_review_when_empty() -> bool {
+    match std::env::var("CPM_ENV").unwrap_or_else(|_| "local".into()).to_ascii_lowercase().as_str() {
+        "production" | "prod" | "staging" => false,
+        _ => true,
+    }
+}
+
 fn is_reviewer(pk: &str) -> bool {
     if !valid_pubkey(pk) {
         return false;
     }
     let list = reviewer_allowlist();
-    list.is_empty() || list.iter().any(|x| x == pk)
+    if list.is_empty() {
+        return open_review_when_empty();
+    }
+    list.iter().any(|x| x == pk)
+}
+
+fn is_operator(pk: &str) -> bool {
+    if !valid_pubkey(pk) {
+        return false;
+    }
+    let list = operator_allowlist();
+    if list.is_empty() {
+        // Ops MAY be public locally; production should set OPERATOR_PUBKEYS.
+        return open_review_when_empty();
+    }
+    list.iter().any(|x| x == pk)
 }
 
 fn app_status_name(row: &ApplicationRow) -> &'static str {
@@ -1990,6 +2284,24 @@ fn keeper_heartbeat() -> Option<notify::Heartbeat> {
     notify::read_heartbeat(path).ok().flatten()
 }
 
+async fn roles_one(Query(q): Query<RolesQuery>) -> impl IntoResponse {
+    let owner = q.owner.trim();
+    let open = open_review_when_empty() && reviewer_allowlist().is_empty();
+    Json(serde_json::json!({
+        "owner": owner,
+        "reviewer": is_reviewer(owner),
+        "operator": is_operator(owner),
+        "open_review": open,
+        "env": std::env::var("CPM_ENV").unwrap_or_else(|_| "local".into()),
+    }))
+}
+
+#[derive(Deserialize)]
+struct RolesQuery {
+    #[serde(default)]
+    owner: String,
+}
+
 async fn ops_status(State(st): State<AppState>) -> impl IntoResponse {
     let rows = st.store.list();
     let n = rows.len();
@@ -2007,11 +2319,39 @@ async fn ops_status(State(st): State<AppState>) -> impl IntoResponse {
         "keeper_ok": hb.as_ref().map(|h| h.ok).unwrap_or(false),
         "keeper_ts": hb.as_ref().map(|h| h.ts).unwrap_or(0),
         "keeper_last": hb.as_ref().map(|h| h.last.clone()).unwrap_or_default(),
-        "index_lag_slots": 0,
+        "index_lag_slots": index_lag_slots(&st, hb.as_ref().map(|h| h.slot).unwrap_or(0)),
+        "index_lag_shed_slots": index_lag_shed_threshold(),
         "pg": st.catalog.has_pg(),
         "read_only": true,
         "withdraw_disabled": true,
     }))
+}
+
+fn index_lag_slots(st: &AppState, keeper_slot: u64) -> u64 {
+    let indexed = st.store.slot();
+    let tip = keeper_slot.max(indexed);
+    tip.saturating_sub(indexed)
+}
+
+/// FR-IDX-01: shed hot reads when indexer lag exceeds `INDEX_LAG_SHED_SLOTS` (0 = off).
+fn index_lag_shed_threshold() -> u64 {
+    std::env::var("INDEX_LAG_SHED_SLOTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(128)
+}
+
+fn require_index_fresh(st: &AppState) -> Result<(), StatusCode> {
+    let thresh = index_lag_shed_threshold();
+    if thresh == 0 {
+        return Ok(());
+    }
+    let hb = keeper_heartbeat();
+    let lag = index_lag_slots(st, hb.as_ref().map(|h| h.slot).unwrap_or(0));
+    if lag > thresh {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(())
 }
 
 async fn notify_feed() -> impl IntoResponse {
@@ -2378,6 +2718,8 @@ pub fn router_with_pool(store: Arc<MemoryStore>, pool: Option<sqlx::PgPool>) -> 
         .route("/v1/markets/{market}/info", get(info_one))
         .route("/v1/markets/{market}/layers", get(layers_one))
         .route("/v1/markets/{market}/resolution", get(resolution_one))
+        .route("/v1/markets/{market}/evidence", post(put_evidence))
+        .route("/v1/markets/{market}/evidence/{hash}", get(get_evidence))
         .route("/v1/markets/{market}/comments", get(list_comments).post(put_comment))
         .route("/v1/markets/{market}/ws", get(ws_market))
         .route("/v1/owners/{owner}/positions", get(owner_positions))
@@ -2393,6 +2735,7 @@ pub fn router_with_pool(store: Arc<MemoryStore>, pool: Option<sqlx::PgPool>) -> 
         .route("/v1/tags/{name}", delete(delete_tag))
         .route("/v1/tickets", post(put_ticket))
         .route("/v1/ops/status", get(ops_status))
+        .route("/v1/roles", get(roles_one))
         .route("/v1/notify", get(notify_feed))
         .route("/v1/pool", get(pool_one))
         .route("/v1/prior", get(prior_one))

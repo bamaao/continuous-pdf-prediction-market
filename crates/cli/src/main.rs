@@ -1,5 +1,7 @@
 //! FR-CLI-01. Instruction bytes come from `crates/client` (program crates), not a second IDL.
 
+mod tickets;
+
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -85,6 +87,17 @@ enum Cmd {
     },
     /// RPC slot, plus Market API health when `MARKET_API` is set.
     IndexStatus,
+    /// Local frozen-$S$ ticket journal (`~/.cpm/tickets.json` or `$CPM_TICKETS_PATH`).
+    #[command(subcommand)]
+    Tickets(TicketsCmd),
+}
+
+#[derive(Subcommand)]
+enum TicketsCmd {
+    /// List locally remembered fill tickets for this keypair.
+    List,
+    /// Print the journal file path.
+    Path,
 }
 
 #[derive(Subcommand)]
@@ -139,6 +152,16 @@ enum MarketCmd {
         topic: String,
         #[arg(long, default_value_t = 0)]
         score_scope: u8,
+        /// Independent Poisson default. Non-zero → Dixon–Coles (`prior_kind=1`).
+        #[arg(long, default_value_t = 0.0)]
+        dc_rho: f64,
+        /// Prior kind override: 0=Poisson, 1=Dixon–Coles, 2=uniform. Default from `dc_rho`.
+        #[arg(long)]
+        prior_kind: Option<u8>,
+        #[arg(long, default_value_t = 1.4)]
+        lambda_home: f64,
+        #[arg(long, default_value_t = 1.1)]
+        lambda_away: f64,
         #[arg(long, default_value_t = 300)]
         close_in: i64,
         #[arg(long)]
@@ -214,7 +237,11 @@ enum SessionCmd {
         #[arg(long)]
         usdc: u64,
     },
-    Revoke,
+    Revoke {
+        /// Session keypair — also revokes MagicBlock SessionTokenV2 when provided.
+        #[arg(long)]
+        authority: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -342,14 +369,15 @@ enum SettleCmd {
     },
     Payout {
         market: String,
-        mask: String,
+        /// Hex mask. Optional when a local ticket journal row exists for this market.
+        mask: Option<String>,
         #[arg(long)]
         owner: Option<String>,
     },
     PayoutSkellam {
         market: String,
-        #[arg(long, default_value_t = 0)]
-        kind: u8,
+        #[arg(long)]
+        kind: Option<u8>,
         #[arg(long, default_value_t = 0)]
         a: i16,
         #[arg(long, default_value_t = 0)]
@@ -364,8 +392,15 @@ enum SettleCmd {
     /// After undelegate, debit the L1 user vault for ER fills on this set.
     SyncVault {
         market: String,
-        mask: String,
+        /// Hex mask. Optional when a local ticket journal row exists for this market.
+        mask: Option<String>,
     },
+}
+
+/// Float → Q64 via milli (1.4 → 1400/1000). Matches Market API `milli=true`.
+fn q64_milli(v: f64) -> i128 {
+    let milli = (v * 1000.0).round() as i64;
+    Q64::from_ratio(milli, 1000).raw()
 }
 
 fn pad32(s: &str) -> [u8; 32] {
@@ -542,6 +577,16 @@ fn next_nonce(rpc: &RpcClient, owner: &Pubkey, market: &Pubkey, explicit: u64) -
     }
 }
 
+#[derive(Clone, Default)]
+struct GwTicket {
+    set_hash: Option<String>,
+    mask: Option<String>,
+    kind: Option<String>,
+    skellam_kind: Option<u8>,
+    a: Option<i64>,
+    b: Option<i64>,
+}
+
 fn send_via_gateway(
     gateway: &str,
     url: &str,
@@ -551,6 +596,7 @@ fn send_via_gateway(
     owner: Pubkey,
     market: Pubkey,
     nonce: u64,
+    ticket: GwTicket,
 ) -> Result<String> {
     let rpc = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
     let bh = rpc.get_latest_blockhash()?;
@@ -564,12 +610,32 @@ fn send_via_gateway(
     }
     let tx = Transaction::new_signed_with_payer(&[heap, cu, ix], Some(&payer.pubkey()), &signers, bh);
     let tx_b64 = B64.encode(bincode::serialize(&tx)?);
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "tx_b64": tx_b64,
         "owner": owner.to_string(),
         "market": market.to_string(),
         "nonce": nonce,
     });
+    if let Some(obj) = body.as_object_mut() {
+        if let Some(v) = ticket.set_hash {
+            obj.insert("set_hash".into(), serde_json::Value::String(v));
+        }
+        if let Some(v) = ticket.mask {
+            obj.insert("mask".into(), serde_json::Value::String(v));
+        }
+        if let Some(v) = ticket.kind {
+            obj.insert("kind".into(), serde_json::Value::String(v));
+        }
+        if let Some(v) = ticket.skellam_kind {
+            obj.insert("skellam_kind".into(), serde_json::json!(v));
+        }
+        if let Some(v) = ticket.a {
+            obj.insert("a".into(), serde_json::json!(v));
+        }
+        if let Some(v) = ticket.b {
+            obj.insert("b".into(), serde_json::json!(v));
+        }
+    }
     let endpoint = format!("{}/v1/submit", gateway.trim_end_matches('/'));
     let resp: serde_json::Value = match ureq::post(&endpoint).send_json(body) {
         Ok(r) => r.into_json()?,
@@ -961,13 +1027,15 @@ fn trade_cmd(
     let market = Pubkey::from_str(&market)?;
     let n = rpc_market_n(url, &market)?;
     let set_mask = mask_bytes(&mask, n)?;
+    let set_hash = client::market::ids::set_hash(&set_mask);
+    let mask_hex = tickets::hex_bytes(&set_mask);
     let l1 = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
     let on_er = market_is_delegated(&l1, &market);
     if on_er {
         if er_url.is_empty() {
             anyhow::bail!("market is delegated; pass --er-url");
         }
-        ensure_seat(url, owner_kp, owner, market, client::market::ids::set_hash(&set_mask))?;
+        ensure_seat(url, owner_kp, owner, market, set_hash)?;
         if session.is_some() {
             ensure_session(url, owner_kp, owner)?;
         }
@@ -976,6 +1044,12 @@ fn trade_cmd(
     let rpc = RpcClient::new_with_commitment(fill_url.to_string(), CommitmentConfig::confirmed());
     let nonce = next_nonce(&rpc, &owner, &market, nonce)?;
     let q = Q64::from_int(shares).raw();
+    let gw_ticket = GwTicket {
+        set_hash: Some(tickets::hex32(&set_hash)),
+        mask: Some(mask_hex.clone()),
+        kind: Some("mask".into()),
+        ..Default::default()
+    };
     let (ixs, payer_owned): (Vec<solana_sdk::instruction::Instruction>, Option<Keypair>) =
         if let Some(path) = session {
             let sk = read_keypair_file(&path).map_err(|e| anyhow::anyhow!("session {path:?}: {e}"))?;
@@ -984,7 +1058,7 @@ fn trade_cmd(
                 sk.pubkey(),
                 Some(client::session_pda(&owner)),
                 market,
-                set_mask,
+                set_mask.clone(),
                 q,
                 nonce,
                 is_buy,
@@ -1003,7 +1077,7 @@ fn trade_cmd(
     for ix in ixs {
         last = if single {
             if let Some(gw) = gateway.as_ref() {
-                send_via_gateway(gw, fill_url, payer, ix, &[], owner, market, nonce)?
+                send_via_gateway(gw, fill_url, payer, ix, &[], owner, market, nonce, gw_ticket.clone())?
             } else {
                 send_ixs(fill_url, payer, vec![ix], &[])?
             }
@@ -1011,7 +1085,20 @@ fn trade_cmd(
             send_ixs(fill_url, payer, vec![ix], &[])?
         };
     }
-    println!("ok {last} shares={shares} nonce={nonce} trader={}", payer.pubkey());
+    let path = tickets::remember_mask(
+        &owner.to_string(),
+        &market.to_string(),
+        &mask_hex,
+        set_hash,
+        shares,
+        nonce,
+        &last,
+    )?;
+    println!(
+        "ok {last} shares={shares} nonce={nonce} trader={} ticket={}",
+        payer.pubkey(),
+        path.display()
+    );
     Ok(())
 }
 
@@ -1078,12 +1165,35 @@ fn trade_skellam_cmd(
         };
     let payer = payer_owned.as_ref().unwrap_or(owner_kp);
     let extra_refs: Vec<&Keypair> = extras.iter().collect();
+    let gw_ticket = GwTicket {
+        set_hash: Some(tickets::hex32(&set_hash)),
+        kind: Some("skellam".into()),
+        skellam_kind: Some(kind),
+        a: Some(i64::from(a)),
+        b: Some(i64::from(b)),
+        ..Default::default()
+    };
     let sig = if let Some(gw) = gateway {
-        send_via_gateway(&gw, fill_url, payer, ix, &extra_refs, owner, market, nonce)?
+        send_via_gateway(&gw, fill_url, payer, ix, &extra_refs, owner, market, nonce, gw_ticket)?
     } else {
         send_ixs(fill_url, payer, vec![ix], &extra_refs)?
     };
-    println!("ok {sig} skellam kind={kind} a={a} b={b} shares={shares} nonce={nonce} trader={}", payer.pubkey());
+    let path = tickets::remember_skellam(
+        &owner.to_string(),
+        &market.to_string(),
+        kind,
+        a,
+        b,
+        set_hash,
+        shares,
+        nonce,
+        &sig,
+    )?;
+    println!(
+        "ok {sig} skellam kind={kind} a={a} b={b} shares={shares} nonce={nonce} trader={} ticket={}",
+        payer.pubkey(),
+        path.display()
+    );
     Ok(())
 }
 
@@ -1438,20 +1548,25 @@ fn main() -> Result<()> {
             } else {
                 opt.url.as_str()
             };
-            let sig = send(
-                url,
-                &kp,
-                client::open_session(
-                    me,
-                    auth.pubkey(),
-                    expires,
-                    usdc,
-                    client::market::session::IX_ALL_TRADES,
-                    whitelist,
-                ),
-            )?;
+            let open = client::open_session(
+                me,
+                auth.pubkey(),
+                expires,
+                usdc,
+                client::market::session::IX_ALL_TRADES,
+                whitelist,
+            );
+            let token = client::create_session_token_v2(me, auth.pubkey(), me, expires, true);
+            let sig = match send_ixs(url, &kp, vec![open.clone(), token], &[&auth]) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("session token create skipped ({e}); protocol Session only");
+                    send(url, &kp, open)?
+                }
+            };
             println!(
-                "ok {sig} session={session} authority={} expires_ts={expires} remaining={usdc}",
+                "ok {sig} session={session} token={} authority={} expires_ts={expires} remaining={usdc}",
+                client::session_token_v2_pda(&me, &auth.pubkey()),
                 auth.pubkey()
             );
         }
@@ -1461,10 +1576,25 @@ fn main() -> Result<()> {
             let sig = send(rpc, &kp, client::renew_session(me, expires, usdc))?;
             println!("ok {sig} session={} expires_ts={expires} remaining={usdc}", client::session_pda(&me));
         }
-        Cmd::Session(SessionCmd::Revoke) => {
+        Cmd::Session(SessionCmd::Revoke { authority }) => {
             let rpc = session_rpc(&opt.url, &opt.er_url, &me);
             let sig = send(rpc, &kp, client::revoke_session(me))?;
             println!("ok {sig} revoked session={}", client::session_pda(&me));
+            if let Some(path) = authority {
+                let auth = read_keypair_file(&path).map_err(|e| anyhow::anyhow!("session key {path:?}: {e}"))?;
+                match send_ixs(
+                    rpc,
+                    &kp,
+                    vec![client::revoke_session_token_v2(me, auth.pubkey(), me)],
+                    &[&auth],
+                ) {
+                    Ok(s) => println!(
+                        "ok {s} revoked session_token={}",
+                        client::session_token_v2_pda(&me, &auth.pubkey())
+                    ),
+                    Err(e) => eprintln!("session token revoke skipped ({e})"),
+                }
+            }
         }
         Cmd::Faucet { amount, mint_authority } => {
             let auth_path = mint_authority.unwrap_or_else(default_mint_authority);
@@ -1613,6 +1743,10 @@ fn main() -> Result<()> {
         Cmd::Market(MarketCmd::CreateSkellam {
             topic,
             score_scope,
+            dc_rho,
+            prior_kind,
+            lambda_home,
+            lambda_away,
             close_in,
             close_ts,
             challenge_secs,
@@ -1622,15 +1756,16 @@ fn main() -> Result<()> {
             let id_hash = client::market::ids::skellam(&topic, score_scope);
             let market = client::market_pda(&id_hash);
             let n = client::market::state::FOOTBALL_N;
+            let prior_kind = prior_kind.unwrap_or(if dc_rho != 0.0 { 1 } else { 0 });
             let args = client::market::state::SkellamArgs {
                 common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
                 topic,
                 score_scope,
                 kickoff_ts: close_ts,
-                prior_kind: 0,
-                lambda_home: Q64::from_int(1).raw(),
-                lambda_away: Q64::from_int(1).raw(),
-                dc_rho: 0,
+                prior_kind,
+                lambda_home: q64_milli(lambda_home),
+                lambda_away: q64_milli(lambda_away),
+                dc_rho: q64_milli(dc_rho),
             };
             let sig = send(&opt.url, &kp, client::create_skellam(me, id_hash, n, args))?;
             finish_grid(&opt.url, &kp, market, n)?;
@@ -1930,8 +2065,15 @@ fn main() -> Result<()> {
             println!("ok {sig} board={}", client::board(&market));
         }
         Cmd::Settle(SettleCmd::SyncVault { market, mask }) => {
+            let market_s = market.clone();
             let market = Pubkey::from_str(&market)?;
             let n = rpc_market_n(&opt.url, &market)?;
+            let mask = match mask {
+                Some(m) => m,
+                None => tickets::last_for(&me.to_string(), &market_s)
+                    .and_then(|t| t.mask)
+                    .context("mask required (no local ticket for this market)")?,
+            };
             let set_hash = client::market::ids::set_hash(&mask_bytes(&mask, n)?);
             let sig = send(&opt.url, &kp, client::sync_vault(me, me, market, set_hash))?;
             println!("ok {sig} synced vault for mask={mask}");
@@ -1944,6 +2086,7 @@ fn main() -> Result<()> {
             println!("ok {sig}");
         }
         Cmd::Settle(SettleCmd::Payout { market, mask, owner }) => {
+            let market_s = market.clone();
             let market = Pubkey::from_str(&market)?;
             let owner = owner
                 .map(|s| Pubkey::from_str(&s))
@@ -1951,21 +2094,41 @@ fn main() -> Result<()> {
                 .unwrap_or(me);
             let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
             let n = rpc_market_n(&opt.url, &market)?;
+            let mask = match mask {
+                Some(m) => m,
+                None => tickets::last_for(&owner.to_string(), &market_s)
+                    .and_then(|t| t.mask)
+                    .context("mask required (no local ticket for this market; pass mask or buy-set first)")?,
+            };
             let set_mask = mask_bytes(&mask, n)?;
             let set_hash = client::market::ids::set_hash(&set_mask);
             undelegate_seat_on_er(&opt.url, &opt.er_url, &kp, owner, market, set_hash)?;
             sync_vault_on_l1(&opt.url, &kp, owner, market, set_hash)?;
             let grid = settle_grid_of(&rpc, market)?;
             let sig = send(&opt.url, &kp, client::payout_on(me, market, owner, set_mask, grid))?;
-            println!("ok {sig}");
+            println!("ok {sig} mask={mask}");
         }
         Cmd::Settle(SettleCmd::PayoutSkellam { market, kind, a, b, owner }) => {
+            let market_s = market.clone();
             let market = Pubkey::from_str(&market)?;
             let owner = owner
                 .map(|s| Pubkey::from_str(&s))
                 .transpose()?
                 .unwrap_or(me);
             let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
+            let (kind, a, b) = match kind {
+                Some(k) => (k, a, b),
+                None => {
+                    let t = tickets::last_for(&owner.to_string(), &market_s)
+                        .filter(|t| t.skellam_kind.is_some())
+                        .context("skellam line required (no local ticket; pass --kind/--a/--b)")?;
+                    (
+                        t.skellam_kind.unwrap(),
+                        t.a.unwrap_or(0) as i16,
+                        t.b.unwrap_or(0) as i16,
+                    )
+                }
+            };
             let set_hash = client::market::ids::skellam_ticket(kind, a, b);
             undelegate_seat_on_er(&opt.url, &opt.er_url, &kp, owner, market, set_hash)?;
             sync_vault_on_l1(&opt.url, &kp, owner, market, set_hash)?;
@@ -2007,9 +2170,56 @@ fn main() -> Result<()> {
             }
         }
         Cmd::IndexStatus => {
-            let rpc = RpcClient::new(opt.url);
+            let rpc = RpcClient::new(opt.url.clone());
             let slot = rpc.get_slot().context("rpc")?;
-            println!("rpc_ok slot={slot}");
+            let api = std::env::var("MARKET_API").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+            let (index_slot, lag, boards, pg) = match ureq::get(&format!("{api}/v1/ops/status")).call() {
+                Ok(resp) => {
+                    let v: serde_json::Value = resp.into_json().unwrap_or(serde_json::json!({}));
+                    (
+                        v.get("slot").and_then(|x| x.as_u64()).unwrap_or(0),
+                        v.get("index_lag_slots").and_then(|x| x.as_u64()).unwrap_or(0),
+                        v.get("boards").and_then(|x| x.as_u64()).unwrap_or(0),
+                        v.get("pg").and_then(|x| x.as_bool()).unwrap_or(false),
+                    )
+                }
+                Err(_) => (0, 0, 0, false),
+            };
+            let tip_lag = slot.saturating_sub(index_slot);
+            println!(
+                "rpc_ok tip_slot={slot} index_slot={index_slot} tip_lag={tip_lag} ops_lag={lag} boards={boards} pg={pg} api={api}"
+            );
+        }
+        Cmd::Tickets(TicketsCmd::Path) => {
+            println!("{}", tickets::path().display());
+        }
+        Cmd::Tickets(TicketsCmd::List) => {
+            let path = tickets::path();
+            let rows = tickets::list(&me.to_string());
+            if rows.is_empty() {
+                println!("(empty) path={}", path.display());
+            } else {
+                println!("path={} owner={me} count={}", path.display(), rows.len());
+                for r in rows {
+                    let kind = r.kind.as_deref().unwrap_or("?");
+                    let mask = r.mask.as_deref().unwrap_or("-");
+                    let hash = r.set_hash.as_deref().unwrap_or("-");
+                    match (r.skellam_kind, r.a, r.b) {
+                        (Some(k), Some(a), Some(b)) => {
+                            println!(
+                                "ts={} market={} kind={kind} skellam={k}/{a}/{b} shares={} set_hash={hash} nonce={:?} sig={:?}",
+                                r.ts, r.market, r.shares, r.nonce, r.sig
+                            );
+                        }
+                        _ => {
+                            println!(
+                                "ts={} market={} kind={kind} mask={mask} shares={} set_hash={hash} nonce={:?} sig={:?}",
+                                r.ts, r.market, r.shares, r.nonce, r.sig
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(())

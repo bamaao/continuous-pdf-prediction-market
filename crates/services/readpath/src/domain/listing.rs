@@ -121,30 +121,30 @@ mod tests {
 
     #[test]
     fn listing_rejects_empty_title() {
-        assert!(Listing::new("m", "", vec!["宏观".into()], "", "", "d", "e").is_err());
+        assert!(Listing::new("m", "", vec!["macro".into()], "", "", "d", "e").is_err());
     }
 
     #[test]
     fn listing_requires_event_and_description() {
-        assert!(Listing::new("m", "阿森纳 vs 切尔西", vec!["足球".into()], "", "", "", "英超").is_err());
-        assert!(Listing::new("m", "阿森纳 vs 切尔西", vec!["足球".into()], "", "", "说明", "").is_err());
+        assert!(Listing::new("m", "Arsenal vs Chelsea", vec!["football".into()], "", "", "", "EPL").is_err());
+        assert!(Listing::new("m", "Arsenal vs Chelsea", vec!["football".into()], "", "", "desc", "").is_err());
     }
 
     #[test]
-    fn listing_keeps_cjk_tags() {
+    fn listing_keeps_tags() {
         let row = Listing::new(
             "m",
-            "阿森纳 vs 切尔西",
-            vec!["足球".into(), "英超".into()],
+            "Arsenal vs Chelsea",
+            vec!["football".into(), "epl".into()],
             "",
             "",
-            "英超轮次。常规时间终场比分结算。",
-            "阿森纳 vs 切尔西",
+            "Premier League matchday. Settles on regulation full-time score.",
+            "Arsenal vs Chelsea",
         )
         .unwrap();
-        assert_eq!(row.tags, vec!["足球", "英超"]);
-        assert_eq!(row.category, "足球");
-        assert_eq!(row.event, "阿森纳 vs 切尔西");
+        assert_eq!(row.tags, vec!["football", "epl"]);
+        assert_eq!(row.category, "football");
+        assert_eq!(row.event, "Arsenal vs Chelsea");
     }
 
     #[test]
@@ -165,6 +165,6 @@ mod tests {
     #[test]
     fn catalog_tag_rejects_empty() {
         assert!(CatalogTag::new("  ").is_err());
-        assert_eq!(CatalogTag::new("英超").unwrap().name, "英超");
+        assert_eq!(CatalogTag::new("epl").unwrap().name, "epl");
     }
 }

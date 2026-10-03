@@ -154,7 +154,8 @@ fn push_mask_shards(accounts: &mut Vec<AccountMeta>, market: &Pubkey, n: u16, ma
 }
 
 pub const WIDE_EXTRA_LIMIT: usize = 16;
-pub const WIDE_BATCH: usize = 16;
+/// Packet size (~1232) is tighter than the 64-account cap; 16 extras + heap/CU overflows.
+pub const WIDE_BATCH: usize = 8;
 
 pub fn mask_extra_ixs(n: u16, mask: &[u8]) -> Vec<u8> {
     let count = market::state::Grid::shard_count(n);
@@ -308,6 +309,23 @@ pub fn session_pda(owner: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[market::session::SESSION_SEED, owner.as_ref()], &market::ID).0
 }
 
+pub fn session_token_program_id() -> Pubkey {
+    market::session::session_token_program_id()
+}
+
+/// MagicBlock SessionTokenV2 PDA for `(authority=owner, session_signer=trader)`.
+pub fn session_token_v2_pda(owner: &Pubkey, session_signer: &Pubkey) -> Pubkey {
+    market::session::session_token_v2_pda(owner, session_signer)
+}
+
+fn trade_session_token(owner: Pubkey, trader: Pubkey, session: Option<Pubkey>) -> Option<Pubkey> {
+    if session.is_some() && trader != owner {
+        Some(session_token_v2_pda(&owner, &trader))
+    } else {
+        None
+    }
+}
+
 pub fn nonce_pda(owner: &Pubkey, market: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
         &[market::session::NONCE_SEED, owner.as_ref(), market.as_ref()],
@@ -422,6 +440,51 @@ pub fn revoke_session(owner: Pubkey) -> Instruction {
         }
         .to_account_metas(None),
         data: market::instruction::RevokeSession {}.data(),
+    }
+}
+
+/// Create MagicBlock SessionTokenV2 (CR-04). `authority` and `fee_payer` are usually the owner.
+pub fn create_session_token_v2(
+    authority: Pubkey,
+    session_signer: Pubkey,
+    fee_payer: Pubkey,
+    valid_until: i64,
+    top_up: bool,
+) -> Instruction {
+    let session_token = session_token_v2_pda(&authority, &session_signer);
+    let mut data = vec![223u8, 233, 108, 7, 65, 194, 235, 38]; // global:create_session_v2
+    // Option<bool> top_up, Option<i64> valid_until, Option<u64> lamports
+    data.push(1);
+    data.push(u8::from(top_up));
+    data.push(1);
+    data.extend_from_slice(&valid_until.to_le_bytes());
+    data.push(0); // lamports = None
+    Instruction {
+        program_id: session_token_program_id(),
+        accounts: vec![
+            AccountMeta::new(session_token, false),
+            AccountMeta::new(session_signer, true),
+            AccountMeta::new(fee_payer, true),
+            AccountMeta::new_readonly(authority, true),
+            AccountMeta::new_readonly(market::ID, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data,
+    }
+}
+
+/// Revoke MagicBlock SessionTokenV2. Anyone may call once expired; authority must sign while live.
+pub fn revoke_session_token_v2(authority: Pubkey, session_signer: Pubkey, fee_payer: Pubkey) -> Instruction {
+    let session_token = session_token_v2_pda(&authority, &session_signer);
+    Instruction {
+        program_id: session_token_program_id(),
+        accounts: vec![
+            AccountMeta::new(session_token, false),
+            AccountMeta::new(fee_payer, false),
+            AccountMeta::new_readonly(authority, true),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: vec![211, 59, 125, 188, 43, 155, 8, 102], // global:revoke_session_v2
     }
 }
 
@@ -683,6 +746,7 @@ fn trade_set(
         trader,
         owner,
         session,
+        session_token: trade_session_token(owner, trader, session),
         market,
         grid: grid_pda(&market),
         position: position_pda(&market, &owner, &set_h),
@@ -737,6 +801,7 @@ fn trade_wide(
         trader,
         owner,
         session,
+        session_token: trade_session_token(owner, trader, session),
         market,
         grid: grid_pda(&market),
         position: position_pda(&market, &owner, &set_h),
@@ -1529,6 +1594,7 @@ fn trade_skellam(
         trader,
         owner,
         session,
+        session_token: trade_session_token(owner, trader, session),
         market,
         grid: grid_pda(&market),
         position: skellam_position(&market, &owner, kind, a, b),
@@ -1728,7 +1794,8 @@ mod tests {
     #[test]
     fn n1024_full_mask_needs_wide() {
         let mask = vec![0xffu8; 128];
-        assert_eq!(mask_extra_ixs(1024, &mask).len(), 127);
+        // SHARD_CELLS=16 → 64 shards, extras = 63. WIDE_BATCH=8 → begin + 7 accum + 8 apply + finish.
+        assert_eq!(mask_extra_ixs(1024, &mask).len(), 63);
         assert!(needs_wide_fill(1024, &mask));
         assert_eq!(fill_set_ixs(
             Pubkey::new_unique(),
@@ -1744,10 +1811,10 @@ mod tests {
     }
 
     #[test]
-    fn n256_full_mask_needs_wide() {
+    fn n256_full_mask_fits_one_tx() {
         let mask = vec![0xffu8; 32];
-        assert_eq!(mask_extra_ixs(256, &mask).len(), 31);
-        assert!(needs_wide_fill(256, &mask));
+        assert_eq!(mask_extra_ixs(256, &mask).len(), 15);
+        assert!(!needs_wide_fill(256, &mask));
         assert_eq!(fill_set_ixs(
             Pubkey::new_unique(),
             Pubkey::new_unique(),
@@ -1758,6 +1825,32 @@ mod tests {
             1,
             true,
             false,
-        ).len(), 1 + 1 + 2 + 1);
+        ).len(), 1);
+    }
+
+    #[test]
+    fn n1024_session_wide_carries_session_token() {
+        let owner = Pubkey::new_unique();
+        let trader = Pubkey::new_unique();
+        let token = session_token_v2_pda(&owner, &trader);
+        let mask = vec![0xffu8; 128];
+        let ixs = fill_set_ixs(
+            owner,
+            trader,
+            Some(session_pda(&owner)),
+            Pubkey::new_unique(),
+            mask,
+            1,
+            1,
+            true,
+            false,
+        );
+        assert!(ixs.len() > 1, "full n=1024 mask must split into wide ixs");
+        for ix in &ixs {
+            assert!(
+                ix.accounts.iter().any(|a| a.pubkey == token),
+                "every wide fill ix must include SessionTokenV2"
+            );
+        }
     }
 }

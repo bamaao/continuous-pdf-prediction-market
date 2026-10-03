@@ -1,19 +1,19 @@
 "use client";
 
-import { listListingApplications, reviewListingApplication, type ListingApplication } from "@cpm/sdk";
+import { fetchRoles, listListingApplications, reviewListingApplication, type ListingApplication } from "@cpm/sdk";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { MARKET_API } from "@/lib/env";
-import { APPROVE_AND_OPEN_MARKET, NEED_WALLET, OPEN_MARKET, OPEN_RISK_AUCTION, RETRY_OPEN_MARKET } from "@/lib/copy";
+import { APPROVE_AND_OPEN_MARKET, ENTER_MARKET, NEED_WALLET, OPEN_MARKET, OPEN_RISK_AUCTION, RETRY_OPEN_MARKET } from "@/lib/copy";
 import { openBoardAsOwner } from "@/lib/open-board";
 
 const STATUS: { id?: number; label: string }[] = [
-  { id: 0, label: "待审" },
-  { id: 1, label: "已批准" },
-  { id: 2, label: "已拒绝" },
-  { id: 3, label: "重复" },
-  { label: "全部" },
+  { id: 0, label: "Pending" },
+  { id: 1, label: "Approved" },
+  { id: 2, label: "Rejected" },
+  { id: 3, label: "Duplicate" },
+  { label: "All" },
 ];
 
 export function ReviewDesk() {
@@ -25,6 +25,32 @@ export function ReviewDesk() {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [justOpened, setJustOpened] = useState<string | null>(null);
+  const [roleNote, setRoleNote] = useState("");
+
+  useEffect(() => {
+    if (!publicKey) {
+      setRoleNote("Connect a wallet — Review is only for R-REVIEW.");
+      return;
+    }
+    let stop = false;
+    fetchRoles(MARKET_API, publicKey.toBase58())
+      .then((r) => {
+        if (stop) return;
+        if (!r.reviewer && !r.open_review) {
+          setRoleNote("This wallet is not on REVIEWER_PUBKEYS.");
+        } else if (r.open_review) {
+          setRoleNote("Local open review — any SIWS wallet may approve (empty REVIEWER_PUBKEYS).");
+        } else {
+          setRoleNote("");
+        }
+      })
+      .catch(() => {
+        if (!stop) setRoleNote("Could not load roles.");
+      });
+    return () => {
+      stop = true;
+    };
+  }, [publicKey]);
 
   const load = useCallback(async () => {
     const page = await listListingApplications(MARKET_API, { status });
@@ -43,7 +69,7 @@ export function ReviewDesk() {
     if (!spec.op) {
       throw new Error("application has no compose spec — ask the applicant to resubmit");
     }
-    setNote(`#${row.id} 正在${OPEN_MARKET}…`);
+    setNote(`#${row.id} ${OPEN_MARKET}…`);
     const { market, sig, created } = await openBoardAsOwner({
       api: MARKET_API,
       connection,
@@ -67,7 +93,7 @@ export function ReviewDesk() {
       market,
     });
     setNote(
-      `#${opened.id} ${opened.status_name} · ${market} · ${created ? OPEN_MARKET : "预测市场已在链上，已写入大厅"} · ${sig}`,
+      `#${opened.id} ${opened.status_name} · ${market} · ${created ? OPEN_MARKET : "prediction market already on-chain, written to the lobby"} · ${sig}`,
     );
     setJustOpened(market);
     return opened;
@@ -79,7 +105,7 @@ export function ReviewDesk() {
       return;
     }
     if (action !== "approve" && !reason.trim()) {
-      setNote("拒绝或标为重复时必须写原因");
+      setNote("a reason is required to reject or mark as duplicate");
       return;
     }
     setBusy(true);
@@ -95,7 +121,7 @@ export function ReviewDesk() {
           await openOnChain(approved);
         } catch (e) {
           setNote(
-            `#${approved.id} 已批准，但预测市场还没出现在大厅。点「${RETRY_OPEN_MARKET}」：${
+            `#${approved.id} approved, but the prediction market is not in the lobby yet. Use “${RETRY_OPEN_MARKET}”: ${
               e instanceof Error ? e.message : OPEN_MARKET
             }`,
           );
@@ -130,7 +156,7 @@ export function ReviewDesk() {
       await openOnChain(row);
       await load();
     } catch (e) {
-      setNote(e instanceof Error ? e.message : `${OPEN_MARKET}失败`);
+      setNote(e instanceof Error ? e.message : `failed to ${OPEN_MARKET}`);
     } finally {
       setBusy(false);
     }
@@ -138,11 +164,12 @@ export function ReviewDesk() {
 
   return (
     <div>
-      <h1 className="font-display text-5xl">审核</h1>
+      <h1 className="font-display text-5xl">Review</h1>
       <p className="mt-2 max-w-2xl text-sm text-paper/70">
-        批准后，用当前钱包{OPEN_MARKET}：大厅能看到，交易者能买。同时{OPEN_RISK_AUCTION}，让资金方报出赔付覆盖。
-        如果这个预测市场已经在链上，再点「{RETRY_OPEN_MARKET}」只会把它写进大厅，不会再建一个。
+        After approve, the connected wallet {OPEN_MARKET}: the lobby shows it, traders can buy. The same step {OPEN_RISK_AUCTION}, so capital can quote payout coverage.
+        If this prediction market is already on-chain, “{RETRY_OPEN_MARKET}” only writes it into the lobby — it does not create a second one.
       </p>
+      {roleNote ? <p className="mt-3 font-mono text-xs text-amber">{roleNote}</p> : null}
       <div className="mt-6 flex flex-wrap gap-2 font-mono text-[11px] uppercase">
         {STATUS.map((s) => (
           <button
@@ -155,14 +182,14 @@ export function ReviewDesk() {
         ))}
       </div>
       <label className="mt-4 block font-mono text-[10px] uppercase text-paper/50">
-        原因（拒绝或标为重复时必填）
+        Reason (required to reject or mark as duplicate)
         <input className="mt-1 w-full border border-rule bg-ink px-2 py-1" value={reason} onChange={(e) => setReason(e.target.value)} />
       </label>
       {note && <p className="mt-3 font-mono text-xs text-amber">{note}</p>}
       {justOpened ? (
         <p className="mt-2">
           <Link href={`/m/${justOpened}`} className="font-mono text-sm text-amber">
-            进入预测市场
+            {ENTER_MARKET}
           </Link>
         </p>
       ) : null}
@@ -182,7 +209,7 @@ export function ReviewDesk() {
             {row.market ? (
               <p className="mt-2">
                 <Link href={`/m/${row.market}`} className="text-amber">
-                  进入预测市场 {row.market.slice(0, 4)}…{row.market.slice(-4)}
+                  {ENTER_MARKET} {row.market.slice(0, 4)}…{row.market.slice(-4)}
                 </Link>
               </p>
             ) : null}
@@ -192,10 +219,10 @@ export function ReviewDesk() {
                   {APPROVE_AND_OPEN_MARKET}
                 </button>
                 <button className="border border-rule px-3 py-1 disabled:opacity-50" disabled={busy} onClick={() => decide(row, "reject")}>
-                  拒绝
+                  Reject
                 </button>
                 <button className="border border-rule px-3 py-1 disabled:opacity-50" disabled={busy} onClick={() => decide(row, "duplicate")}>
-                  标为重复
+                  Mark duplicate
                 </button>
               </div>
             )}
@@ -215,7 +242,7 @@ export function ReviewDesk() {
             )}
           </li>
         ))}
-        {!rows.length && <li className="px-4 py-8 text-paper/45">这一栏没有申请。</li>}
+        {!rows.length && <li className="px-4 py-8 text-paper/45">No applications in this column.</li>}
       </ul>
     </div>
   );

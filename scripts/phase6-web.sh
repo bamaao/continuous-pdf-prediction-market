@@ -17,7 +17,7 @@ CPM="${CPM:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/cpm}"
 GW_BIN="${GW_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/trading-gateway}"
 API_BIN="${API_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/market-api}"
 KEYPAIR="${KEYPAIR:-$HOME/.config/solana/id.json}"
-DEPLOY="$ROOT/target/deploy"
+DEPLOY="${DEPLOY:-${CARGO_TARGET_DIR:-$ROOT/target}/deploy}"
 AUTH="$ROOT/fixtures/usdc-mint-authority.json"
 MINT_ACC="$ROOT/fixtures/usdc-mint.json"
 RECEIPT_DIR="${RECEIPT_DIR:-/tmp/cpm-receipts}"
@@ -26,16 +26,33 @@ VAULT="VaULt11111111111111111111111111111111111111"
 MARKET="Market1111111111111111111111111111111111111"
 RES="Rso1111111111111111111111111111111111111111"
 RISK="Rsk1111111111111111111111111111111111111111"
+SESSION_KEYS="KeyspM2ssCJbqUhQ4k7sveSiY4WjnYsrXkC8oDbwde5"
 USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 need_so() {
   local name="$1"
-  if [[ -f "$DEPLOY/$name.so" ]]; then
+  local force="${2:-0}"
+  if [[ "$force" != "1" && -f "$DEPLOY/$name.so" ]]; then
     echo "reuse $name.so"
     return
   fi
   echo "building $name.so"
   cargo-build-sbf --manifest-path "programs/$name/Cargo.toml"
+}
+
+need_session_keys_so() {
+  mkdir -p "$DEPLOY"
+  if [[ -f "$DEPLOY/session_keys.so" ]]; then
+    echo "reuse session_keys.so"
+    return
+  fi
+  if [[ -f /tmp/cpm-target/deploy/session_keys.so ]]; then
+    cp /tmp/cpm-target/deploy/session_keys.so "$DEPLOY/session_keys.so"
+    echo "reuse /tmp/cpm-target/deploy/session_keys.so"
+    return
+  fi
+  echo "session_keys.so missing; build with cargo-build-sbf against session-keys 3.1.1"
+  exit 1
 }
 
 echo "== build host bins + ensure programs =="
@@ -45,6 +62,7 @@ need_so vault
 need_so market
 need_so resolution
 need_so risk
+need_session_keys_so
 
 if ! [[ -f "$KEYPAIR" ]]; then
   mkdir -p "$(dirname "$KEYPAIR")"
@@ -65,6 +83,7 @@ setsid solana-test-validator \
   --bpf-program "$MARKET" "$DEPLOY/market.so" \
   --bpf-program "$RES" "$DEPLOY/resolution.so" \
   --bpf-program "$RISK" "$DEPLOY/risk.so" \
+  --bpf-program "$SESSION_KEYS" "$DEPLOY/session_keys.so" \
   --account "$USDC" "$MINT_ACC" \
   >/tmp/cpm-validator.log 2>&1 < /dev/null &
 echo $! >/tmp/cpm-val.pid
@@ -86,10 +105,11 @@ echo "== vault / market =="
 cpm faucet 100000
 cpm vault-init
 cpm deposit 50000
-CREATE_OUT="$(cpm market create-gaussian phase6-web first --n 8 --c-m 5 --close-in 600 --challenge-secs 20)"
+cpm committee init --m 1 || true
+CREATE_OUT="$(cpm market create-gaussian phase6-web first --n 8 --close-in 600 --challenge-secs 20)"
 echo "$CREATE_OUT"
 MARKET_PK="$(echo "$CREATE_OUT" | sed -n 's/.*market=\([^ ]*\).*/\1/p')"
-cpm settle fund-cm "$MARKET_PK" 5
+cpm settle fund-cm "$MARKET_PK"
 
 setsid env RPC_URL="$URL" LISTEN="127.0.0.1:8080" EMBED_INDEXER=1 "$API_BIN" >/tmp/cpm-market-api.log 2>&1 < /dev/null &
 echo $! >/tmp/cpm-api.pid

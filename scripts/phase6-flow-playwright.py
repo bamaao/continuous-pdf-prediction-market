@@ -293,12 +293,12 @@ def run_ui(kp: Keypair) -> int:
         page.get_by_role("button", name="Submit for review").click()
         g_market = None
         try:
-            wait_text(page, "审核通过后由评审方开通预测市场", timeout_ms=45_000)
+            wait_text(page, "after review, the reviewer opens the prediction market", timeout_ms=45_000)
             out("application submitted")
-            page.get_by_role("link", name="审核").click()
+            page.get_by_role("link", name="Review").click()
             page.wait_for_load_state("networkidle")
-            page.locator("li").filter(has_text=f"PW Gaussian {stamp}").get_by_role("button", name="批准并开通预测市场").click()
-            link = page.get_by_role("link", name="进入预测市场", exact=True)
+            page.locator("li").filter(has_text=f"PW Gaussian {stamp}").get_by_role("button", name="Approve and open prediction market").click()
+            link = page.get_by_role("link", name="Open prediction market", exact=True)
             expect(link).to_be_visible(timeout=90_000)
             href = link.get_attribute("href") or ""
             g_market = href.split("/m/")[-1]
@@ -312,6 +312,16 @@ def run_ui(kp: Keypair) -> int:
         if g_market:
             page.goto(BASE + f"/m/{g_market}", wait_until="networkidle")
             page.get_by_role("button", name="Open session").wait_for(timeout=15_000)
+            page.get_by_role("button", name="Open session").click()
+            try:
+                wait_text(page, "session live", timeout_ms=45_000)
+                out("open session ok")
+            except PwTimeout:
+                msg = note_or_err(page)
+                FINDINGS.append(f"Open session did not confirm: {msg}")
+                out("open session FAIL " + msg)
+                failed += 1
+            shot(page, "03b-session")
             bars = page.locator("div.flex.h-64.items-end button")
             for _ in range(20):
                 if bars.count() >= 2:
@@ -375,11 +385,11 @@ def run_ui(kp: Keypair) -> int:
         page.get_by_role("button", name="Submit for review").click()
         s_market = None
         try:
-            wait_text(page, "审核通过后由评审方开通预测市场", timeout_ms=45_000)
-            page.get_by_role("link", name="审核").click()
+            wait_text(page, "after review, the reviewer opens the prediction market", timeout_ms=45_000)
+            page.get_by_role("link", name="Review").click()
             page.wait_for_load_state("networkidle")
-            page.locator("li").filter(has_text=f"PW Skellam {stamp}").get_by_role("button", name="批准并开通预测市场").click()
-            link = page.get_by_role("link", name="进入预测市场", exact=True)
+            page.locator("li").filter(has_text=f"PW Skellam {stamp}").get_by_role("button", name="Approve and open prediction market").click()
+            link = page.get_by_role("link", name="Open prediction market", exact=True)
             expect(link).to_be_visible(timeout=90_000)
             href = link.get_attribute("href") or ""
             s_market = href.split("/m/")[-1]
@@ -394,16 +404,16 @@ def run_ui(kp: Keypair) -> int:
             page.goto(BASE + f"/m/{s_market}", wait_until="networkidle")
             page.get_by_role("button", name="Open session").wait_for(timeout=15_000)
             for _ in range(20):
-                if page.get_by_role("button", name="胜", exact=True).count():
+                if page.get_by_role("button", name="Home", exact=True).count():
                     break
                 page.wait_for_timeout(500)
                 page.reload(wait_until="networkidle")
-            if page.get_by_role("button", name="胜", exact=True).count():
-                page.get_by_role("button", name="胜", exact=True).click()
+            if page.get_by_role("button", name="Home", exact=True).count():
+                page.get_by_role("button", name="Home", exact=True).click()
                 page.wait_for_timeout(800)
                 btn = page.get_by_role("button", name="Buy line")
                 if btn.count() == 0:
-                    FINDINGS.append("typed 胜 did not switch button to Buy line")
+                    FINDINGS.append("typed Home did not switch button to Buy line")
                     failed += 1
                 else:
                     btn.click()

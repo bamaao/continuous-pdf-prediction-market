@@ -3,11 +3,22 @@ import { SignJWT } from "jose";
 import { NextResponse } from "next/server";
 import { takeNonce } from "@/lib/siws-store";
 
-function secret() {
-  return new TextEncoder().encode(process.env.SIWS_SECRET ?? "dev-siws-not-for-prod");
+const DEV_SECRET = "dev-siws-not-for-prod";
+
+function secretBytes(): Uint8Array | null {
+  const raw = process.env.SIWS_SECRET ?? "";
+  const env = (process.env.CPM_ENV ?? process.env.NEXT_PUBLIC_CPM_ENV ?? "local").toLowerCase();
+  if ((env === "production" || env === "prod" || env === "staging") && (!raw || raw === DEV_SECRET)) {
+    return null;
+  }
+  return new TextEncoder().encode(raw || DEV_SECRET);
 }
 
 export async function POST(req: Request) {
+  const secret = secretBytes();
+  if (!secret) {
+    return NextResponse.json({ error: "SIWS_SECRET must be set for staging/production" }, { status: 500 });
+  }
   const { address, message, signature } = (await req.json()) as {
     address?: string;
     message?: string;
@@ -33,7 +44,7 @@ export async function POST(req: Request) {
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(address)
     .setExpirationTime(claims.exp)
-    .sign(secret());
+    .sign(secret);
   const res = NextResponse.json({ ok: true, purpose: "query" });
   res.cookies.set("cpm_jwt", token, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 3600 });
   return res;

@@ -29,6 +29,30 @@ pub struct FillRecord {
     pub sig: String,
     pub prev_root: String,
     pub root: String,
+    /// Frozen set $S$ for claim (FR-UI-41). Not part of `trades_root` hash — side payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skellam_kind: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b: Option<i64>,
+}
+
+/// Optional ticket fields carried beside the durable receipt (not hashed into `trades_root`).
+#[derive(Clone, Debug, Default)]
+pub struct TicketSide {
+    pub set_hash: Option<String>,
+    pub mask: Option<String>,
+    pub kind: Option<String>,
+    pub skellam_kind: Option<u8>,
+    pub a: Option<i64>,
+    pub b: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -129,6 +153,18 @@ impl Journal {
         nonce: u64,
         sig: &str,
     ) -> Result<[u8; 32]> {
+        self.append_ticket(market, owner, nonce, sig, TicketSide::default())
+    }
+
+    /// Same as `append`, plus frozen $S$ so claim can recover without Postgres (large $n$).
+    pub fn append_ticket(
+        &self,
+        market: &str,
+        owner: &str,
+        nonce: u64,
+        sig: &str,
+        side: TicketSide,
+    ) -> Result<[u8; 32]> {
         let (rows, prev) = self.replay(market)?;
         let seq = rows.len() as u64 + 1;
         let mut rec = FillRecord {
@@ -139,6 +175,12 @@ impl Journal {
             sig: sig.to_string(),
             prev_root: hex(&prev),
             root: String::new(),
+            set_hash: side.set_hash,
+            mask: side.mask,
+            kind: side.kind,
+            skellam_kind: side.skellam_kind,
+            a: side.a,
+            b: side.b,
         };
         let root = chain(prev, &canonical_body(&rec));
         rec.root = hex(&root);
@@ -150,6 +192,46 @@ impl Journal {
             f.flush()?;
         }
         Ok(root)
+    }
+
+    /// Latest ticket side for `(owner, market)` with a mask or typed Skellam, newest first.
+    pub fn ticket_for(&self, market: &str, owner: &str, set_hash: &str) -> Option<TicketSide> {
+        let want = set_hash.trim_start_matches("0x").to_ascii_lowercase();
+        let (rows, _) = self.replay(market).ok()?;
+        for rec in rows.into_iter().rev() {
+            if rec.owner != owner {
+                continue;
+            }
+            let hash = rec
+                .set_hash
+                .as_deref()
+                .unwrap_or("")
+                .trim_start_matches("0x")
+                .to_ascii_lowercase();
+            let mask_ok = rec.mask.as_ref().map(|m| !m.is_empty()).unwrap_or(false);
+            let sk_ok = rec.skellam_kind.is_some();
+            if !mask_ok && !sk_ok {
+                continue;
+            }
+            if !want.is_empty() && !hash.is_empty() && hash != want {
+                continue;
+            }
+            return Some(TicketSide {
+                set_hash: rec.set_hash.or_else(|| {
+                    if want.is_empty() {
+                        None
+                    } else {
+                        Some(want.clone())
+                    }
+                }),
+                mask: rec.mask,
+                kind: rec.kind,
+                skellam_kind: rec.skellam_kind,
+                a: rec.a,
+                b: rec.b,
+            });
+        }
+        None
     }
 }
 
@@ -218,5 +300,31 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(root, want);
         assert_eq!(rows[0].nonce, 7);
+    }
+
+    #[test]
+    fn ticket_side_survives_object_store_and_is_not_in_root() {
+        let (r, o) = tmp();
+        let j = Journal::open(&r, &o).unwrap();
+        let side = TicketSide {
+            set_hash: Some("ab".repeat(32)),
+            mask: Some("ff".into()),
+            kind: Some("mask".into()),
+            ..Default::default()
+        };
+        let root = j
+            .append_ticket("Mkt333", "Own333", 1, "sigD", side.clone())
+            .unwrap();
+        // Same root as append without side would produce for same seq body.
+        let bare = {
+            let (r2, o2) = tmp();
+            let j2 = Journal::open(&r2, &o2).unwrap();
+            j2.append("Mkt333", "Own333", 1, "sigD").unwrap()
+        };
+        assert_eq!(root, bare);
+        fs::remove_dir_all(&r).unwrap();
+        let j3 = Journal::open(&r, &o).unwrap();
+        let t = j3.ticket_for("Mkt333", "Own333", &"ab".repeat(32)).unwrap();
+        assert_eq!(t.mask.as_deref(), Some("ff"));
     }
 }

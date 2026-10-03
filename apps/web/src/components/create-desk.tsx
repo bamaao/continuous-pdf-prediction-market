@@ -38,7 +38,7 @@ const FAMILY_BLURB: Record<number, { x: string; hint: string }> = {
   0: { x: "score pair H–A, overflow 10+", hint: "Football. 11×11 Skellam grid. Kickoff does not stop trading." },
   1: { x: "scalar print", hint: "CPI / macro. x* is the first official print. Units are percentage points." },
   2: { x: "positive scalar", hint: "Daily price. Lock price_rule off-chain; x* is the defined print. Ω > 0." },
-  3: { x: "当选人 / 前 n 名 / 得票份额", hint: "选举。一族三种版式：原子、前 n 名组合、得票份额单形。" },
+  3: { x: "winner / top-n / vote share", hint: "Election. One family, three layouts: atoms, top-n combinations, vote-share simplex." },
   4: { x: "YES or NO", hint: "Binary. Early YES only when the defined event has occurred." },
 };
 
@@ -136,6 +136,8 @@ export function CreateDesk() {
   const [closeTs, setCloseTs] = useState(() => Math.floor(Date.now() / 1000) + 86400);
   const [lambdaH, setLambdaH] = useState(1.4);
   const [lambdaA, setLambdaA] = useState(1.1);
+  /** Dixon–Coles ρ; 0 = independent Poisson (default). */
+  const [dcRho, setDcRho] = useState(0);
   const [xMin, setXMin] = useState(-2);
   const [xMax, setXMax] = useState(12);
   const [mu, setMu] = useState(2.4);
@@ -200,13 +202,13 @@ export function CreateDesk() {
       : family === 2
         ? `logN(μ=${mu}, σ=${sigma}) on [${xMin}, ${xMax}]`
         : family === 0
-          ? `Poisson λ_H=${lambdaH}, λ_A=${lambdaA}`
+          ? `Poisson λ_H=${lambdaH}, λ_A=${lambdaA}${dcRho !== 0 ? ` · DC ρ=${dcRho}` : ""}`
           : family === 3
             ? layout === DIRICHLET_SIMPLEX
-              ? `得票份额单形 k=${kCand} bins=${bins} → ${cells} 格`
+              ? `vote-share simplex k=${kCand} bins=${bins} → ${cells} cells`
               : layout === DIRICHLET_TOP_N
-                ? `前 ${topN} 名 · k=${kCand} → C=${cells}`
-                : `Dirichlet α=1 × ${n} 当选人`
+                ? `top-${topN} · k=${kCand} → C=${cells}`
+                : `Dirichlet α=1 × ${n} winners`
             : "Bernoulli 50 / 50";
 
   useEffect(() => {
@@ -354,6 +356,11 @@ export function CreateDesk() {
             milli: true,
             lambda_home: toMilli(lambdaH),
             lambda_away: toMilli(lambdaA),
+            ...(family === 0 && dcRho !== 0
+              ? { prior_kind: 1, dc_rho: toMilli(dcRho) }
+              : family === 0
+                ? { prior_kind: 0, dc_rho: 0 }
+                : {}),
             x_min: toMilli(xMin),
             x_max: toMilli(xMax),
             mu: toMilli(mu),
@@ -398,7 +405,7 @@ export function CreateDesk() {
       return;
     }
     if (description.trim().length < 12) {
-      setNote("写清描述：对阵/公布、结算规则和数据来源，至少一句话");
+      setNote("write a description: match/print, settlement, and source — at least one sentence");
       return;
     }
     if (!topic.trim()) {
@@ -431,16 +438,16 @@ export function CreateDesk() {
     }
     if (family === 3) {
       if (!dirichletN || dirichletN < 2 || dirichletN > MAX_N) {
-        setNote("Dirichlet 格子数必须在 2…1024。单形请减小 bins 或 k。");
+        setNote("Dirichlet cell count must be 2…1024. For a simplex, reduce bins or k.");
         return;
       }
       const alphaK = layout === DIRICHLET_ATOMS ? n : kCand;
       if (alphaK > 4 && dirichletNeedsGrow(dirichletN)) {
-        setNote("超过 10KB 时 k 必须 ≤4（链上 extra.a–d 只存 4 个 α）");
+        setNote("when the grid exceeds 10KB, k must be ≤4 (on-chain extra.a–d hold only 4 α)");
         return;
       }
       if (layout === DIRICHLET_TOP_N && (topN < 1 || topN >= kCand)) {
-        setNote("前 n 名要求 1 ≤ n < 候选人数");
+        setNote("top-n requires 1 ≤ n < candidate count");
         return;
       }
     }
@@ -458,7 +465,7 @@ export function CreateDesk() {
       });
       setAppId(row.id);
       setAppStatus(row.status_name);
-      setNote(`申请 #${row.id} · ${row.status_name} · 审核通过后由评审方开通预测市场`);
+      setNote(`application #${row.id} · ${row.status_name} · after review, the reviewer opens the prediction market`);
     } catch (e) {
       setNote(e instanceof Error ? e.message : "application failed");
     } finally {
@@ -623,7 +630,7 @@ export function CreateDesk() {
                 className="mt-1 w-full border border-rule bg-ink px-2 py-1 text-[12px] normal-case tracking-normal"
                 value={event}
                 onChange={(e) => setEvent(e.target.value)}
-                placeholder="阿森纳 vs 切尔西 — 英超常规时间比分"
+                placeholder="Arsenal vs Chelsea — Premier League full-time score"
                 maxLength={120}
               />
             </label>
@@ -677,7 +684,10 @@ export function CreateDesk() {
               <div className="grid grid-cols-2 gap-2">
                 <Num label="λ_H (home)" value={lambdaH} step={0.1} onChange={setLambdaH} />
                 <Num label="λ_A (away)" value={lambdaA} step={0.1} onChange={setLambdaA} />
-                <p className="col-span-2 text-[10px] text-paper/40">k_max = 10. Overflow cells show as 10+ on the market.</p>
+                <Num label="Dixon–Coles ρ (0 = off)" value={dcRho} step={0.01} onChange={setDcRho} />
+                <p className="col-span-2 text-[10px] text-paper/40">
+                  k_max = 10. Overflow cells show as 10+. Non-zero ρ writes Dixon–Coles prior (prior_kind=1).
+                </p>
               </div>
             )}
             {(family === 1 || family === 2) && (
@@ -696,13 +706,13 @@ export function CreateDesk() {
             )}
             {family === 3 && (
               <div className="space-y-3">
-                <p className="text-[10px] uppercase text-paper/50">版式</p>
+                <p className="text-[10px] uppercase text-paper/50">Layout</p>
                 <div className="flex flex-wrap gap-2">
                   {(
                     [
-                      [DIRICHLET_ATOMS, "当选人"],
-                      [DIRICHLET_TOP_N, "前 n 名"],
-                      [DIRICHLET_SIMPLEX, "得票份额"],
+                      [DIRICHLET_ATOMS, "Winner"],
+                      [DIRICHLET_TOP_N, "Top-n"],
+                      [DIRICHLET_SIMPLEX, "Vote share"],
                     ] as const
                   ).map(([v, label]) => (
                     <button
@@ -729,24 +739,24 @@ export function CreateDesk() {
                 </div>
                 {layout === DIRICHLET_ATOMS && (
                   <p className="text-[10px] normal-case leading-relaxed text-paper/40">
-                    恰好一名当选。格子数 = 候选人数。α_i = 1。超过 10KB 的 atoms 链上会拒。
+                    Exactly one winner. Cell count = candidate count. α_i = 1. Atoms over 10KB are rejected on-chain.
                   </p>
                 )}
                 {layout === DIRICHLET_TOP_N && (
                   <p className="text-[10px] normal-case leading-relaxed text-paper/40">
-                    格子是「哪 n 人进入名单」的组合 C(k, n)。先验均匀。k 最大 16。
+                    Cells are combinations “which n names make the list” C(k, n). Uniform prior. k max 16.
                   </p>
                 )}
                 {layout === DIRICHLET_SIMPLEX && (
                   <p className="text-[10px] normal-case leading-relaxed text-paper/40">
-                    得票份额 (s₁…s_k)，Σ s_i = 1，s_i = c_i / bins。格子数 = C(bins+k−1, k−1)。超过 10KB 时
-                    k 必须 ≤ 4。k 最大 16。
+                    Vote share (s₁…s_k), Σ s_i = 1, s_i = c_i / bins. Cell count = C(bins+k−1, k−1). Over 10KB,
+                    k must be ≤ 4. k max 16.
                   </p>
                 )}
                 {layout !== DIRICHLET_ATOMS && (
                   <div className="grid grid-cols-2 gap-2">
                     <Num
-                      label="候选人数 k"
+                      label="Candidates k"
                       value={kCand}
                       step={1}
                       onChange={(v) => {
@@ -757,14 +767,14 @@ export function CreateDesk() {
                     />
                     {layout === DIRICHLET_TOP_N && (
                       <Num
-                        label="前 n 名"
+                        label="Top-n"
                         value={topN}
                         step={1}
                         onChange={(v) => setTopN(Math.max(1, Math.min(kCand - 1, Math.round(v) || 1)))}
                       />
                     )}
                     {layout === DIRICHLET_SIMPLEX && (
-                      <Num label="bins（份额等分）" value={bins} step={1} onChange={(v) => setBins(Math.max(1, Math.round(v) || 1))} />
+                      <Num label="bins (share partitions)" value={bins} step={1} onChange={(v) => setBins(Math.max(1, Math.round(v) || 1))} />
                     )}
                   </div>
                 )}
@@ -790,9 +800,9 @@ export function CreateDesk() {
             )}
             {family === 3 && (
               <p className="text-[10px] normal-case text-paper/45">
-                格子 {cells || "—"}
+                Cells {cells || "—"}
                 {cells >= 2 && dirichletNeedsGrow(cells) ? ` · ${dirichletGrowHint(cells)}` : ""}
-                {cells > MAX_N ? " · 超过 MAX_N=1024" : ""}
+                {cells > MAX_N ? " · exceeds MAX_N=1024" : ""}
               </p>
             )}
             {prior && <PriorPreview prior={prior} family={family} />}
@@ -965,8 +975,8 @@ export function CreateDesk() {
                   } else {
                     setNote(
                       row.status_name === "approved"
-                        ? `申请 #${row.id} 已批准，评审方正在开通预测市场`
-                        : `申请 #${row.id} · ${row.status_name} · 等待审核`,
+                        ? `application #${row.id} approved — reviewer is opening the prediction market`
+                        : `application #${row.id} · ${row.status_name} · awaiting review`,
                     );
                   }
                 } catch (e) {

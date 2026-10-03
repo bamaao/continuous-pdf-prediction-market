@@ -26,6 +26,9 @@ fn pack_mint(authority: &Pubkey) -> Vec<u8> {
 }
 
 fn point_sbf_out() {
+    if std::env::var_os("SBF_OUT_DIR").is_some() {
+        return;
+    }
     let deploy = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/deploy");
     std::env::set_var("SBF_OUT_DIR", deploy);
 }

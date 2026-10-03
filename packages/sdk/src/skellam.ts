@@ -12,12 +12,12 @@ export type SkellamLine = {
 };
 
 export const SKELLAM_LINES: SkellamLine[] = [
-  { id: "home", label: "胜", kind: 0, a: 0, b: 0 },
-  { id: "draw", label: "平", kind: 1, a: 0, b: 0 },
-  { id: "away", label: "负", kind: 2, a: 0, b: 0 },
-  { id: "h1x2-win", label: "让胜 −1", kind: -2, a: 1, b: 1 },
-  { id: "h1x2-draw", label: "让平 −1", kind: -2, a: 1, b: 0 },
-  { id: "h1x2-lose", label: "让负 −1", kind: -2, a: 1, b: -1 },
+  { id: "home", label: "Home", kind: 0, a: 0, b: 0 },
+  { id: "draw", label: "Draw", kind: 1, a: 0, b: 0 },
+  { id: "away", label: "Away", kind: 2, a: 0, b: 0 },
+  { id: "h1x2-win", label: "AH 1X2 win −1", kind: -2, a: 1, b: 1 },
+  { id: "h1x2-draw", label: "AH 1X2 draw −1", kind: -2, a: 1, b: 0 },
+  { id: "h1x2-lose", label: "AH 1X2 lose −1", kind: -2, a: 1, b: -1 },
   { id: "over15", label: "Over 1.5", kind: 3, a: 3, b: 0 },
   { id: "over25", label: "Over 2.5", kind: 3, a: 5, b: 0 },
   { id: "over35", label: "Over 3.5", kind: 3, a: 7, b: 0 },
@@ -37,7 +37,7 @@ export function quarterToHalves(quarters: number): [number, number] {
   return [lo, lo + 1];
 }
 
-/** Chinese handicap 1X2 after home gives `h` goals: 让胜 / 让平 / 让负. */
+/** Asian-handicap 1X2 after home gives `h` goals: win / draw / lose. */
 export function handicap1x2Mask(h: number, side: "win" | "draw" | "lose"): boolean[] {
   return mapCells((i, j) => {
     const d = i - j;

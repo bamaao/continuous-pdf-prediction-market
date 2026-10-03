@@ -568,7 +568,7 @@ def football_specs_unused() -> list[dict]:
             "id": "football-1-1-draw-handicap",
             "topic": "fd",
             "tag": "ft11",
-            "title": "Football 1-1 draw + 让球",
+            "title": "Football 1-1 draw + handicap",
             "score": (1, 1),
             "expect_label": "1-1",
             "c_m": 80,
@@ -654,11 +654,11 @@ def assert_face_table() -> None:
         fc.expect_eq(cid, got_tot, tot, "parts_tot")
         if cid not in " ".join(fc.FINDINGS):
             fc.ok(cid, f"hit={hit}/{got_tot}")
-    fc.expect_eq("h1x2-2-1-draw", h1x2_hit(1, "draw", 2, 1), True, "2-1 is 让平 −1")
-    fc.expect_eq("h1x2-2-1-win", h1x2_hit(1, "win", 2, 1), False, "2-1 is not 让胜 −1")
-    fc.expect_eq("h1x2-1-1-lose", h1x2_hit(1, "lose", 1, 1), True, "1-1 is 让负 −1")
-    fc.expect_eq("h1x2-0-3-lose", h1x2_hit(1, "lose", 0, 3), True, "0-3 is 让负 −1")
-    fc.expect_eq("h1x2-12-1-win", h1x2_hit(1, "win", 10, 1), True, "10-1 bucket is 让胜 −1")
+    fc.expect_eq("h1x2-2-1-draw", h1x2_hit(1, "draw", 2, 1), True, "2-1 is AH 1X2 draw −1")
+    fc.expect_eq("h1x2-2-1-win", h1x2_hit(1, "win", 2, 1), False, "2-1 is not AH 1X2 win −1")
+    fc.expect_eq("h1x2-1-1-lose", h1x2_hit(1, "lose", 1, 1), True, "1-1 is AH 1X2 lose −1")
+    fc.expect_eq("h1x2-0-3-lose", h1x2_hit(1, "lose", 0, 3), True, "0-3 is AH 1X2 lose −1")
+    fc.expect_eq("h1x2-12-1-win", h1x2_hit(1, "win", 10, 1), True, "10-1 bucket is AH 1X2 win −1")
     lo, hi = quarter_to_halves(-3)
     fc.expect_eq("quarter--075", (lo, hi), (-2, -1), "−0.75 → (−1.0, −0.5)")
     fc.ok(

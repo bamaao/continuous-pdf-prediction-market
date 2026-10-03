@@ -1,6 +1,15 @@
 "use client";
 
-import { clearSessionMeta, compose, deleteSessionSecret, loadSessionMeta, saveSessionMeta, saveSessionSecret, SessionMeta } from "@cpm/sdk";
+import {
+  clearSessionMeta,
+  compose,
+  deleteSessionSecret,
+  loadSessionMeta,
+  loadSessionSecret,
+  saveSessionMeta,
+  saveSessionSecret,
+  SessionMeta,
+} from "@cpm/sdk";
 import { needsInWalletBrowse, phantomBrowseUrl, readInjectedWallet, solflareBrowseUrl } from "@cpm/sdk";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
@@ -89,17 +98,63 @@ export function WalletBar() {
       expires_ts: expires,
       remaining_usdc: 20_000,
     };
+    const tokenBody = {
+      op: "create_session_token",
+      owner: publicKey.toBase58(),
+      authority: session.publicKey.toBase58(),
+      expires_ts: expires,
+      top_up: true,
+    };
+    const signOpen = async (ixs: Awaited<ReturnType<typeof compose>>[]) => {
+      await sendSigned(
+        connection,
+        async (tx) => {
+          tx.partialSign(session);
+          return signTransaction(tx);
+        },
+        publicKey,
+        ixs,
+      );
+    };
     try {
-      await sendSigned(connection, signTransaction, publicKey, [await compose(MARKET_API, openBody)]);
+      const openIx = await compose(MARKET_API, openBody);
+      const tokenIx = await compose(MARKET_API, tokenBody);
+      await signOpen([openIx, tokenIx]);
     } catch {
       try {
         await sendSigned(connection, signTransaction, publicKey, [
           await compose(MARKET_API, { op: "revoke_session", owner: publicKey.toBase58() }),
         ]);
       } catch {
-        /* no live session */
+        /* no live protocol session */
       }
-      await sendSigned(connection, signTransaction, publicKey, [await compose(MARKET_API, openBody)]);
+      try {
+        const secret = await loadSessionSecret(publicKey.toBase58());
+        if (secret) {
+          const old = Keypair.fromSecretKey(secret);
+          await sendSigned(
+            connection,
+            async (tx) => {
+              tx.partialSign(old);
+              return signTransaction(tx);
+            },
+            publicKey,
+            [
+              await compose(MARKET_API, {
+                op: "revoke_session_token",
+                owner: publicKey.toBase58(),
+                authority: old.publicKey.toBase58(),
+              }),
+            ],
+          );
+        }
+      } catch {
+        /* no live SessionToken */
+      }
+      const openIx = await compose(MARKET_API, openBody);
+      const tokenIx = await compose(MARKET_API, tokenBody);
+      // Both layers required (CR-04). Needs `session-keys` program on the cluster.
+      await signOpen([openIx, tokenIx]);
     }
     await saveSessionSecret(publicKey.toBase58(), session.secretKey);
     const next = { expires_ts: expires, remaining_usdc: 20_000 };
@@ -123,8 +178,33 @@ export function WalletBar() {
   async function endSession() {
     if (!publicKey || !signTransaction) return;
     setBusy("revoking session");
-    const ix = await compose(MARKET_API, { op: "revoke_session", owner: publicKey.toBase58() });
-    await sendSigned(connection, signTransaction, publicKey, [ix]);
+    const ixs = [await compose(MARKET_API, { op: "revoke_session", owner: publicKey.toBase58() })];
+    try {
+      const secret = await loadSessionSecret(publicKey.toBase58());
+      if (secret) {
+        const session = Keypair.fromSecretKey(secret);
+        ixs.push(
+          await compose(MARKET_API, {
+            op: "revoke_session_token",
+            owner: publicKey.toBase58(),
+            authority: session.publicKey.toBase58(),
+          }),
+        );
+        await sendSigned(
+          connection,
+          async (tx) => {
+            tx.partialSign(session);
+            return signTransaction(tx);
+          },
+          publicKey,
+          ixs,
+        );
+      } else {
+        await sendSigned(connection, signTransaction, publicKey, ixs);
+      }
+    } catch {
+      await sendSigned(connection, signTransaction, publicKey, ixs.slice(0, 1));
+    }
     await deleteSessionSecret(publicKey.toBase58());
     clearSessionMeta(publicKey.toBase58());
     setMeta(null);

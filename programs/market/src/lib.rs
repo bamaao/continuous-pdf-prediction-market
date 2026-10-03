@@ -20,9 +20,12 @@ pub mod session;
 pub mod state;
 
 use session::{
-    check_trader, is_replay, require_next, FillNonce, Session, IX_BUY_SET, IX_BUY_SKELLAM, IX_SELL_SET,
-    IX_SELL_SKELLAM, IX_ALL_TRADES, NONCE_SEED, SESSION_LIVE, SESSION_REVOKED, SESSION_SEED,
+    check_trader, is_replay, require_next, session_auth_or, FillNonce, Session as ProtocolSession,
+    SessionError, SessionTokenV2, IX_ALL_TRADES, IX_BUY_SET, IX_BUY_SKELLAM, IX_SELL_SET,
+    IX_SELL_SKELLAM, NONCE_SEED, SESSION_LIVE, SESSION_REVOKED, SESSION_SEED,
 };
+// MagicBlock `#[derive(Session)]` / `#[session_auth_or]` (name collides with protocol Session account).
+use session_keys::Session;
 use state::*;
 
 declare_id!("Market1111111111111111111111111111111111111");
@@ -275,15 +278,46 @@ pub mod market {
 
     /// L1 path used before Delegate. After `delegate_book`, fills must run on ER
     /// (pass remaining `MAGIC_PROGRAM_ID`). Trader may be the owner or a live Session.
+    /// CR-04: SessionTokenV2 via `#[session_auth_or]`, or owner / protocol Session authority.
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
     pub fn buy_set(mut ctx: Context<Trade>, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Result<()> {
         fill(&mut ctx, &set_mask, q_raw, nonce, true)
     }
 
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
     pub fn sell_set(mut ctx: Context<Trade>, set_mask: Vec<u8>, q_raw: i128, nonce: u64) -> Result<()> {
         fill(&mut ctx, &set_mask, q_raw, nonce, false)
     }
 
     /// n=1024 full mask cannot lock 63 extras + Trade accounts in one tx (Solana 64-account cap).
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
     pub fn wide_begin(
         mut ctx: Context<Trade>,
         set_mask: Vec<u8>,
@@ -294,6 +328,16 @@ pub mod market {
         wide_begin_fill(&mut ctx, &set_mask, q_raw, nonce, is_buy)
     }
 
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
     pub fn wide_accum(
         mut ctx: Context<Trade>,
         set_mask: Vec<u8>,
@@ -304,6 +348,16 @@ pub mod market {
         wide_accum_fill(&mut ctx, &set_mask, q_raw, nonce, is_buy)
     }
 
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
     pub fn wide_apply(
         mut ctx: Context<Trade>,
         set_mask: Vec<u8>,
@@ -314,6 +368,16 @@ pub mod market {
         wide_apply_fill(&mut ctx, &set_mask, q_raw, nonce, is_buy)
     }
 
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
     pub fn wide_finish(
         mut ctx: Context<Trade>,
         set_mask: Vec<u8>,
@@ -384,6 +448,16 @@ pub mod market {
     }
 
     /// 1X2 / handicap / totals / exact score on the shared Skellam grid.
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
     pub fn buy_skellam_set(
         mut ctx: Context<TradeSkellam>,
         contract: SkellamContract,
@@ -393,6 +467,16 @@ pub mod market {
         fill_skellam(&mut ctx, contract, q_raw, nonce, true)
     }
 
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
     pub fn sell_skellam_set(
         mut ctx: Context<TradeSkellam>,
         contract: SkellamContract,
@@ -2420,7 +2504,7 @@ fn write_roster(
 }
 
 fn settle_vault_fill<'info>(
-    session: &mut Option<Box<Account<'info, Session>>>,
+    session: &mut Option<Box<Account<'info, ProtocolSession>>>,
     owner: AccountInfo<'info>,
     market: AccountInfo<'info>,
     board: AccountInfo<'info>,
@@ -2649,11 +2733,11 @@ pub struct OpenSession<'info> {
     #[account(
         init_if_needed,
         payer = owner,
-        space = Session::SIZE,
+        space = ProtocolSession::SIZE,
         seeds = [SESSION_SEED, owner.key().as_ref()],
         bump
     )]
-    pub session: Account<'info, Session>,
+    pub session: Account<'info, ProtocolSession>,
     pub system_program: Program<'info, System>,
 }
 
@@ -2666,7 +2750,7 @@ pub struct MutSession<'info> {
         bump = session.bump,
         constraint = session.owner == owner.key() @ MarketError::SessionUnauthorized
     )]
-    pub session: Account<'info, Session>,
+    pub session: Account<'info, ProtocolSession>,
 }
 
 #[derive(Accounts)]
@@ -2808,15 +2892,19 @@ pub struct DelegateSession<'info> {
     pub session: AccountInfo<'info>,
 }
 
-#[derive(Accounts)]
+#[derive(Accounts, Session)]
 #[instruction(set_mask: Vec<u8>)]
 pub struct Trade<'info> {
     #[account(mut)]
     pub trader: Signer<'info>,
     /// CHECK: main wallet. Position and vault seeds bind to this key.
     pub owner: UncheckedAccount<'info>,
+    /// Protocol limit PDA (remaining_usdc / allowed_ix). Optional when trader == owner.
     #[account(mut)]
-    pub session: Option<Box<Account<'info, Session>>>,
+    pub session: Option<Box<Account<'info, ProtocolSession>>>,
+    /// MagicBlock SessionTokenV2. Optional; when absent, `#[session_auth_or]` falls back to owner or protocol Session.
+    #[session(signer = trader, authority = owner.key())]
+    pub session_token: Option<Account<'info, SessionTokenV2>>,
     #[account(
         mut,
         seeds = [MARKET_SEED, market.id_hash.as_ref()],
@@ -2864,7 +2952,7 @@ pub struct Trade<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[derive(Accounts)]
+#[derive(Accounts, Session)]
 #[instruction(contract: SkellamContract)]
 pub struct TradeSkellam<'info> {
     #[account(mut)]
@@ -2872,7 +2960,9 @@ pub struct TradeSkellam<'info> {
     /// CHECK: main wallet. Position and vault seeds bind to this key.
     pub owner: UncheckedAccount<'info>,
     #[account(mut)]
-    pub session: Option<Box<Account<'info, Session>>>,
+    pub session: Option<Box<Account<'info, ProtocolSession>>>,
+    #[session(signer = trader, authority = owner.key())]
+    pub session_token: Option<Account<'info, SessionTokenV2>>,
     #[account(
         mut,
         seeds = [MARKET_SEED, market.id_hash.as_ref()],

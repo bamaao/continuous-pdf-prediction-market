@@ -656,7 +656,7 @@ async fn put_and_get_listing() {
     assert_eq!(row["tags"][0], "macro");
     let tagged = serde_json::json!({
         "market": market,
-        "title": "阿森纳 vs 切尔西",
+        "title": "Arsenal vs Chelsea",
         "tags": ["football", "epl"],
         "description": "Premier League match. Settles on regulation full-time score.",
         "event": "Arsenal vs Chelsea",
@@ -680,7 +680,7 @@ async fn put_and_get_listing() {
         .unwrap();
     let page: serde_json::Value =
         serde_json::from_slice(&list.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(page["items"][0]["title"], "阿森纳 vs 切尔西");
+    assert_eq!(page["items"][0]["title"], "Arsenal vs Chelsea");
     assert_eq!(page["items"][0]["tags"][1], "epl");
 }
 

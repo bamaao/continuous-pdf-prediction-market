@@ -4,8 +4,9 @@
 
 | Item | Content |
 | --- | --- |
-| Version | 1.14 |
+| Version | 1.16 |
 | Status | Product specification (features are written as fully delivered; no MVP / later-phase split) |
+| Language | English |
 | Key decisions | Soft solvency: do not reject trades when $L_{\max}$ exceeds capital. Settle on $L=E(c)$ at $c=\mathrm{cell}(x^*)$ (product §8.1). **Settlement gate:** write $\rho=\min(1,C_{\max}/L)$ *before* any user payout — $\rho=1$ if $C_{\max}\ge L$, else the actual ratio $C_{\max}/L$ (SRS FR-SET-03 / FR-SET-11). Do not mix implied PDF $p_k$, exposure $E$, and ticket face. One global pro-rata $\rho$ on **face** (no FIFO). $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. Trading is the primary payout source; $C_R$ is optional. Fees go to the platform fee ledger and do not enter this prediction market’s $C_{\max}$ or $C_P$; the platform may claim them at any time. At `close_ts` both prediction fills and the risk auction stop (`risk_lock_ts \le close_ts`). Price is pure probability; coverage is displayed only. Markets are created by **distribution family**. Football is Skellam. $x^*$ only via `submit_result`. |
 
 ---
@@ -70,8 +71,8 @@ These are protocol rules, not UI hints. Programs, Quote, and the desk SHALL foll
 | Soft solvency | Do not reject fills because $L_{\max}$ exceeds capital. After $x^*$ is final, write $\rho=\min(1,C_{\max}/L)$ **before** any user payout. One $\rho$ for every winner; no FIFO. |
 | Surplus vs fees | Surplus $S$ exists only when $\rho=1$. $S_P$ is a residual claim (`pay_surplus_platform`), not a fee. Topping up $C_P$ is an explicit `fund_pool`, never an automatic fee transfer. |
 | Board comments after the market is live | Comments exist only on an **already indexed** market (`/m/[id]`). `/create` writes the public card (title / tags / event / description) and SHALL NOT collect comments — there is no live market yet. A connected wallet posts as `author` pubkey (same grade as listings; SIWS is not required). The thread is a flat off-chain catalog (`market_comment`): not on-chain, not nested, not $C_{\max}$, not $C_P$, not the fee ledger. Unknown / unindexed market: `404`. |
-| The created object is a prediction market | Users create a **prediction market** (预测市场). Product copy SHALL NOT say 盘, 开盘, 关盘, or “board” as the product noun. One football match has one prediction market — 1X2 / handicap / totals are contracts on that market, not separate 盘. On-chain leftover names (`Board`, `board_phase`) are implementation only. |
-| Anyone logged in may apply; review **opens trading** | After SIWS, any wallet MAY submit a **market application**. That is not live. `close_ts` is an **absolute** unix time locked at submit (whistle / first print). Solana `Clock` only reads *now* at the create instruction — it cannot learn the event time. If `now ≥ close_ts` at approve, create SHALL fail; the reviewer rejects or the applicant resubmits. The reviewer wallet signs `create_*` (pays rent). **Open the prediction market** (开通预测市场) means the prediction market exists on-chain, the lobby shows it, and traders MAY fill. **Open the risk auction** (开放风险拍卖) means Risk LPs MAY quote published layers for payout coverage. Both start together on approve. Do not call the created object 盘 / “board”, and do not say “listing” or “open the risk book” in product copy. Fees $\phi$ accrue on that prediction market’s fee ledger; `claim_fees` goes to the protocol `platform` (`PLATFORM_PUBKEY`). Compose `create_*` and lobby ingest SHALL require an approved application — a chain account that skipped review SHALL NOT appear as a live market. Rejected applications never become markets. |
+| The created object is a prediction market | Users create a **prediction market**. Product copy SHALL NOT use “board”, “book”, “open the book”, or “close the book” as the product noun. One football match has one prediction market — 1X2 / handicap / totals are contracts on that market, not separate books. On-chain leftover names (`Board`, `board_phase`) are implementation only. |
+| Anyone logged in may apply; review **opens trading** | After SIWS, any wallet MAY submit a **market application**. That is not live. `close_ts` is an **absolute** unix time locked at submit (whistle / first print). Solana `Clock` only reads *now* at the create instruction — it cannot learn the event time. If `now ≥ close_ts` at approve, create SHALL fail; the reviewer rejects or the applicant resubmits. The reviewer wallet signs `create_*` (pays rent). **Open the prediction market** means the prediction market exists on-chain, the lobby shows it, and traders MAY fill. **Open the risk auction** means Risk LPs MAY quote published layers for payout coverage. Both start together on approve. Do not call the created object “board”, and do not say “listing” or “open the risk book” in product copy. Fees $\phi$ accrue on that prediction market’s fee ledger; `claim_fees` goes to the protocol `platform` (`PLATFORM_PUBKEY`). Compose `create_*` and lobby ingest SHALL require an approved application — a chain account that skipped review SHALL NOT appear as a live market. Rejected applications never become markets. |
 | Duplicate listings are refused | Two applications SHALL NOT cover the same event. Duplicate key = distribution family + normalized title + trading event (trim / case-fold ASCII). If another row is `PENDING_REVIEW` or `OPEN`, submit returns `409`. The reviewer MAY reject an application as duplicate. |
 | Geo-IP region block | A listing MAY lock blocked countries / regions (ISO 3166-1 alpha-2, optional subdivision). Enforcement is the client IP via GeoIP on lobby, info, quote, compose, trade, auction, and comments. A blocked visitor SHALL NOT see the prediction market as tradable (`403` / hidden). The reviewer MAY add or confirm the block list at review. This is access policy, not settlement math. |
 
@@ -84,7 +85,7 @@ A prediction market’s lifecycle follows the path below. During the trading per
 ```text
 ① Choose the distribution family
 ② Initialize parameters and **apply** (SIWS), locking absolute close_ts. Reviewer approves and **opens trading** (create_*). The risk auction opens at the same time.
-③ Trade (LMSR: buying the same outcome makes it more expensive + fees; LPs may quote at the same time)
+③ Trade (LMSR: buying the same / overlapping outcome makes $C_S$ rise — product §1.2.4; fees; LPs may quote at the same time)
 ④ At close_ts, cut off prediction fills **and** the risk auction; freeze f / P
 ⑤ Wait for the event
 ⑥ The committee (or an authorized reporter) writes the outcome on-chain. No oracle writes $x^*$.
@@ -105,14 +106,14 @@ A prediction market’s lifecycle follows the path below. During the trading per
 | Dirichlet | `create_dirichlet_market` | Election winner, `TOP_N`, vote share (`layout`) |
 | Bernoulli | `create_bernoulli_market` | Deadline YES / NO |
 
-**② Initialize and open trading.** The applicant writes prior parameters (e.g. $\lambda_H,\lambda_A$ or $\mu,\sigma$ or $\alpha_i$), the grid or atoms, $\beta$, the resolution source, and an **absolute** `close_ts`. After review approve, the reviewer signs `create_*` — that is **open the prediction market** (开通预测市场): it is live, the lobby shows it, traders MAY fill. The same step **opens the risk auction** (开放风险拍卖): Risk LPs MAY quote published layers. Fees stay on the prediction market until the protocol platform claims them. At this point $\theta=0$, so prices equal $f_0$ / $P_0$. Status is `OPEN` once the market key is attached.
+**② Initialize and open trading.** The applicant writes prior parameters (e.g. $\lambda_H,\lambda_A$ or $\mu,\sigma$ or $\alpha_i$), the grid or atoms, $\beta$, the resolution source, and an **absolute** `close_ts`. After review approve, the reviewer signs `create_*` — that is **open the prediction market**: it is live, the lobby shows it, traders MAY fill. The same step **opens the risk auction**: Risk LPs MAY quote published layers. Fees stay on the prediction market until the protocol platform claims them. At this point $\theta=0$, so prices equal $f_0$ / $P_0$. Status is `OPEN` once the market key is attached.
 
 **③ Trade.** The user buys some outcome set $S$ (home win, exactly 1 goal, CPI in a bin, YES…). Each fill pays two amounts:
 
 1. **Contract cost** $C_S(q)$: enters this prediction market’s Vault, used for expiry payout
 2. **Fee** $\phi\cdot C_S(q)$: goes to the platform immediately and does not enter the payout pool
 
-The same outcome gets more expensive the more it is bought. Under LMSR, if at open $P(S)=0.2$, a first tiny order has a marginal price of about $0.2$; after it fills, that stretch of density is pulled up, and the next order for the same outcome has a marginal price strictly above $0.2$. Further buys keep lifting it. This is not a queue markup; the curve is rewritten by the fill itself. Selling (reducing a position) presses that stretch down and the price falls back.
+The same outcome gets more expensive the more it is bought (product **§1.2.4**). Under LMSR, if at open $P(S)=0.2$, a first tiny order has a marginal price of about $0.2$; after it fills, that stretch of density is pulled up, and the next order for the same outcome has a marginal price strictly above $0.2$. Further buys keep lifting it. This is not a queue markup and not “later on the clock”; the curve is rewritten by the fill itself. Selling (reducing a position) presses that stretch down and the price falls back. Unpopular or disjoint intervals can get cheaper as mass moves to the hot stretch.
 
 During the trading period $L_{\max}$ may exceed available funds. **Orders are not rejected, and user positions are not force-liquidated.** Coverage is display-only. Risk LPs quote published layers and lock collateral in the same window.
 
@@ -153,107 +154,131 @@ $$
 
 If this prediction market has filled risk capital ($C_R^{\mathrm{final}}>0$), $S$ is split at the listing lock: $\alpha_R S$ to those Risk LPs (then by each LP’s $\alpha_i$), $\alpha_P S$ to the platform, $\alpha_R+\alpha_P=1$. If no risk capital entered, $S_R=0$ and $S$ goes to the platform. When $\rho<1$, $S=0$. $\phi$ stays on the platform fee ledger until `claim_fees`; it SHALL NOT enter $C_P$. $S_P$ is a separate surplus claim. The platform MAY later `fund_pool` from its own vault; that is a top-up, not a fee sweep.
 
-### 1.2.1 核心业务规则：赔付比率与剩余分发（锁定）
+### 1.2.1 Core business rule: recovery rate and surplus (locked)
 
-本节是商业规则，不是实现备忘。Vault `begin_settle` / `payout` / `draw_lp` / `pay_surplus_*` / `claim_fees`、Quote、UI 公开结果卡，都必须按这里执行。数学内核：`crates/math` 的 `recovery_rate`、`surplus`、`surplus_parts`、`payout_floor`、`c_p_alloc`、`layer_loss`。
+This section is the commercial rule, not an implementation memo. Vault `begin_settle` / `payout` / `draw_lp` / `pay_surplus_*` / `claim_fees`, Quote, and the public result card MUST follow it. Math kernel: `crates/math` `recovery_rate`, `surplus`, `surplus_parts`, `payout_floor`, `c_p_alloc`, `layer_loss`.
 
-**委员会提交 \(x^*\) 并不计算 \(\rho\)。** `submit_result` 只写入拟议结果。挑战期结束、`finalize` 锁定 \(x^*\) 之后，`begin_settle` 才一次性锁死 \(L\)、\(C_{\max}\)、\(\rho\) 和剩余。没写出 \(\rho\) 之前，任何赢家领取都必须拒绝。交易期展示的 \(\hat\rho\) / 覆盖率 **不是** 这笔结算 \(\rho\)。VOID / `RESOLUTION_FAILED` **不算** \(\rho\)，退回买入时付的本金 `cost_paid`。
+**The committee writing \(x^*\) does not compute \(\rho\).** `submit_result` only writes a proposed outcome. After the challenge window and `finalize` lock \(x^*\), `begin_settle` writes \(L\), \(C_{\max}\), \(\rho\), and surplus in one step. Until \(\rho\) is on-chain, every winner claim MUST reject. Trading-period \(\hat\rho\) / coverage is **not** this settlement \(\rho\). VOID / `RESOLUTION_FAILED` **do not** use \(\rho\); they refund `cost_paid`.
 
-**先锁责任和资金，再写一个全场 \(\rho\)。**
+**Lock liability and capital first, then write one market-wide \(\rho\).**
 
-| 符号 | 定义 | 不是 |
+| Symbol | Definition | Not |
 | --- | --- | --- |
-| \(c=\mathrm{cell}(x^*)\) | 委员会锁定的实现结果落到的那个原子 | 交易期最热的点 |
-| \(L=E(c)\) | 压在 \(c\) 上的票面合计（`grid.exposure[c]`） | \(L_{\max}\)、\(\sum_k E_k\)、买价 |
-| \(R_{\mathrm{net}}\) | 成交收入 − 应付风险保费 | 手续费（手续费另本账） |
-| \(C_R^{\mathrm{final}}\) | 风险拍卖里已锁定、结算时可抽的资金；可为 \(0\) | 未成交的报价承诺 |
-| \(C_P^{\mathrm{alloc}}\) | 仅当 \(L>R_{\mathrm{net}}\) 时：\(\min((L-R_{\mathrm{net}}-C_R)^+,\,C_P^{\mathrm{board}},\,C_P^{\mathrm{pool}})\)；否则 \(0\) | 无限担保、手续费自动转入 |
-| \(C_{\max}\) | \(R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}\) | 含 \(C_M\)（已废除） |
+| \(c=\mathrm{cell}(x^*)\) | The atom that the locked realized outcome falls into | The hottest cell during trading |
+| \(L=E(c)\) | Face stacked on \(c\) (`grid.exposure[c]`) | \(L_{\max}\), \(\sum_k E_k\), the buy price |
+| \(R_{\mathrm{net}}\) | Fill proceeds − payable risk premium | Fees (fees are a separate ledger) |
+| \(C_R^{\mathrm{final}}\) | Capital locked in the risk auction and drawable at settle; MAY be \(0\) | Unfilled quote promises |
+| \(C_P^{\mathrm{alloc}}\) | Only if \(L>R_{\mathrm{net}}\): \(\min((L-R_{\mathrm{net}}-C_R)^+,\,C_P^{\mathrm{board}},\,C_P^{\mathrm{pool}})\); else \(0\) | Unlimited guarantee, automatic fee sweep |
+| \(C_{\max}\) | \(R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}\) | Including \(C_M\) (removed) |
 
 $$
 \rho=\min\bigl(1,\,C_{\max}/L\bigr)
 \qquad(L=0\Rightarrow\rho=1)
 $$
 
-| 资金对责任 | \(\rho\) | 赢家领取 | 未中 |
+| Capital vs liability | \(\rho\) | Winner claim | Miss |
 | --- | --- | --- | --- |
-| \(C_{\max}\ge L\)（够） | \(1\) | 面值 \(\lfloor\mathrm{face}\rfloor\) USDC | \(0\) |
-| \(C_{\max}<L\)（不够） | \(C_{\max}/L\) | **同一个** \(\rho\)：\(\lfloor\rho\cdot\mathrm{face}\rfloor\)，禁止先到先得 | \(0\) |
+| \(C_{\max}\ge L\) (enough) | \(1\) | Face \(\lfloor\mathrm{face}\rfloor\) USDC | \(0\) |
+| \(C_{\max}<L\) (short) | \(C_{\max}/L\) | The **same** \(\rho\): \(\lfloor\rho\cdot\mathrm{face}\rfloor\); FIFO forbidden | \(0\) |
 
-普通合约 \(\mathrm{face}=q\)（一股命中面值 1 USDC）。足球四分让球按两条半线：全中 \(q\)、中一条 \(q/2\)。地板抹掉的尘埃进准备金，不补给某个人。
+Ordinary contracts: \(\mathrm{face}=q\) (one share pays 1 USDC if it hits). Football quarter handicaps use two half-lines: both hit \(\to q\), one hit \(\to q/2\). Floor dust goes to the reserve; it is not paid to a chosen winner.
 
-**满付时钱从哪出（补缺口，不是分余利）：** 先用 \(R_{\mathrm{net}}\)。若 \(L\le R_{\mathrm{net}}\)，风险层损失 \(H=0\)，不抽 \(C_P\)。若仍缺，按层抽 \(H=\min((L-A)^+,D_i)\)，且不超过尚未补上的缺口。再不够才抽 \(C_P^{\mathrm{alloc}}\)。
+**Where full-payout cash comes from (cover a shortfall, not split leftover):** spend \(R_{\mathrm{net}}\) first. If \(L\le R_{\mathrm{net}}\), layer loss \(H=0\) and do not draw \(C_P\). If still short, draw per layer \(H=\min((L-A)^+,D_i)\), never more than the remaining gap. Only then draw \(C_P^{\mathrm{alloc}}\).
 
-**赔付后还有剩，怎么分。** 剩余 **只在 \(\rho=1\)**（赢家已按面值满付）时存在：
+**If cash remains after payout, how it is split.** Surplus exists **only when \(\rho=1\)** (winners already paid full face):
 
 $$
 S=\max(R_{\mathrm{net}}-L,\,0)
 $$
 
-\(\rho<1\) 时 \(S=0\)，没有“多余”可分。
+When \(\rho<1\), \(S=0\); there is no leftover to split.
 
-| 条件 | \(S_R\)（风险资金方） | \(S_P\)（平台） |
+| Condition | \(S_R\) (Risk LPs) | \(S_P\) (platform) |
 | --- | --- | --- |
-| \(C_R^{\mathrm{final}}=0\)（没有风险资金进来） | \(0\) | 全部 \(S\) |
+| \(C_R^{\mathrm{final}}=0\) (no risk capital entered) | \(0\) | All of \(S\) |
 | \(C_R^{\mathrm{final}}>0\) | \(\alpha_R S\) | \(\alpha_P S=(1-\alpha_R)S\) |
 
-开通预测市场时锁定 \(\alpha_R\)（`alpha_r_bps`）。缺省 **7000 bps：70% 给风险资金方、30% 给平台**。资金方那一份再按各笔成交报价的权重 \(w_i=\) `profit_share_bps` \(\times\) 成交量摊，指令 `pay_surplus_lp`；平台一份 `pay_surplus_platform`。手续费 \(\phi\) 走 `claim_fees`，**不进** \(C_{\max}\)，也不进 \(S\)。平台日后 `fund_pool` 是自己往调节池注资，不是把手续费扫进 \(C_P\)。
+\(\alpha_R\) (`alpha_r_bps`) is locked when the prediction market opens. Default **7000 bps: 70% to Risk LPs, 30% to the platform**. The LP share is then weighted by each filled quote \(w_i=\) `profit_share_bps` \(\times\) filled size (`pay_surplus_lp`); the platform share is `pay_surplus_platform`. Fees \(\phi\) go through `claim_fees` and **do not** enter \(C_{\max}\) or \(S\). Later `fund_pool` is the platform topping up the adjustment pool from its own vault, not sweeping fees into \(C_P\).
 
-### 1.2.2 核心业务规则：卖的是概率，份额面值是 1（锁定）
+### 1.2.2 Core business rule: the product sells probability; share face is 1 (locked)
 
-本节锁定「PDF 预测市场卖什么」。Quote、成交、公开预览、结算卡都必须用同一套名字。数学内核：`crates/math` 的 `interval_prob` / `buy_cost` / `lmsr_cost` / `ticket_face`。
+This section locks what a PDF prediction market sells. Quote, fills, public preview, and settlement cards MUST use the same names. Math kernel: `crates/math` `interval_prob` / `buy_cost` / `lmsr_cost` / `ticket_face`.
 
-**卖的是区间概率，不是把 PDF 误解成别的东西。** 开通预测市场时写入先验 \(f_0\)（CPI 高斯是 \(\mu,\sigma\) 用百分点，例如中位数 \(5\%\)、离散 \(1\%\)，不是「总概率等于 \(5\%\)」）。用户买 \([a,b]\)（先按 §8.1.2.1 吸成节点集合 \(S\)）时，报价是这段概率质量：
+**The sale is interval probability, not a misread of the PDF.** Opening the prediction market writes prior \(f_0\) (CPI Gaussian uses \(\mu,\sigma\) in percentage points — e.g. median \(5\%\), dispersion \(1\%\) — not “total probability equals \(5\%\)”). When the user buys \([a,b]\) (snapped to a node set \(S\) per §8.1.2.1), the quote is that probability mass:
 
 \[
-p_I=\int_a^b f_\theta(x)\,dx\qquad\text{（连续模型）},\qquad
-p_S=\sum_{k\in S}p_k\qquad\text{（链上）}.
+p_I=\int_a^b f_\theta(x)\,dx\qquad\text{(continuum)},\qquad
+p_S=\sum_{k\in S}p_k\qquad\text{(on-chain)}.
 \]
 
-\(p_S\in(0,1)\)。成交只改 \(\theta\)，再归一化得到新的 \(f_\theta\)；下一笔用新的 \(p_S\)。委员会只报 \(x^*\)，不改分布。
+\(p_S\in(0,1)\). A fill only changes \(\theta\), then renormalizes to a new \(f_\theta\); the next fill uses the new \(p_S\). The committee only reports \(x^*\); it does not rewrite the distribution.
 
-**对数量求导得到的是价格，不是到期赔付。** LMSR 成本 \(C_S(q)\) 对 \(q\) 的导数是边际价：
+**The derivative in quantity is price, not expiry payoff.** The derivative of LMSR cost \(C_S(q)\) in \(q\) is the marginal price:
 
 \[
 P_S(q)=\frac{\partial C_S}{\partial q}=\frac{p_S e^{q/\beta}}{1-p_S+p_S e^{q/\beta}}\in(0,1),\qquad P_S(0)=p_S.
 \]
 
-到期是 Arrow–Debreu：**中了赔 1 USDC，没中赔 0**（再乘全场 \(\rho\)）。现金倍数 \(\approx 1/p_S>1\) 是「付 \(p\) 拿 \(1\)」的回报，**不是**把份额定义成 \(1/p_S\)，也不是把 \(C'(q)\) 当成结算。
+Expiry is Arrow–Debreu: **hit pays 1 USDC, miss pays 0** (then multiply by market-wide \(\rho\)). The cash multiple \(\approx 1/p_S>1\) is the return on “pay \(p\), receive \(1\)”. It is **not** a share size of \(1/p_S\), and \(C'(q)\) is not settlement.
 
-| 说法 | 产品里是 | 禁止 |
+| Phrase | In the product | Forbidden |
 | --- | --- | --- |
-| 价格 \(=\int_a^b f\) | \(p_S\)，买一丁点份额要付的钱 | 把 \(p_S\) 当中了拿多少 |
-| 价格在 \((0,1)\) | 边际价 \(P_S(q)\) | 把导数写成 payoff |
-| 赔付 \(>1\) | 付约 \(p_S\)、中了拿 \(1\)，倍数 \(\approx 1/p_S\) | 每份面值写成 \(1/p_S\) 再乘份数（变成 \(1/p_S^2\)） |
-| 份数 \(\times\) 价格 | 小单 \(\approx q\cdot p_S\) | 大单仍按 \(q\cdot p_S\) 收费（必须用 \(C_S(q)\)） |
-| 份数 \(\times\) payoff | 中了 \(\lfloor\rho\cdot q\rfloor\) | \(\lfloor\rho\cdot q/p_S\rfloor\) |
-| 分布随交易变 | \(\theta\) 更新后再报价 | 成交后改 \(p_0\) / 改 \(\mu,\sigma\) |
+| Price \(=\int_a^b f\) | \(p_S\), what an infinitesimal share costs | Treating \(p_S\) as hit payout |
+| Price in \((0,1)\) | Marginal \(P_S(q)\) | Writing the derivative as payoff |
+| Payout \(>1\) | Pay about \(p_S\), hit receives \(1\), multiple \(\approx 1/p_S\) | Face \(=1/p_S\) then times shares (that is \(1/p_S^2\)) |
+| Shares \(\times\) price | Small ticket \(\approx q\cdot p_S\) | Charging a large ticket as \(q\cdot p_S\) (MUST use \(C_S(q)\)) |
+| Shares \(\times\) payoff | Hit \(\lfloor\rho\cdot q\rfloor\) | \(\lfloor\rho\cdot q/p_S\rfloor\) |
+| Distribution moves with trade | Re-quote after \(\theta\) updates | Rewriting \(p_0\) / \(\mu,\sigma\) after a fill |
 
-精确应付：
+Exact payable:
 
 \[
 C_S(q)=\beta\ln\bigl((1-p_S)+p_S e^{q/\beta}\bigr)
 \]
 
-用户付 \(C_S(q)+\phi C_S(q)\)，得到 \(q\) 份冻在 \(S\) 上的券。小单 \(C_S(q)\approx q\cdot p_S\)，买得越多 \(p_S\) 被抬高，线性 \(q\cdot p_S\) 不够。
+The user pays \(C_S(q)+\phi C_S(q)\) and receives \(q\) shares frozen on \(S\). Small tickets: \(C_S(q)\approx q\cdot p_S\). Buying more raises \(p_S\); linear \(q\cdot p_S\) is not enough.
 
-例：\(p_S=0.7\)，买 \(q=10\)。大约先付 7 USDC（再加费用和滑点）。仓位仍是 10 份。\(i^*(x^*)\in S\) 且 \(\rho=1\) 拿 **10**，不是 \(10/0.7\)。VOID 退买入本金，不走 \(\rho\)。
+Example: \(p_S=0.7\), buy \(q=10\). Pay about 7 USDC (plus fee and slippage). The position is still 10 shares. If \(i^*(x^*)\in S\) and \(\rho=1\), receive **10**, not \(10/0.7\). VOID refunds the buy principal; it does not use \(\rho\).
 
-### 1.2.3 核心业务规则：用户怎么知道自己该领多少（锁定）
+### 1.2.3 Core business rule: how the holder reads the claim amount (locked)
 
-结算后该拿多少 **不是**「价格的倒数」，也 **不是**用户自己算 \(\rho\)。一张票是冻结集合 \(S\) 上的 \(q\) 股。普通合约一股命中面值 **1 USDC**（足球四分让球见 §1.2.1）。委员会只报 \(x^*\)；`finalize` 之后 `begin_settle` 才锁死全场同一个 \(\rho\)。领取指令用链上已写的 \(\rho\) 和面值算 \(\lfloor\rho\cdot\mathrm{face}\rfloor\)，打进 UserVault。
+What a ticket pays is **not** “one over price” and **not** a \(\rho\) the user computes. A ticket is \(q\) shares on frozen set \(S\). Ordinary face is **1 USDC** per hitting share (football quarter lines: §1.2.1). The committee only reports \(x^*\); after `finalize`, `begin_settle` locks one market-wide \(\rho\). The claim ix uses that on-chain \(\rho\) and face to credit \(\lfloor\rho\cdot\mathrm{face}\rfloor\) into UserVault.
 
-**三步读数（Quote、公开结果卡、`/portfolio` 结算票必须同一套）：**
+**Three readouts (Quote, public result card, `/portfolio` settlement ticket MUST match):**
 
-| 何时 | 用户看见什么 | 那是不是最终到手 |
+| When | What the user sees | Is it final cash? |
 | --- | --- | --- |
-| 下单前 | 报价票：命中面值 \(q\)（普通合约）、未中 \(0\)；展示用的 \(\hat\rho\) / 覆盖率 | 否。\(\hat\rho\) 只是警告，不是结算 \(\rho\) |
-| 结果锁定后 | 公开结果卡：\(x^*\)、命中格子 \(c\)、\(L=E(c)\)、\(C_{\max}\)、已写入的 \(\rho\) | \(\rho\) 已锁。自己的票还要看 \(c\in S\) 与否 |
-| 点领取时 | 结算票：中了 \(\lfloor\rho\cdot q\rfloor\)，没中 \(0\)；VOID / 决议失败退 `cost_paid` | 是。Vault `payout` 按此入账，用户不必手算 |
+| Before the order | Quote ticket: hit face \(q\) (ordinary), miss \(0\); display \(\hat\rho\) / coverage | No. \(\hat\rho\) is a warning, not settlement \(\rho\) |
+| After the outcome is locked | Public result: \(x^*\), hitting cell \(c\), \(L=E(c)\), \(C_{\max}\), written \(\rho\) | \(\rho\) is locked. This ticket still depends on \(c\in S\) |
+| On claim | Settlement ticket: hit \(\lfloor\rho\cdot q\rfloor\), miss \(0\); VOID / failed resolution refund `cost_paid` | Yes. Vault `payout` books this; the user does not compute it |
 
-**自己这张票：** 仓位记下 \(q\) 和 \(S\)（区间掩码，或足球 `--kind` / \(a,b\)）。\(c\) 是离 \(x^*\) 最近的节点（§8.1.2.1）。\(c\in S\) 则 \(\mathrm{face}=q\)，否则 \(0\)。实发 \(\lfloor\rho\cdot\mathrm{face}\rfloor\)；费用若在领取时扣，再减去 \(\phi\)。资金够则 \(\rho=1\)（满面值）；不够则所有赢家同一个 \(\rho=C_{\max}/L\)，没有先到先得。
+**This ticket:** the position stores \(q\) and \(S\) (interval mask, or football `--kind` / \(a,b\)). \(c\) is the nearest node to \(x^*\) (§8.1.2.1). If \(c\in S\) then \(\mathrm{face}=q\), else \(0\). Paid \(\lfloor\rho\cdot\mathrm{face}\rfloor\); if the fee is taken at claim, subtract \(\phi\). Enough capital \(\Rightarrow\rho=1\) (full face). Short \(\Rightarrow\) every winner the same \(\rho=C_{\max}/L\); no FIFO.
 
-一句话：该领多少 \(=\) **我的 \(q\) × 是否命中 × 全场 \(\rho\)**。不是 \(p_S\)，不是 \(q/p_S\)。
+One line: claim \(=\) **my \(q\) × hit × market-wide \(\rho\)**. Not \(p_S\), not \(q/p_S\).
+
+### 1.2.4 Core business rule: popular intervals get more expensive (locked)
+
+This section is for traders. On-chain fills, Quote, and the `/m/[id]` trade ticket MUST use the same wording. Kernel: `crates/math` `lmsr_cost` / `lmsr_update`; program `buy_set` / `sell_set` / `buy_skellam_set` / `sell_skellam_set`. SRS: FR-TRD-03, FR-TRD-07, FR-UI-47.
+
+**The user buys a set \(S\) on probability space. It is not a queue markup and not “later on the clock costs more”.** Payable cost
+
+\[
+C_S(q)=\beta\ln\bigl((1-p_S)+p_S e^{q/\beta}\bigr).
+\]
+
+For \(q>0\), **a larger current \(p_S\) means a larger \(C_S\) for the same \(q\)**. Each buy only updates \(\theta\) and mass on cells in \(S\), then renormalizes: the more a popular interval is bought, the higher \(p_S\), so a later buy of **the same stretch or an overlapping stretch** pays more USDC. Fee \(\phi\cdot C_S\) stacks on that cost; it does not replace it. Coverage \(\hat\rho\) **does not** change \(p_S\) or \(C_S\).
+
+| Easy to think | What the product does |
+| --- | --- |
+| Later wall-clock orders cost more | With no buys, \(C_S\) barely moves; it rises when hot cells are bought |
+| Popular intervals take a separate “heat fee” | There is no extra markup switch; it is LMSR |
+| Every cell gets more expensive | **Cold / disjoint** cells can cheapen after mass is pulled away |
+| A buy cannot press the price back | **Sells** reduce \(\theta\); later buys of the same set get cheaper |
+| Quoted \(C_S\) is the ledger | Display uses indexed \(\theta\); debit follows the on-chain fill |
+
+Example: at open \(p_S=0.2\), a small buy has marginal price about \(0.2\). After the fill that density is higher, so the next buy of the same \(S\) has marginal price **strictly above** \(0.2\). Keep buying hot cells and \(C_S\) keeps rising. Nearby cells nobody bought can get relatively cheaper.
+
+The trade ticket SHALL state this rule in trader language (FR-UI-47) and SHALL keep \(p_S\), \(C_S(q)\), fee, and coverage as separate rows.
 
 ### 1.3 Business Flow Diagram
 
@@ -1162,20 +1187,20 @@ $$
 
 When a user draws $[a,b]$, snap both ends with `interval_index`, take the inclusive node range $S$, then add $q$ to $\theta_k$ and $E_k$ for every $k\in S$. Complexity is $O(|S|)$ on the locked shards, acceptable inside an Ephemeral Rollup.
 
-#### 5.1.1 \(n=256/512/1024\) 格子够不够（锁定）
+#### 5.1.1 Is \(n=256/512/1024\) enough (locked)
 
-产品高斯默认 **\(n=256\)**。\(512\)、\(1024\) 更细，但不是因为 \(256\)「不够用」才要上。两端最多偏半步；规格要警告的是 \(n<32\)（步长大于 \(\sigma\)，先验塌到 \(1\)–\(2\) 格），不是 \(256\)。
+Product Gaussian default is **\(n=256\)**. \(512\) and \(1024\) are finer; they are not required because \(256\) is “too coarse”. Ends miss by at most half a step. The spec must warn on \(n<32\) (step larger than \(\sigma\), prior collapses to \(1\)–\(2\) cells), not on \(256\).
 
-以 CPI 参考盘 \(\Omega=[-2,12]\)、\(\sigma=0.35\) 为例（宽度 \(14\) 百分点）：
+CPI reference \(\Omega=[-2,12]\), \(\sigma=0.35\) (width \(14\) percentage points):
 
-| \(n\) | 步长 \((x_{\max}-x_{\min})/(n-1)\) | 和 \(\sigma\) 比 | 什么时候用 |
+| \(n\) | Step \((x_{\max}-x_{\min})/(n-1)\) | vs \(\sigma\) | When to use |
 | --- | --- | --- | --- |
-| \(<32\) | \(n=32\) 时 \(\approx 0.45>\sigma\) | 先验塌掉 | 拒绝或强警告（SRS FR-MKT-15） |
-| **\(256\)（默认）** | \(\approx 0.055\) | 一步远小于 \(\sigma\)，约 \(6\) 个节点盖住一个 \(\sigma\)；半步误差 \(\approx 0.027\) | CPI / 宏观默认。开通预测市场写这个 |
-| \(512\) | \(\approx 0.027\) | 再细一倍 | 用户经常买极窄区间，或 \(\Omega\) 很宽而 \(\sigma\) 很小 |
-| \(1024\)（上限） | \(\approx 0.014\) | 更细 | 同上，且分片更多、成交/收尾更慢 |
+| \(<32\) | at \(n=32\), \(\approx 0.45>\sigma\) | prior collapses | reject or strong warning (SRS FR-MKT-15) |
+| **\(256\) (default)** | \(\approx 0.055\) | one step \(\ll\sigma\); about \(6\) nodes cover one \(\sigma\); half-step error \(\approx 0.027\) | CPI / macro default. Write this when the prediction market opens |
+| \(512\) | \(\approx 0.027\) | twice as fine | users often buy very narrow intervals, or \(\Omega\) is wide and \(\sigma\) is small |
+| \(1024\) (cap) | \(\approx 0.014\) | finer | same, with more shards and slower fills / close |
 
-MoM 一类更窄的 \(\Omega\)（例如 \([-1,2]\)、\(\sigma=0.15\)）在 \(n=256\) 上步长 \(\approx 0.012\)，仍然小于 \(\sigma\)。只有「区间宽度接近步长」时才需要加密。链上硬范围是 \(8..1024\)；\(8\) 是账户下限，**不是**给用户开的高斯默认。
+Narrower \(\Omega\) such as MoM (e.g. \([-1,2]\), \(\sigma=0.15\)) still has step \(\approx 0.012\) at \(n=256\), below \(\sigma\). Encrypt only when interval width is near one step. On-chain hard range is \(8..1024\); \(8\) is the account floor, **not** the Gaussian default offered to users.
 
 ### 5.2 No Parameterized AMM
 
@@ -1526,11 +1551,11 @@ The position stores $(S,q)$ (or a typed key that expands to the same masks). Set
 
 | Step | What the user sees | What the system uses |
 | --- | --- | --- |
-| Select | PDF bars, or a typed line (胜 / Over 2.5 / YES) | Bits: cell $k$ is in $S$ iff bit $k=1$ |
+| Select | PDF bars, or a typed line (Home / Over 2.5 / YES) | Bits: cell $k$ is in $S$ iff bit $k=1$ |
 | Quote | $C_S(q)$, $p_S$ | Sum / LMSR only over those bits |
 | Fill | Buy set / Buy line | `buy_set` / `buy_skellam_set` carries the mask (or kind that expands to the same bits) |
 | Ticket | One row in Portfolio | PDA seeds include `set_hash(mask)`. Same owner + market + $S$ = same position |
-| Claim | 领取 | Payout must present the same mask (or recover it from the fill journal / typed Skellam). The chain stores the hash, not a redraw of $[a,b]$ |
+| Claim | Claim | Payout must present the same mask (or recover it from the fill journal / typed Skellam). The chain stores the hash, not a redraw of $[a,b]$ |
 
 A **full mask** is every bit 1 (buy the whole grid). That is a legal $S$, used in tests and if someone actually buys every atom. Everyday tickets are a contiguous node range or a typed-line set.
 
@@ -2232,7 +2257,7 @@ Every human role in §3 has a screen. Numbered SHALL / verify live in SRS §4.7 
 | Risk LP | `/auctions`, `/auction/[id]` | Browse open books by title; **auction ticket** on published layers (SRS FR-UI-37) |
 | Risk LP | `/lp` | Locked $D_i$ by market **name**; $H$, premium, surplus / unlock claim; list reloads after each write (FR-UI-41) |
 | Trader / applicant | `/create` | **Listing ticket** (SRS FR-UI-31): any SIWS user. Submits an **application** (title, tags, prior, compose spec, geo blocks). Not on-chain. Not open until the reviewer approves **and** signs create (FR-UI-43). Applicant SHALL NOT sign `create_*`. Duplicate → `409` (FR-UI-45). **No comments** on create |
-| Reviewer | `/review` | System review queue (FR-UI-43): **批准并开通预测市场** — reviewer wallet signs `create_*` and 开放风险拍卖; lobby shows it (`OPEN`). **继续开通预测市场** retries if create already landed. 拒绝 / 标为重复. Confirm region blocks (FR-UI-44). Audit log. Not committee, not Vault withdraw |
+| Reviewer | `/review` | System review queue (FR-UI-43): **Approve and open prediction market** — reviewer wallet signs `create_*` and opens the risk auction; lobby shows it (`OPEN`). **Continue opening prediction market** retries if create already landed. Reject / Mark duplicate. Confirm region blocks (FR-UI-44). Audit log. Not committee, not Vault withdraw |
 | Committee | `/committee`, `/resolve/[id]` | Open window, `submit_result`, evidence object (hash on-chain), challenge, $M/N$. Both desks show the listing name and a market card (FR-UI-36 / FR-UI-41) |
 | Ops / platform | `/ops` | Read-only: index lag, coverage, Vault identity, $C_P^{\mathrm{pool}}$, keeper heartbeat, per-board $C_P$ by market **name**. **No** Vault withdraw |
 | Keeper | CLI | `close` / Commit / Undelegate / alerts. Not a web write path |
@@ -2317,6 +2342,7 @@ Implementation must follow the conventions below. There is no remaining fork of 
 | Settlement liability | $L=E(x^*)$, not $L_{\max}$ |
 | Claim unit | Fill size $q$ is **shares** on frozen $S$. Face is $1$ USDC per ordinary share if it hits. Payout is $\rho\cdot q$ if $i^*(x^*)\in S$, else $0$. Not $q/p_S$. How the holder reads it: §1.2.3 |
 | Price vs payoff | Price $=p_S=\int_I f$ (grid: $\sum_{k\in S}p_k$). $\partial C/\partial q$ is still price. Hit pays $1$ per share. $1/p_S$ is the cash multiple, not the share definition (§1.2.2) |
+| Later buy of a hot $S$ | LMSR: same / overlapping $S$ costs more after fills because $p_S$ rose. Not clock time, not a popularity fee. Cold / disjoint MAY cheapen. Sells press $C_S$ down. Coverage does not rewrite $C_S$ (§1.2.4) |
 | Gaussian $n$ | Default $256$. $512$/$1024$ are finer, not required for CPI $\sigma$ vs $\Omega$. $n<32$ warn/reject. Floor $8$ is not a product default (§5.1.1) |
 | 1-D interval $[a,b]$ | Snap both ends with `interval_index`; $S$ is the inclusive node range. No partial node, no $\int_a^b$ at fill or settle (§8.1.2.1) |
 | Haircut method | If $C_{\max}<L$, one global $\rho=C_{\max}/L$ on every hitting share; FIFO forbidden |

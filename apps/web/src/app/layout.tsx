@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { ListingHydrate } from "@/components/listing-hydrate";
 import { Providers } from "@/components/providers";
+import { RegisterSw } from "@/components/register-sw";
 import { Shell } from "@/components/shell";
 import "./globals.css";
 
@@ -35,6 +36,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <Providers>
+          <RegisterSw />
           <ListingHydrate />
           <Shell>{children}</Shell>
         </Providers>

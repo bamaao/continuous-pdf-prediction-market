@@ -18,5 +18,7 @@ cpi = ["no-entrypoint"]
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 ephemeral-rollups-sdk = { version = "0.17.3", features = ["anchor-compat"] }
+# CR-04: MagicBlock / GPL SessionToken. Protocol Session PDA still owns remaining_usdc / allowed_ix.
+session-keys = { version = "3.1.1", features = ["no-entrypoint"] }
 math = { path = "../../crates/math" }
 vault = { path = "../vault", default-features = false, features = ["cpi"] }

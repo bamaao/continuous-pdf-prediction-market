@@ -5,14 +5,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-LEDGER="${LEDGER:-$ROOT/test-ledger}"
 URL="${URL:-http://127.0.0.1:8899}"
 GW="${GW:-http://127.0.0.1:8081}"
-DEPLOY="$ROOT/target/deploy"
-# WSL rustc ≠ Windows rustc; keep host binaries off /mnt/e/target.
+# WSL rustc ≠ Windows rustc; keep host binaries and the ledger off /mnt/e.
 if [[ "$(uname -s)" == "Linux" ]]; then
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/cpm-target}"
 fi
+LEDGER="${LEDGER:-${CARGO_TARGET_DIR:-$ROOT/target}/phase5-ledger}"
+DEPLOY="${DEPLOY:-${CARGO_TARGET_DIR:-$ROOT/target}/deploy}"
 CPM="${CPM:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/cpm}"
 GW_BIN="${GW_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/trading-gateway}"
 KEYPAIR="${KEYPAIR:-$HOME/.config/solana/id.json}"
@@ -25,6 +25,8 @@ VAULT="VaULt11111111111111111111111111111111111111"
 MARKET="Market1111111111111111111111111111111111111"
 RES="Rso1111111111111111111111111111111111111111"
 RISK="Rsk1111111111111111111111111111111111111111"
+# MagicBlock / GPL SessionTokenV2 (CR-04)
+SESSION_KEYS="KeyspM2ssCJbqUhQ4k7sveSiY4WjnYsrXkC8oDbwde5"
 USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 cpm() { "$CPM" --url "$URL" --keypair "$KEYPAIR" "$@"; }
@@ -40,6 +42,50 @@ need_so() {
   cargo-build-sbf --manifest-path "programs/$name/Cargo.toml"
 }
 
+need_session_keys_so() {
+  mkdir -p "$DEPLOY"
+  if [[ -f "$DEPLOY/session_keys.so" ]]; then
+    echo "reuse session_keys.so"
+    return
+  fi
+  if [[ -f /tmp/cpm-target/deploy/session_keys.so ]]; then
+    cp /tmp/cpm-target/deploy/session_keys.so "$DEPLOY/session_keys.so"
+    echo "reuse /tmp/cpm-target/deploy/session_keys.so"
+    return
+  fi
+  echo "building session-keys 3.1.1 (CR-04 SessionTokenV2)"
+  local tmp
+  tmp="$(mktemp -d)"
+  (
+    cd "$tmp"
+    cargo new --lib session_keys_build >/dev/null
+    cd session_keys_build
+    # Pull the crate as a path-less dependency with cdylib so cargo-build-sbf emits .so
+    cat > Cargo.toml <<'EOF'
+[package]
+name = "session_keys_build"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "session_keys"
+
+[dependencies]
+session-keys = { version = "3.1.1", default-features = false }
+EOF
+    cargo-build-sbf
+  )
+  local built
+  built="$(find "$tmp" -name 'session_keys.so' | head -n1)"
+  if [[ -z "$built" ]]; then
+    echo "failed to build session_keys.so"
+    exit 1
+  fi
+  cp "$built" "$DEPLOY/session_keys.so"
+  rm -rf "$tmp"
+}
+
 echo "== build CLI + gateway + programs =="
 cargo build -p cli -p gateway
 "$CPM" write-local-mint --authority "$AUTH" --account "$MINT_ACC"
@@ -47,6 +93,7 @@ need_so vault
 need_so market
 need_so resolution
 need_so risk
+need_session_keys_so
 
 if ! [[ -f "$KEYPAIR" ]]; then
   mkdir -p "$(dirname "$KEYPAIR")"
@@ -69,6 +116,7 @@ solana-test-validator \
   --bpf-program "$MARKET" "$DEPLOY/market.so" \
   --bpf-program "$RES" "$DEPLOY/resolution.so" \
   --bpf-program "$RISK" "$DEPLOY/risk.so" \
+  --bpf-program "$SESSION_KEYS" "$DEPLOY/session_keys.so" \
   --account "$USDC" "$MINT_ACC" \
   >/tmp/cpm-validator.log 2>&1 &
 VAL_PID=$!
@@ -113,13 +161,16 @@ echo "== vault / market =="
 cpm faucet 100000
 cpm vault-init
 cpm deposit 50000
-CREATE_OUT="$(cpm market create-gaussian phase5-session first --n 8 --c-m 5 --close-in 600 --challenge-secs 20)"
+cpm committee init --m 1 || true
+CREATE_OUT="$(cpm market create-gaussian phase5-session first --n 8 --close-in 600 --challenge-secs 20)"
 echo "$CREATE_OUT"
 MARKET_PK="$(echo "$CREATE_OUT" | sed -n 's/.*market=\([^ ]*\).*/\1/p')"
-cpm settle fund-cm "$MARKET_PK" 5
+cpm settle fund-cm "$MARKET_PK"
 
-echo "== session + gateway =="
-cpm session open --authority "$SESS" --hours 2 --usdc 20000 --market "$MARKET_PK"
+echo "== session + SessionTokenV2 + gateway =="
+OPEN_OUT="$(cpm session open --authority "$SESS" --hours 2 --usdc 20000 --market "$MARKET_PK")"
+echo "$OPEN_OUT"
+echo "$OPEN_OUT" | grep -q 'token='
 wait_gw || exit 1
 
 OWNER="$(solana-keygen pubkey "$KEYPAIR")"

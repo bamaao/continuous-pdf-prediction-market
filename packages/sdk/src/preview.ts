@@ -448,6 +448,20 @@ export async function fetchOpsStatus(api: string): Promise<{
   return r.json();
 }
 
+export type RolesSnap = {
+  owner: string;
+  reviewer: boolean;
+  operator: boolean;
+  open_review: boolean;
+  env: string;
+};
+
+export async function fetchRoles(api: string, owner: string): Promise<RolesSnap> {
+  const r = await fetch(`${api}/v1/roles?owner=${encodeURIComponent(owner)}`);
+  if (!r.ok) throw new Error(`roles ${r.status}`);
+  return r.json();
+}
+
 export async function fetchPool(api: string): Promise<{
   c_p_pool: number;
   boards: { market: string; title?: string; category?: string; c_m: number; c_r: number; c_p_board?: number; c_p_alloc?: number }[];

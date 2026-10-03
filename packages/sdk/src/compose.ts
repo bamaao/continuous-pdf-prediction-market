@@ -4,6 +4,7 @@ export type ComposeOut = {
   program_id: string;
   keys: { pubkey: string; is_signer: boolean; is_writable: boolean }[];
   data_b64: string;
+  ixs?: ComposeOut[];
 };
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -25,14 +26,22 @@ export function toIx(out: ComposeOut): TransactionInstruction {
   });
 }
 
-export async function compose(api: string, body: Record<string, unknown>): Promise<TransactionInstruction> {
+export async function composeIxs(api: string, body: Record<string, unknown>): Promise<TransactionInstruction[]> {
   const r = await fetch(`${api}/v1/compose`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`compose ${r.status} ${await r.text()}`);
-  return toIx((await r.json()) as ComposeOut);
+  const out = (await r.json()) as ComposeOut;
+  if (out.ixs?.length) return out.ixs.map(toIx);
+  return [toIx(out)];
+}
+
+export async function compose(api: string, body: Record<string, unknown>): Promise<TransactionInstruction> {
+  const ixs = await composeIxs(api, body);
+  if (!ixs[0]) throw new Error("compose returned no instructions");
+  return ixs[0];
 }
 
 /** CreateBoard metas: creator, market, grid, system_program. */

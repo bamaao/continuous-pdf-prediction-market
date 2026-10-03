@@ -21,6 +21,6 @@ describe("listing identity", () => {
     expect(parseTagsInput("football，world cup | test")).toEqual(["football", "world cup", "test"]);
     expect(formatTags(["football", "epl"])).toBe("football · epl");
     expect(defaultTags(0)).toEqual(["football"]);
-    expect(defaultDescription(0)).toContain("结算");
+    expect(defaultDescription(0)).toContain("full-time");
   });
 });

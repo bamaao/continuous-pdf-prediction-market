@@ -57,6 +57,19 @@ pub struct SubmitBody {
     pub owner: String,
     pub market: String,
     pub nonce: u64,
+    /// Frozen ticket $S$ — persisted beside the durable journal receipt for large-$n$ claim.
+    #[serde(default)]
+    pub set_hash: Option<String>,
+    #[serde(default)]
+    pub mask: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub skellam_kind: Option<u8>,
+    #[serde(default)]
+    pub a: Option<i64>,
+    #[serde(default)]
+    pub b: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +170,12 @@ async fn submit(
         receipt: rec.clone(),
         tx_b64: body.tx_b64,
         tx_sha: sha256_hex(&bytes),
+        set_hash: body.set_hash,
+        mask: body.mask,
+        kind: body.kind,
+        skellam_kind: body.skellam_kind,
+        a: body.a,
+        b: body.b,
     };
     st.store
         .put(&key, stored)
@@ -216,11 +235,20 @@ fn forward(st: AppState, key: String) {
                     next.receipt.status = "confirmed".into();
                     let _ = st.store.put(&key, next.clone());
                     if let Some(j) = &st.journal {
-                        if let Err(e) = j.append(
+                        let side = journal::TicketSide {
+                            set_hash: next.set_hash.clone(),
+                            mask: next.mask.clone(),
+                            kind: next.kind.clone(),
+                            skellam_kind: next.skellam_kind,
+                            a: next.a,
+                            b: next.b,
+                        };
+                        if let Err(e) = j.append_ticket(
                             &next.receipt.market,
                             &next.receipt.owner,
                             next.receipt.nonce,
                             &next.receipt.sig,
+                            side,
                         ) {
                             eprintln!("journal append: {e}");
                         }
@@ -313,6 +341,12 @@ mod tests {
                 receipt: rec.clone(),
                 tx_b64: "dHg=".into(),
                 tx_sha: "ab".into(),
+                set_hash: None,
+                mask: None,
+                kind: None,
+                skellam_kind: None,
+                a: None,
+                b: None,
             },
         )
         .unwrap();
@@ -390,6 +424,12 @@ mod tests {
                     },
                     tx_b64: "old".into(),
                     tx_sha: "aa".into(),
+                    set_hash: None,
+                    mask: None,
+                    kind: None,
+                    skellam_kind: None,
+                    a: None,
+                    b: None,
                 },
             )
             .unwrap();

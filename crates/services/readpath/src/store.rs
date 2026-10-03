@@ -484,8 +484,18 @@ impl MemoryStore {
     }
 
     pub fn fill_of(&self, owner: &str, market: &str, set_hash: &str) -> Option<FillMeta> {
-        let key = Self::fill_key(owner, market, set_hash);
-        self.inner.read().expect("store").fills.get(&key).cloned()
+        let hash = set_hash.trim_start_matches("0x").to_ascii_lowercase();
+        let key = Self::fill_key(owner, market, &hash);
+        let g = self.inner.read().expect("store");
+        g.fills
+            .get(&key)
+            .cloned()
+            .or_else(|| g.fills.get(&Self::fill_key(owner, market, set_hash)).cloned())
+    }
+
+    /// Alias used by claim / portfolio recovery (FR-UI-41).
+    pub fn fills_of(&self, owner: &str, market: &str, set_hash: &str) -> Option<FillMeta> {
+        self.fill_of(owner, market, set_hash)
     }
 
     pub fn comments(&self) -> Vec<CommentRow> {

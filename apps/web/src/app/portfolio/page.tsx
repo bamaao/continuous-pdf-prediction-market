@@ -67,24 +67,27 @@ export default function Portfolio() {
     try {
       const refund = t.prompt === "unclaimed_refund";
       const op = refund ? "refund" : skellam ? "payout_skellam" : "payout";
-      if (op === "payout" && !mask) {
-        setNote("this ticket's set S is not in the fill journal yet — the API could not recover the mask");
+      if (op === "payout" && !mask && !t.set_hash) {
+        setNote("frozen set S is missing (no fill journal / durable journal, and the grid is too large to brute-force)");
         return;
       }
-      if (op === "payout_skellam" && skellamKind == null) {
+      if (op === "payout_skellam" && skellamKind == null && !t.set_hash) {
         setNote("this Skellam ticket is not in the fill journal yet");
         return;
       }
+      // Compose hydrates mask / skellam from fill journal or set_hash recovery (n≤20 / typed lines).
       const ix = await compose(MARKET_API, {
         op,
         owner: publicKey.toBase58(),
         market: t.market,
-        mask,
+        mask: mask || undefined,
         position: t.position,
         set_hash: t.set_hash,
         kind: skellamKind,
         value: a,
         value_b: b,
+        n: t.family === 0 ? 121 : undefined,
+        family: t.family,
       });
       const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
       setNote(`${op} ${sig}`);

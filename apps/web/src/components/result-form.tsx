@@ -4,7 +4,7 @@ import { compose, familyName, fetchResolution, ResolutionSnap } from "@cpm/sdk";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MARKET_API } from "@/lib/env";
-import { NEED_WALLET, SESSION_BOARD_ONLY } from "@/lib/copy";
+import { CLAIM_ON_PORTFOLIO, LOCK_RHO, LOCK_RHO_HINT, NEED_WALLET, OPEN_REFUNDS, SESSION_BOARD_ONLY } from "@/lib/copy";
 import { sendSigned } from "@/lib/tx";
 
 const ZERO = "11111111111111111111111111111111";
@@ -103,13 +103,29 @@ export function ResultForm({ market, family }: { market: string; family: number 
       return;
     }
     let stop = false;
-    sha256Hex(trimmed).then((h) => {
+    (async () => {
+      try {
+        const r = await fetch(`${MARKET_API}/v1/markets/${market}/evidence`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: trimmed, author: publicKey?.toBase58() ?? "" }),
+        });
+        if (!r.ok) throw new Error(`evidence ${r.status}`);
+        const j = (await r.json()) as { hash?: string };
+        if (!stop && j.hash) {
+          setHash(j.hash);
+          return;
+        }
+      } catch {
+        /* fall back to local hash so propose still works offline */
+      }
+      const h = await sha256Hex(trimmed);
       if (!stop) setHash(h);
-    });
+    })();
     return () => {
       stop = true;
     };
-  }, [evidence, market]);
+  }, [evidence, market, publicKey]);
 
   const me = publicKey?.toBase58() ?? "";
   const member = !!me && (rec?.members ?? []).includes(me);
@@ -136,7 +152,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
   const canVoid = !!rec && !terminal && member && now >= rec.close_ts;
 
   async function run(
-    op: "resolve_open" | "submit_result" | "challenge" | "vote" | "finalize" | "void_resolution",
+    op: "resolve_open" | "submit_result" | "challenge" | "vote" | "finalize" | "void_resolution" | "begin_settle" | "begin_refund",
     extra: Record<string, unknown> = {},
   ) {
     if (!publicKey || !signTransaction) {
@@ -156,6 +172,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
         value: family === 4 ? yes : family === 1 || family === 2 ? Math.round(value * 1000) : value,
         value_b: family === 0 ? valueB : 0,
         evidence_hex: hash || undefined,
+        include_pool: op === "begin_settle" ? true : undefined,
         ...extra,
       });
       const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
@@ -306,7 +323,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
                 placeholder="source, URL, or paste a 64-char hex digest"
               />
               <span className="mt-1 block break-all normal-case tracking-normal text-paper/40">
-                on-chain evidence_hash {hash || "empty (32 zero bytes)"}
+                stored off-chain · on-chain evidence_hash {hash || "empty (32 zero bytes)"}
               </span>
             </label>
           )}
@@ -361,13 +378,36 @@ export function ResultForm({ market, family }: { market: string; family: number 
       )}
 
       {terminal && (
-        <p className="text-[10px] text-paper/45">
-          {failed
-            ? "RESOLUTION_FAILED. This prediction market is void. Claim refunds on the market page."
-            : voided
-              ? "Committee voided this prediction market after close."
-              : `Settled at ${rec?.final_outcome.label ?? "x*"}. Claim on the market page.`}
-        </p>
+        <div className="space-y-2">
+          <p className="text-[10px] text-paper/45">
+            {failed
+              ? "RESOLUTION_FAILED. This prediction market is void. Open refunds, then reclaim on Portfolio."
+              : voided
+                ? "Committee voided this prediction market after close."
+                : `Finalized at ${rec?.final_outcome.label ?? "x*"}. ${LOCK_RHO_HINT}`}
+          </p>
+          {rec?.has_final && (
+            <button
+              className="w-full bg-amber py-2 text-ink disabled:opacity-50"
+              disabled={busy}
+              onClick={() => run("begin_settle")}
+            >
+              {busy ? "Signing…" : LOCK_RHO}
+            </button>
+          )}
+          {(failed || voided || rec?.refunds_due) && !rec?.has_final && (
+            <button
+              className="w-full border border-amber py-2 text-amber disabled:opacity-50"
+              disabled={busy}
+              onClick={() => run("begin_refund")}
+            >
+              {busy ? "Signing…" : OPEN_REFUNDS}
+            </button>
+          )}
+          <p className="text-[10px] text-paper/45">
+            After ρ is written, {CLAIM_ON_PORTFOLIO.toLowerCase()}.
+          </p>
+        </div>
       )}
     </div>
   );

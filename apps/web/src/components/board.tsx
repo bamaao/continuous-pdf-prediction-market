@@ -3,7 +3,7 @@
 import {
   formatTags,
   cellsFromPush,
-  compose,
+  composeIxs,
   coverageLow,
   coveragePct,
   exactLine,
@@ -40,11 +40,11 @@ import {
 import { MarketCard } from "./market-card";
 import { PdfChart } from "./pdf-chart";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { MARKET_API } from "@/lib/env";
-import { NEED_WALLET } from "@/lib/copy";
+import { CLAIM_ON_PORTFOLIO, LOCK_RHO, LOCK_RHO_HINT, LMSR_COST_HINT, NEED_WALLET, OPEN_REFUNDS } from "@/lib/copy";
 import { sendSigned, submitGateway } from "@/lib/tx";
 
 function nonceKey(market: string) {
@@ -317,6 +317,47 @@ export function Board({ market }: { market: string }) {
   }
 
   const settled = (info?.board_phase ?? 0) >= 1;
+  const needsRho = !settled && !!res?.has_final;
+  const needsRefund = !settled && !!res && (res.phase === 4 || res.phase === 5 || res.refunds_due);
+
+  async function lockSettle(op: "begin_settle" | "begin_refund") {
+    if (!publicKey || !signTransaction) {
+      setNote(NEED_WALLET);
+      return;
+    }
+    setBusy(true);
+    setNote(op === "begin_settle" ? "locking ρ…" : "opening refunds…");
+    try {
+      const ix = await compose(MARKET_API, {
+        op,
+        owner: publicKey.toBase58(),
+        market,
+        include_pool: op === "begin_settle" ? true : undefined,
+      });
+      const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
+      setNote(`${op} ${sig}`);
+      for (let i = 0; i < 16; i++) {
+        const desk = await fetchInfo(MARKET_API, market);
+        setInfo(desk);
+        if ((desk.board_phase ?? 0) >= 1) {
+          setPdfMode("frozen");
+          pushInbox({
+            id: `settle-${market}`,
+            title: desk.board_phase === 2 ? "Market VOID / refund ready" : "Market settled — review claim",
+            market,
+            market_title: listingHeadline({ title: listingTitle, family: desk.family, market }),
+            ts: Date.now(),
+          });
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "settle gate failed");
+    } finally {
+      setBusy(false);
+    }
+  }
   const closeTs = info?.close_ts ?? 0;
   const tradingClosed = settled || (closeTs > 0 && nowSec >= closeTs);
 
@@ -351,7 +392,7 @@ export function Board({ market }: { market: string }) {
     try {
     const secret = await loadSessionSecret(publicKey.toBase58());
     const trader = secret ? Keypair.fromSecretKey(secret) : null;
-    const ix = await compose(MARKET_API, {
+    const ixs = await composeIxs(MARKET_API, {
       op,
       owner: publicKey.toBase58(),
       trader: (trader?.publicKey ?? publicKey).toBase58(),
@@ -363,7 +404,8 @@ export function Board({ market }: { market: string }) {
       value: typed ? spec.a : undefined,
       value_b: typed ? spec.b : undefined,
     });
-      if (trader) {
+      let lastSig = "";
+      if (trader && ixs.length === 1) {
         const rec = await submitGateway(
           connection,
           async (tx) => {
@@ -374,13 +416,22 @@ export function Board({ market }: { market: string }) {
           publicKey,
           new PublicKey(market),
           nonce,
-          [ix],
+          ixs,
+          typed
+            ? { mask, kind: "skellam", skellam_kind: spec.kind, a: spec.a, b: spec.b }
+            : { mask, kind: "mask" },
         );
-        setNote(`confirmed ${rec.sig}`);
+        lastSig = rec.sig;
       } else {
-        const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
-        setNote(`confirmed ${sig}`);
+        const signer = async (tx: Transaction) => {
+          if (trader) tx.partialSign(trader);
+          return signTransaction(tx);
+        };
+        for (const ix of ixs) {
+          lastSig = await sendSigned(connection, signer, publicKey, [ix]);
+        }
       }
+      setNote(`confirmed ${lastSig}`);
       if (typed) {
         rememberSkellam(publicKey.toBase58(), market, spec.kind, spec.a, spec.b, q, mask);
         void saveTicket(MARKET_API, publicKey.toBase58(), {
@@ -514,6 +565,37 @@ export function Board({ market }: { market: string }) {
           Low coverage. The order is still allowed. This warning does not change p_S or C_S(q).
         </p>
       )}
+      {needsRho && (
+        <div className="mt-4 border border-amber/50 bg-amber/10 p-4 font-mono text-xs">
+          <p className="uppercase tracking-widest text-amber">Settlement gate</p>
+          <p className="mt-2 text-paper/70">{LOCK_RHO_HINT}</p>
+          {res?.has_final && (
+            <p className="mt-2 text-lg text-amber">x* {res.final_outcome.label}</p>
+          )}
+          <button
+            className="mt-3 w-full bg-amber py-2 text-ink disabled:opacity-50"
+            disabled={busy}
+            onClick={() => lockSettle("begin_settle")}
+          >
+            {busy ? "Signing…" : LOCK_RHO}
+          </button>
+          {note && <p className="mt-2 text-[10px] text-paper/55">{note}</p>}
+        </div>
+      )}
+      {needsRefund && !needsRho && (
+        <div className="mt-4 border border-rule p-4 font-mono text-xs">
+          <p className="uppercase tracking-widest text-amber">Refund gate</p>
+          <p className="mt-2 text-paper/70">VOID / RESOLUTION_FAILED — open refunds before Portfolio can reclaim cost_paid.</p>
+          <button
+            className="mt-3 w-full border border-amber py-2 text-amber disabled:opacity-50"
+            disabled={busy}
+            onClick={() => lockSettle("begin_refund")}
+          >
+            {busy ? "Signing…" : OPEN_REFUNDS}
+          </button>
+          {note && <p className="mt-2 text-[10px] text-paper/55">{note}</p>}
+        </div>
+      )}
       {settled && (
         <div className="mt-4 border border-amber/40 bg-amber/5 p-4 font-mono text-xs">
           <p className="uppercase tracking-widest text-amber">Public result</p>
@@ -536,7 +618,7 @@ export function Board({ market }: { market: string }) {
               : "Winners receive ⌊ρ·face⌋. Same ρ for every ticket."}
           </p>
           <p className="mt-2 text-paper/45">
-            C_max {info?.c_max_usdc ?? "—"} = R_net + C_R + C_P^alloc. Claim on /portfolio with the connected wallet.
+            C_max {info?.c_max_usdc ?? "—"} = R_net + C_R + C_P^alloc. {CLAIM_ON_PORTFOLIO} with the connected wallet.
           </p>
           {held && (
             <p className="mt-2 text-paper/70">
@@ -544,7 +626,7 @@ export function Board({ market }: { market: string }) {
             </p>
           )}
           <Link href="/portfolio" className="mt-3 inline-block uppercase text-amber">
-            Review claim
+            {CLAIM_ON_PORTFOLIO}
           </Link>
         </div>
       )}
@@ -601,8 +683,10 @@ export function Board({ market }: { market: string }) {
           <p className="uppercase tracking-widest text-amber">{settled ? "Settlement ticket" : tradingClosed ? "Trading closed" : "Trade ticket"}</p>
           <p className="mt-2 text-[10px] leading-relaxed text-paper/50">
             {settled
-              ? "This prediction market is settled. Quotes stay visible for review. Claim ⌊ρ·face⌋ or refund on /portfolio."
-              : tradingClosed
+              ? "This prediction market is settled. Quotes stay visible for review. Claim ⌊ρ·face⌋ or refund on Portfolio."
+              : needsRho
+                ? LOCK_RHO_HINT
+                : tradingClosed
                 ? "Trading closed at the deadline. No buys or sells on any prediction market after close_ts."
                 : "Session may sign buy / sell. Same nonce retries the same fill. Coverage is display only."}
           </p>
@@ -633,6 +717,7 @@ export function Board({ market }: { market: string }) {
           <p className="mt-4 mb-1 font-mono text-[11px] uppercase tracking-widest text-amber">Quote</p>
           <Row k="p_S" v={quote ? `${(quote.p_s_bps / 100).toFixed(2)}%` : "—"} />
           <Row k="C_S(q)" v={quote ? `${quote.c_s_usdc} USDC` : "—"} />
+          <p className="mb-1 text-[10px] leading-snug text-paper/45">{LMSR_COST_HINT}</p>
           <Row k="coverage" v={quote ? coveragePct(quote.l_max_usdc, quote.coverage_bps) : "—"} warn={!!quote && coverageLow(quote.l_max_usdc, quote.coverage_bps)} />
           <Row k="ρ̂" v={quote ? coveragePct(quote.l_max_usdc, quote.rho_hat_bps) : "—"} />
           <Row

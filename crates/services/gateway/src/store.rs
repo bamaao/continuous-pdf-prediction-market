@@ -14,6 +14,19 @@ pub struct Stored {
     /// Signed tx only, so the same nonce can be re-forwarded. Never a secret key.
     pub tx_b64: String,
     pub tx_sha: String,
+    /// Frozen $S$ for claim recovery (not part of receipt key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skellam_kind: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b: Option<i64>,
 }
 
 #[derive(Clone)]

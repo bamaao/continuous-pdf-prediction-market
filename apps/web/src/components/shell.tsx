@@ -1,24 +1,64 @@
 "use client";
 
+import { fetchRoles } from "@cpm/sdk";
+import { useWallet } from "@solana/wallet-adapter-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import { MARKET_API } from "@/lib/env";
 import { Inbox } from "./inbox";
 import { WalletBar } from "./wallet-bar";
 
-const NAV = [
+/** FR-UI-29 shell: Lobby, Portfolio, Committee, Create, Auctions, Ops(+Review). Tags = R-CREATOR. */
+const BASE_NAV = [
   ["Lobby", "/"],
   ["Auctions", "/auctions"],
   ["Portfolio", "/portfolio"],
   ["LP", "/lp"],
   ["Create", "/create"],
-  ["审核", "/review"],
-  ["Tags", "/tags"],
   ["Committee", "/committee"],
-  ["Ops", "/ops"],
 ] as const;
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
+  const { publicKey } = useWallet();
+  const [showReview, setShowReview] = useState(false);
+  const [showOps, setShowOps] = useState(false);
+  const [showTags, setShowTags] = useState(false);
+
+  useEffect(() => {
+    if (!publicKey) {
+      setShowReview(false);
+      setShowOps(false);
+      setShowTags(false);
+      return;
+    }
+    setShowTags(true); // R-CREATOR: any SIWS wallet may maintain the tag catalog
+    let stop = false;
+    fetchRoles(MARKET_API, publicKey.toBase58())
+      .then((r) => {
+        if (stop) return;
+        setShowReview(r.reviewer || r.open_review);
+        setShowOps(r.operator);
+      })
+      .catch(() => {
+        if (!stop) {
+          setShowReview(false);
+          setShowOps(false);
+        }
+      });
+    return () => {
+      stop = true;
+    };
+  }, [publicKey]);
+
+  const nav: { label: string; href: string }[] = [
+    ...BASE_NAV.map(([label, href]) => ({ label, href })),
+    ...(showTags ? [{ label: "Tags", href: "/tags" }] : []),
+    ...(showReview ? [{ label: "Review", href: "/review" }] : []),
+    ...(showOps ? [{ label: "Ops", href: "/ops" }] : []),
+  ];
+
   return (
     <div className="relative min-h-screen">
       <div className="grain" />
@@ -33,7 +73,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </p>
           </div>
           <nav className="flex flex-wrap items-center gap-4 font-mono text-xs uppercase tracking-widest">
-            {NAV.map(([label, href]) => (
+            {nav.map(({ label, href }) => (
               <Link
                 key={href}
                 href={href}

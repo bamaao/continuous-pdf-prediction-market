@@ -1233,6 +1233,7 @@ dependencies = [
  "journal",
  "notify",
  "quote 0.1.0",
+ "serde",
  "serde_json",
  "solana-client",
  "solana-sdk",
@@ -3382,6 +3383,7 @@ dependencies = [
  "anchor-lang",
  "ephemeral-rollups-sdk",
  "math",
+ "session-keys",
  "vault",
 ]
 
@@ -4491,12 +4493,14 @@ dependencies = [
  "client",
  "futures-util",
  "http-body-util",
+ "journal",
  "math",
  "math-wasm",
  "notify",
  "quote 0.1.0",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "solana-client",
  "solana-sdk",
  "sqlx",
@@ -5068,6 +5072,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "session-keys"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c22bb80c43cf7ff13790166c4f2aed099e3707cea31fcf359284fdebc56b6367"
+dependencies = [
+ "anchor-lang",
+ "session-keys-macros",
+ "solana-security-txt",
+]
+
+[[package]]
+name = "session-keys-macros"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4fb1ba67eabc3cb947145af610d0b3599124333540f6e494812f28db2f3eefe"
+dependencies = [
+ "session-keys-macros-attribute",
+]
+
+[[package]]
+name = "session-keys-macros-attribute"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7962ee082ac6ed55be82e97542b2811f26b48b8973aa4a4fc4474b66d3e194a"
+dependencies = [
+ "proc-macro2",
+ "quote 1.0.47",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "settle-flow"
 version = "0.1.0"
 dependencies = [
@@ -5077,6 +5112,7 @@ dependencies = [
  "market",
  "math",
  "resolution",
+ "session-keys",
  "solana-program-test",
  "solana-sdk",
  "spl-associated-token-account 6.0.0",
