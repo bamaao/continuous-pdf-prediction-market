@@ -549,6 +549,7 @@ def main() -> int:
 
         cpm_ok(["faucet", "50000"], idempotent=True)
         cpm_ok(["vault-init"], timeout=40, idempotent=True)
+        cpm_ok(["committee", "init", "--m", "1"], timeout=40, idempotent=True)
         cpm_ok(["deposit", "20000"], idempotent=True)
         ident = vault_identity()
         if ident["mint"] == "missing" or ident["config"] == "missing":
