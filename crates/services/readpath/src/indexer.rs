@@ -5,11 +5,11 @@ use crate::store::{
     MemoryStore, OutcomeSnap, PositionRow, QuoteRow, ResolutionRow,
 };
 use anyhow::Result;
-use crate::store::CommitteeSnap;
+use crate::store::{CommitteeSnap, ProtocolSnap};
 use client::{
     board, committee_pda, concat_grid_shards, decode_board, decode_claim, decode_committee, decode_grid,
-    decode_layer, decode_market, decode_pool, decode_position, decode_quote, decode_resolution, decode_risk_book,
-    decode_tap, grid_shard_pda, risk_book,
+    decode_layer, decode_market, decode_pool, decode_loss_pool, decode_position, decode_protocol, decode_quote, decode_resolution, decode_committee_bond, decode_risk_book,
+    decode_tap, grid_shard_pda, protocol_pda, risk_book,
 };
 use math::settle::usdc;
 use math::Q64;
@@ -73,10 +73,12 @@ pub fn project(
         close_ts: 0,
         risk_lock_ts: 0,
         report_window_secs: 0,
+        report_open_ts: 0,
         extra_a: 0,
         extra_b: 0,
         extra_u2: 0,
         delegated: false,
+        platform: String::new(),
     })
 }
 
@@ -128,6 +130,8 @@ async fn apply_genesis(store: &MemoryStore, pool: Option<&sqlx::PgPool>, genesis
         store.wipe_derived();
         wipe_projection_tables(p).await?;
         write_ledger_genesis(p, &genesis).await?;
+        let hb = std::env::var("KEEPER_HEARTBEAT_PATH").unwrap_or_else(|_| "tmp/keeper-heartbeat.json".into());
+        let _ = std::fs::remove_file(hb);
         eprintln!("indexer: ledger genesis changed; dropped stale projections");
     } else {
         store.wipe_derived();
@@ -163,19 +167,29 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
         });
     }
     let mut taps: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut boards: HashMap<String, (u8, i128, u16, u64)> = HashMap::new();
     let mut pool_avail = None;
     if let Ok(vaccs) = rpc.get_program_accounts(&client::vault::ID).await {
         let mut paid = HashMap::new();
+        let mut cover_avail = None;
         for (_, acc) in vaccs {
             if let Ok(c) = decode_claim(&acc.data) {
                 paid.insert(c.position.to_string(), c.paid);
             } else if let Ok(p) = decode_pool(&acc.data) {
                 pool_avail = Some(p.available);
+            } else if let Ok(p) = decode_loss_pool(&acc.data) {
+                cover_avail = Some(p.available);
             } else if let Ok(t) = decode_tap(&acc.data) {
                 taps.insert(t.market.to_string(), (t.cap, t.allocated));
+            } else if let Ok(b) = decode_board(&acc.data) {
+                boards.insert(
+                    b.market.to_string(),
+                    (b.phase, b.rho_raw, b.cell, b.liability),
+                );
             }
         }
         store.set_pool(pool_avail.unwrap_or(0));
+        store.set_cover(cover_avail.unwrap_or(0));
         for t in &mut tickets {
             if let Some(p) = paid.get(&t.position) {
                 t.paid_usdc = *p;
@@ -214,11 +228,23 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
         }
         store.replace_risk(quotes, layers);
     }
+    let mut bonds: HashMap<String, (String, u64, bool)> = HashMap::new();
+    if let Ok(vaccs) = rpc.get_program_accounts(&client::vault::ID).await {
+        for (_, acc) in vaccs {
+            if let Ok(b) = decode_committee_bond(&acc.data) {
+                bonds.insert(b.market.to_string(), (b.holder.to_string(), b.amount, b.slashed));
+            }
+        }
+    }
     if let Ok(resaccs) = rpc.get_program_accounts(&client::resolution::ID).await {
         let mut rows = Vec::new();
         for (key, acc) in resaccs {
             let Ok(r) = decode_resolution(&acc.data) else { continue };
             let n = r.n as usize;
+            let (bond_holder, bond_locked, bond_slashed) = bonds
+                .get(&r.market.to_string())
+                .cloned()
+                .unwrap_or_default();
             rows.push(ResolutionRow {
                 market: r.market.to_string(),
                 record: key.to_string(),
@@ -231,7 +257,16 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
                 votes_challenge: r.votes_challenge,
                 refunds_due: r.refunds_due,
                 early_resolve: r.early_resolve,
+                slash_due: r.slash_due,
+                bond_holder,
+                bond_locked,
+                bond_slashed,
                 close_ts: r.close_ts,
+                report_open_ts: if r.report_open_ts > 0 {
+                    r.report_open_ts
+                } else {
+                    r.close_ts
+                },
                 report_deadline: r.report_deadline,
                 challenge_end: r.challenge_end,
                 vote_end: r.vote_end,
@@ -264,6 +299,24 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
         }
     } else {
         store.clear_committee();
+    }
+    if let Ok(acc) = rpc.get_account(&protocol_pda()).await {
+        if let Ok(p) = decode_protocol(&acc.data) {
+            store.set_protocol(ProtocolSnap {
+                platform: p.platform.to_string(),
+                fee_bps: p.fee_bps,
+                fee_timing: p.fee_timing,
+                report_window_secs: p.report_window_secs,
+                challenge_secs: p.challenge_secs,
+                committee_bond: p.committee_bond,
+                tap_cap_max: p.tap_cap_max,
+                alpha_r_bps: p.alpha_r_bps,
+            });
+        } else {
+            store.clear_protocol();
+        }
+    } else {
+        store.clear_protocol();
     }
     store.replace_positions(tickets);
     let mut live: HashSet<String> = accounts
@@ -328,11 +381,18 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
         row.risk_lock_ts = mkt.risk_lock_ts;
         row.fee_timing = mkt.fee_timing;
         row.report_window_secs = mkt.report_window_secs;
+        row.report_open_ts = mkt.report_opens_at();
         row.extra_a = mkt.extra.a;
         row.extra_b = mkt.extra.b;
         row.extra_u2 = mkt.extra.u2;
         row.delegated = mkt.delegated;
-        if let Some(b) = board_decoded {
+        row.platform = mkt.platform.to_string();
+        if let Some(&(phase, rho, cell, liability)) = boards.get(&key.to_string()) {
+            row.board_phase = phase;
+            row.rho_raw = rho;
+            row.settle_cell = cell;
+            row.liability = liability;
+        } else if let Some(b) = board_decoded {
             row.board_phase = b.phase;
             row.rho_raw = b.rho_raw;
             row.settle_cell = b.cell;
@@ -396,13 +456,26 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
 pub fn spawn_poller(url: String, store: Arc<MemoryStore>, pool: Option<sqlx::PgPool>, every_ms: u64) {
     tokio::spawn(async move {
         let rpc = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
+        let wait = every_ms.max(INDEXER_POLL_MIN_MS);
         loop {
             if let Err(e) = poll_once(&rpc, &store, pool.as_ref()).await {
                 eprintln!("indexer poll: {e}");
             }
-            tokio::time::sleep(Duration::from_millis(every_ms.max(200))).await;
+            tokio::time::sleep(Duration::from_millis(wait)).await;
         }
     });
+}
+
+/// Local GPA poll. Default 60s; floor 400ms. Override with `INDEXER_POLL_MS`.
+pub const INDEXER_POLL_MS: u64 = 60_000;
+pub const INDEXER_POLL_MIN_MS: u64 = 400;
+
+pub fn poll_interval_ms() -> u64 {
+    std::env::var("INDEXER_POLL_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(INDEXER_POLL_MS)
+        .max(INDEXER_POLL_MIN_MS)
 }
 
 fn outcome_snap(o: &client::resolution::Outcome) -> OutcomeSnap {

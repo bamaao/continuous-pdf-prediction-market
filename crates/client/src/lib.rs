@@ -44,6 +44,35 @@ pub fn committee_pda() -> Pubkey {
     Pubkey::find_program_address(&[market::state::COMMITTEE_SEED], &market::ID).0
 }
 
+pub fn protocol_pda() -> Pubkey {
+    Pubkey::find_program_address(&[market::state::PROTOCOL_SEED], &market::ID).0
+}
+
+pub fn init_protocol(authority: Pubkey, args: market::state::ProtocolArgs) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::InitProtocol {
+            authority,
+            protocol: protocol_pda(),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::InitProtocol { args }.data(),
+    }
+}
+
+pub fn set_protocol(authority: Pubkey, args: market::state::ProtocolArgs) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::SetProtocol {
+            authority,
+            protocol: protocol_pda(),
+        }
+        .to_account_metas(None),
+        data: market::instruction::SetProtocol { args }.data(),
+    }
+}
+
 pub fn market_pda(id_hash: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[market::state::MARKET_SEED, id_hash], &market::ID).0
 }
@@ -261,6 +290,11 @@ pub fn decode_committee(data: &[u8]) -> Result<market::state::Committee, String>
     market::state::Committee::try_deserialize(&mut cur).map_err(|e| e.to_string())
 }
 
+pub fn decode_protocol(data: &[u8]) -> Result<market::state::Protocol, String> {
+    let mut cur = data;
+    market::state::Protocol::try_deserialize(&mut cur).map_err(|e| e.to_string())
+}
+
 pub fn decode_market(data: &[u8]) -> Result<market::state::Market, String> {
     let mut cur = data;
     market::state::Market::try_deserialize(&mut cur).map_err(|e| e.to_string())
@@ -388,6 +422,56 @@ pub fn withdraw(owner: Pubkey, amount: u64) -> Instruction {
     }
 }
 
+pub fn committee_bond_pda(market: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[vault::CBOND_SEED, market.as_ref()], &vault::ID).0
+}
+
+pub fn lock_committee_bond(owner: Pubkey, market: Pubkey, amount: u64) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::LockBond {
+            owner,
+            market,
+            resolution: record_pda(&market),
+            user: user_vault(&owner),
+            bond: committee_bond_pda(&market),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: vault::instruction::LockCommitteeBond { amount }.data(),
+    }
+}
+
+pub fn slash_committee_bond(authority: Pubkey, market: Pubkey, holder: Pubkey) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::SlashBond {
+            authority,
+            market,
+            resolution: record_pda(&market),
+            bond: committee_bond_pda(&market),
+            holder: user_vault(&holder),
+            platform: user_vault(&authority),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::SlashCommitteeBond {}.data(),
+    }
+}
+
+pub fn release_committee_bond(owner: Pubkey, market: Pubkey) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::ReleaseBond {
+            owner,
+            resolution: record_pda(&market),
+            bond: committee_bond_pda(&market),
+            user: user_vault(&owner),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::ReleaseCommitteeBond {}.data(),
+    }
+}
+
 pub fn open_session(
     owner: Pubkey,
     authority: Pubkey,
@@ -510,6 +594,7 @@ fn create_board_accounts(creator: Pubkey, id_hash: [u8; 32]) -> market::accounts
         creator,
         market: market_key,
         grid: grid_pda(&market_key),
+        protocol: protocol_pda(),
         system_program: system_program::ID,
     }
 }
@@ -1169,9 +1254,10 @@ pub fn resolve_open(payer: Pubkey, market: Pubkey) -> Instruction {
 pub fn submit_result(reporter: Pubkey, market: Pubkey, outcome: resolution::Outcome, evidence_hash: [u8; 32]) -> Instruction {
     Instruction {
         program_id: resolution::ID,
-        accounts: resolution::accounts::MutRecord {
+        accounts: resolution::accounts::SubmitRecord {
             reporter,
             record: record_pda(&market),
+            bond: committee_bond_pda(&market),
         }
         .to_account_metas(None),
         data: resolution::instruction::SubmitResult {
@@ -1397,6 +1483,10 @@ pub fn adjust_pool() -> Pubkey {
     Pubkey::find_program_address(&[vault::CPOOL_SEED], &vault::ID).0
 }
 
+pub fn loss_pool() -> Pubkey {
+    Pubkey::find_program_address(&[vault::RLOSS_SEED], &vault::ID).0
+}
+
 pub fn board_tap(market: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[vault::CPTAP_SEED, market.as_ref()], &vault::ID).0
 }
@@ -1416,13 +1506,17 @@ pub fn decode_quote(data: &[u8]) -> Result<risk::Quote, String> {
 }
 
 pub fn decode_layer(data: &[u8]) -> Result<risk::Layer, String> {
-    let mut cur = data;
-    risk::Layer::try_deserialize(&mut cur).map_err(|e| e.to_string())
+    risk::Layer::from_account_data(data).map_err(|e| e.to_string())
 }
 
 pub fn decode_resolution(data: &[u8]) -> Result<resolution::Resolution, String> {
     let mut cur = data;
     resolution::Resolution::try_deserialize(&mut cur).map_err(|e| e.to_string())
+}
+
+pub fn decode_committee_bond(data: &[u8]) -> Result<vault::CommitteeBond, String> {
+    let mut cur = data;
+    vault::CommitteeBond::try_deserialize(&mut cur).map_err(|e| e.to_string())
 }
 
 pub fn void_resolution(reporter: Pubkey, market: Pubkey) -> Instruction {
@@ -1438,9 +1532,49 @@ pub fn void_resolution(reporter: Pubkey, market: Pubkey) -> Instruction {
     }
 }
 
+pub fn admin_submit_result(
+    reporter: Pubkey,
+    market: Pubkey,
+    outcome: resolution::Outcome,
+    evidence_hash: [u8; 32],
+) -> Instruction {
+    Instruction {
+        program_id: resolution::ID,
+        accounts: resolution::accounts::Finalize {
+            reporter,
+            record: record_pda(&market),
+            market,
+        }
+        .to_account_metas(None),
+        data: resolution::instruction::AdminSubmitResult {
+            outcome,
+            evidence_hash,
+        }
+        .data(),
+    }
+}
+
+pub fn admin_void_resolution(reporter: Pubkey, market: Pubkey) -> Instruction {
+    Instruction {
+        program_id: resolution::ID,
+        accounts: resolution::accounts::Finalize {
+            reporter,
+            record: record_pda(&market),
+            market,
+        }
+        .to_account_metas(None),
+        data: resolution::instruction::AdminVoidResolution {}.data(),
+    }
+}
+
 pub fn decode_pool(data: &[u8]) -> Result<vault::AdjustPool, String> {
     let mut cur = data;
     vault::AdjustPool::try_deserialize(&mut cur).map_err(|e| e.to_string())
+}
+
+pub fn decode_loss_pool(data: &[u8]) -> Result<vault::LossPool, String> {
+    let mut cur = data;
+    vault::LossPool::try_deserialize(&mut cur).map_err(|e| e.to_string())
 }
 
 pub fn decode_tap(data: &[u8]) -> Result<vault::BoardTap, String> {
@@ -1674,6 +1808,7 @@ pub fn payout_skellam_on(
 fn quote_pay(market: Pubkey, lp: Pubkey, layer_id: u8) -> vault::accounts::QuotePay {
     vault::accounts::QuotePay {
         board: board(&market),
+        layer: layer_pda(&market, layer_id),
         quote: quote_pda(&market, &lp, layer_id),
         user: user_vault(&lp),
     }
@@ -1723,10 +1858,37 @@ pub fn init_pool(payer: Pubkey) -> Instruction {
         accounts: vault::accounts::InitPool {
             payer,
             pool: adjust_pool(),
+            loss_pool: loss_pool(),
             system_program: system_program::ID,
         }
         .to_account_metas(None),
         data: vault::instruction::InitPool {}.data(),
+    }
+}
+
+pub fn pay_surplus_cover(market: Pubkey) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::CoverPoolPay {
+            board: board(&market),
+            loss_pool: loss_pool(),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::PaySurplusCover {}.data(),
+    }
+}
+
+pub fn cover_lp_loss(authority: Pubkey, market: Pubkey, lp: Pubkey) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::CoverLp {
+            authority,
+            market,
+            loss_pool: loss_pool(),
+            user: user_vault(&lp),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::CoverLpLoss {}.data(),
     }
 }
 
@@ -1754,6 +1916,19 @@ pub fn set_tap(authority: Pubkey, market: Pubkey, cap: u64) -> Instruction {
         }
         .to_account_metas(None),
         data: vault::instruction::SetTap { cap }.data(),
+    }
+}
+
+pub fn pay_surplus_platform(platform: Pubkey, market: Pubkey) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::PlatformPay {
+            board: board(&market),
+            market,
+            user: user_vault(&platform),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::PaySurplusPlatform {}.data(),
     }
 }
 

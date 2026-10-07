@@ -84,6 +84,9 @@ export function ReviewDesk() {
         description: row.description,
         event: row.event,
         blocked_regions: row.blocked_regions,
+        source_locale: row.source_locale ?? "en",
+        i18n: row.i18n ?? {},
+        image_id: row.image_id ?? "",
       },
     });
     const opened = await reviewListingApplication(MARKET_API, {
@@ -202,9 +205,17 @@ export function ReviewDesk() {
             <p className="mt-1 font-display text-lg">{row.title}</p>
             <p className="mt-1 text-paper/70">{row.event}</p>
             <p className="mt-2 whitespace-pre-wrap text-paper/60">{row.description}</p>
+            {row.i18n && Object.keys(row.i18n).length ? (
+              <p className="mt-2 text-paper/45">
+                Translations{" "}
+                {Object.entries(row.i18n)
+                  .map(([loc, copy]) => `${loc}: ${copy.title || copy.event || "…"}`)
+                  .join(" · ")}
+              </p>
+            ) : null}
             <p className="mt-2 text-paper/40">
-              {row.tags.join(" · ")} · blocked {row.blocked_regions.join(" · ") || "none"} · {row.applicant.slice(0, 4)}…
-              {row.applicant.slice(-4)}
+              {row.tags.join(" · ")} · source {row.source_locale || "en"} · blocked {row.blocked_regions.join(" · ") || "none"} ·{" "}
+              {row.applicant.slice(0, 4)}…{row.applicant.slice(-4)}
             </p>
             {row.market ? (
               <p className="mt-2">

@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use math::uniform_prior;
 use math::Q64;
 use readpath::router;
-use readpath::store::{MarketProj, MemoryStore};
+use readpath::store::{MarketProj, MemoryStore, ProtocolSnap};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -21,6 +21,16 @@ fn seeded() -> (Arc<MemoryStore>, String) {
     exposure[0] = Q64::from_int(10).raw();
     let market = "Seed111111111111111111111111111111111111111".to_string();
     let store = Arc::new(MemoryStore::new());
+    store.set_protocol(ProtocolSnap {
+        platform: solana_sdk::pubkey::Pubkey::new_from_array([7u8; 32]).to_string(),
+        fee_bps: 0,
+        fee_timing: 0,
+        report_window_secs: 86_400,
+        challenge_secs: 3_600,
+        committee_bond: 100,
+        tap_cap_max: 0,
+        alpha_r_bps: 7_000,
+    });
     store.upsert(MarketProj {
         market: market.clone(),
         family: 1,
@@ -49,10 +59,12 @@ fn seeded() -> (Arc<MemoryStore>, String) {
         close_ts: 0,
         risk_lock_ts: 0,
         report_window_secs: 0,
+        report_open_ts: 0,
         extra_a: 0,
         extra_b: 0,
             extra_u2: 0,
             delegated: false,
+            platform: String::new(),
         });
     store.replace_positions(vec![readpath::PositionRow {
         position: "Pos111111111111111111111111111111111111111".into(),
@@ -248,6 +260,125 @@ async fn compose_deposit_is_client_instruction() {
 }
 
 #[tokio::test]
+async fn compose_platform_ops_wait_until_market_indexed() {
+    let app = router(Arc::new(MemoryStore::new()));
+    let owner = solana_sdk::pubkey::Pubkey::new_unique();
+    let market = solana_sdk::pubkey::Pubkey::new_unique();
+    for op in ["claim_fees", "cover_lp_loss", "pay_surplus_platform"] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/compose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "op": op,
+                            "owner": owner.to_string(),
+                            "market": market.to_string()
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE, "{op}");
+    }
+}
+
+#[tokio::test]
+async fn compose_platform_claims_require_indexed_platform() {
+    let (store, market) = seeded();
+    let mut row = store.get(&market).unwrap();
+    let platform = solana_sdk::pubkey::Pubkey::new_unique();
+    row.platform = platform.to_string();
+    store.upsert(row);
+    let app = router(store);
+    let other = solana_sdk::pubkey::Pubkey::new_unique();
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/compose")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "op": "claim_fees",
+                        "owner": other.to_string(),
+                        "market": market
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let sp_other = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/compose")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "op": "pay_surplus_platform",
+                        "owner": other.to_string(),
+                        "market": market
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sp_other.status(), StatusCode::OK);
+    let ok = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/compose")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "op": "pay_surplus_platform",
+                        "owner": platform.to_string(),
+                        "market": market
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let pool = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/compose")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "op": "fund_pool",
+                        "owner": other.to_string(),
+                        "amount": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pool.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn preview_uses_math_wasm_on_same_theta() {
     let (store, market) = seeded();
     let app = router(store);
@@ -356,6 +487,7 @@ async fn owner_positions_show_listing_title() {
             description: "First official print".into(),
             event: "US CPI YoY first print".into(),
             blocked_regions: vec![],
+            ..Default::default()
         },
     );
     let app = router(store);
@@ -441,6 +573,43 @@ async fn list_markets_search_and_paginate() {
     assert_eq!(v1["pages"].as_u64().unwrap(), 3);
     assert_eq!(v1["items"].as_array().unwrap().len(), 2);
 
+    let far = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/markets?limit=2&page=99")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let vf: serde_json::Value =
+        serde_json::from_slice(&far.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(vf["page"].as_u64().unwrap(), 3);
+    assert_eq!(vf["items"].as_array().unwrap().len(), 2);
+
+    let peak = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/markets?sort=peak&limit=20")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let vp: serde_json::Value =
+        serde_json::from_slice(&peak.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let pays: Vec<u64> = vp["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|it| it["peak_risk"]["payout_usdc"].as_u64().unwrap_or(0))
+        .collect();
+    let mut ordered = pays.clone();
+    ordered.sort_by(|a, b| b.cmp(a));
+    assert_eq!(pays, ordered);
+
     let skel = app
         .oneshot(
             Request::builder()
@@ -464,6 +633,7 @@ async fn new_read_surfaces_exist() {
         "/v1/auctions".to_string(),
         format!("/v1/markets/{market}/layers"),
         "/v1/ops/status".into(),
+        "/v1/protocol".into(),
         "/v1/notify".into(),
         "/v1/pool".into(),
         "/v1/owners/Owner1111111111111111111111111111111111111/risk".into(),
@@ -475,6 +645,21 @@ async fn new_read_surfaces_exist() {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{uri}");
     }
+}
+
+#[tokio::test]
+async fn ops_status_create_platform_is_not_market_platform() {
+    let (store, _) = seeded();
+    let app = router(store);
+    let res = app
+        .oneshot(Request::builder().uri("/v1/ops/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(v.get("create_platform").is_some());
+    assert!(v.get("platform").is_none());
 }
 
 #[tokio::test]
@@ -505,6 +690,9 @@ async fn owner_risk_lists_indexed_quotes() {
     );
     store.set_pool(15);
     store.patch_tap(&market, 10, 4);
+    let mut row = store.get(&market).unwrap();
+    row.platform = "Plat11111111111111111111111111111111111111".into();
+    store.upsert(row);
     let app = router(store);
     let risk = app
         .clone()
@@ -521,6 +709,10 @@ async fn owner_risk_lists_indexed_quotes() {
     assert_eq!(v["total"].as_u64().unwrap(), 1);
     assert_eq!(v["items"][0]["filled"].as_u64().unwrap(), 20);
     assert_eq!(v["items"][0]["weight_sum"].as_u64().unwrap(), 20_000);
+    assert_eq!(
+        v["items"][0]["platform"].as_str().unwrap(),
+        "Plat11111111111111111111111111111111111111"
+    );
     let pool = app
         .oneshot(Request::builder().uri("/v1/pool").body(Body::empty()).unwrap())
         .await
@@ -528,6 +720,7 @@ async fn owner_risk_lists_indexed_quotes() {
     let p: serde_json::Value =
         serde_json::from_slice(&pool.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(p["c_p_pool"].as_u64().unwrap(), 15);
+    assert!(p.get("cover_open").is_none());
     assert_eq!(p["boards"][0]["c_p_board"].as_u64().unwrap(), 10);
     assert_eq!(p["boards"][0]["c_p_alloc"].as_u64().unwrap(), 4);
 }
@@ -604,6 +797,7 @@ async fn listings_survive_reload_from_disk() {
             description: "First official print".into(),
             event: "US CPI YoY".into(),
             blocked_regions: vec![],
+            ..Default::default()
         },
     );
     let b = MemoryStore::new();
@@ -812,7 +1006,7 @@ async fn comments_require_indexed_market() {
 }
 
 #[tokio::test]
-async fn comments_post_and_list_oldest_first() {
+async fn comments_post_and_list_newest_first() {
     let (store, market) = seeded();
     let app = router(store);
     let empty = app
@@ -867,8 +1061,8 @@ async fn comments_post_and_list_oldest_first() {
     let page: serde_json::Value =
         serde_json::from_slice(&listed.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(page["total"], 2);
-    assert_eq!(page["items"][0]["body"], "first note");
-    assert_eq!(page["items"][1]["body"], "second note");
+    assert_eq!(page["items"][0]["body"], "second note");
+    assert_eq!(page["items"][1]["body"], "first note");
     assert_eq!(page["items"][0]["author"], COMMENT_WALLET);
 }
 
@@ -1023,6 +1217,248 @@ async fn review_system_queues_then_reviewer_approves() {
 }
 
 #[tokio::test]
+async fn application_i18n_survives_and_duplicate_ignores_translation() {
+    let app = router(Arc::new(MemoryStore::new()));
+    let body = serde_json::json!({
+        "applicant": REVIEW_WALLET,
+        "family": 1,
+        "title": "US CPI YoY app i18n",
+        "tags": ["macro"],
+        "event": "US CPI YoY first print",
+        "description": "First official print. Revisions do not settle.",
+        "topic": "US_CPI_YOY",
+        "tag": "2026-03",
+        "source_locale": "zh-Hans",
+        "i18n": { "zh-Hans": { "title": "申请中文名", "event": "", "description": "中文说明" } },
+        "compose": { "op": "create_gaussian", "close_in": 86400, "family": 1 },
+    });
+    let post = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/listings/applications")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::OK);
+    let created: serde_json::Value =
+        serde_json::from_slice(&post.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(created["source_locale"], "zh-Hans");
+    assert_eq!(created["i18n"]["zh-Hans"]["title"], "申请中文名");
+    assert_eq!(created["title"], "US CPI YoY app i18n");
+
+    let dup = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/listings/applications")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "applicant": REVIEW_WALLET,
+                        "family": 1,
+                        "title": "US CPI YoY app i18n",
+                        "tags": ["macro"],
+                        "event": "US CPI YoY first print",
+                        "description": "First official print. Revisions do not settle.",
+                        "topic": "US_CPI_YOY",
+                        "tag": "2026-03",
+                        "i18n": { "ja": { "title": "別の翻訳", "event": "", "description": "" } },
+                        "compose": { "op": "create_gaussian", "close_in": 86400, "family": 1 },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dup.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn put_listing_rejects_en_i18n_key() {
+    let (store, market) = seeded();
+    let app = router(store);
+    let bad = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/listings")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "market": market,
+                        "title": "US CPI YoY",
+                        "tags": ["macro"],
+                        "event": "US CPI YoY first print",
+                        "description": "First official print. Revisions do not settle.",
+                        "i18n": { "en": { "title": "nope", "event": "", "description": "" } }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn open_listing_locks_english_allows_i18n() {
+    let store = Arc::new(MemoryStore::new());
+    let app = router(store);
+    let post = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/listings/applications")
+                .header("content-type", "application/json")
+                .body(Body::from(application_body("US CPI YoY lock")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::OK);
+    let created: serde_json::Value =
+        serde_json::from_slice(&post.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let id = created["id"].as_i64().unwrap();
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/review")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "id": id, "reviewer": REVIEW_WALLET, "action": "approve" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let market = REVIEW_WALLET;
+    let opened = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/review")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": id,
+                        "reviewer": REVIEW_WALLET,
+                        "action": "opened",
+                        "market": market
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.status(), StatusCode::OK);
+
+    let seed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/listings")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "market": market,
+                        "title": "US CPI YoY lock",
+                        "tags": ["macro"],
+                        "event": "US CPI YoY first print",
+                        "description": "First official print. Revisions do not settle.",
+                        "topic": "US_CPI_YOY",
+                        "tag": "2026-03",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), StatusCode::OK);
+
+    let rename = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/listings")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "market": market,
+                        "title": "Renamed after OPEN",
+                        "tags": ["macro"],
+                        "event": "US CPI YoY first print",
+                        "description": "First official print. Revisions do not settle.",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rename.status(), StatusCode::CONFLICT);
+
+    let i18n_ok = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/listings")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "market": market,
+                        "title": "US CPI YoY lock",
+                        "tags": ["macro"],
+                        "event": "US CPI YoY first print",
+                        "description": "First official print. Revisions do not settle.",
+                        "i18n": { "zh-Hans": { "title": "美国 CPI 锁定", "event": "", "description": "首次官方打印" } }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(i18n_ok.status(), StatusCode::OK);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&i18n_ok.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(saved["canonical_locked"], true);
+    assert_eq!(saved["i18n"]["zh-Hans"]["title"], "美国 CPI 锁定");
+
+    let get = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/listings/{market}"))
+                .header("accept-language", "zh")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let row: serde_json::Value =
+        serde_json::from_slice(&get.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(row["title"], "美国 CPI 锁定");
+    assert_eq!(row["title_en"], "US CPI YoY lock");
+    assert_eq!(row["is_translation"], true);
+}
+
+#[tokio::test]
 async fn geo_ip_hides_blocked_listing() {
     let (store, market) = seeded();
     store.set_listing(
@@ -1036,6 +1472,7 @@ async fn geo_ip_hides_blocked_listing() {
             description: "First official print".into(),
             event: "US CPI YoY first print".into(),
             blocked_regions: vec!["CN".into()],
+            ..Default::default()
         },
     );
     let app = router(store);
@@ -1103,10 +1540,12 @@ async fn compose_buy_after_close_ts_is_forbidden() {
         close_ts: 1,
         risk_lock_ts: 1,
         report_window_secs: 0,
+        report_open_ts: 0,
         extra_a: 0,
         extra_b: 0,
             extra_u2: 0,
             delegated: false,
+            platform: String::new(),
         });
     let owner = solana_sdk::pubkey::Pubkey::new_unique();
     let app = router(store);
@@ -1132,4 +1571,149 @@ async fn compose_buy_after_close_ts_is_forbidden() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn listing_i18n_accept_language_and_search() {
+    let (store, market) = seeded();
+    store.set_listing(
+        &market,
+        readpath::ListingMeta {
+            title: "US CPI YoY".into(),
+            tags: vec!["macro".into()],
+            category: "macro".into(),
+            topic: "".into(),
+            tag: "".into(),
+            description: "First official print. Revisions do not settle.".into(),
+            event: "US CPI YoY first print".into(),
+            blocked_regions: vec![],
+            source_locale: "zh-Hans".into(),
+            i18n_json: r#"{"zh-Hans":{"title":"美国 CPI","event":"","description":"首次官方打印"}}"#.into(),
+            image_id: String::new(),
+        },
+    );
+    let app = router(store);
+
+    let zh = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/markets?limit=20")
+                .header("accept-language", "zh-CN,zh;q=0.9,en;q=0.8")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(zh.status(), StatusCode::OK);
+    let page: serde_json::Value =
+        serde_json::from_slice(&zh.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let item = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["market"] == market)
+        .expect("market");
+    assert_eq!(item["title"], "美国 CPI");
+    assert_eq!(item["title_en"], "US CPI YoY");
+    assert_eq!(item["is_translation"], true);
+    assert_eq!(item["event"], "US CPI YoY first print");
+
+    let en = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/markets?locale=en&limit=20")
+                .header("accept-language", "zh-CN")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let page_en: serde_json::Value =
+        serde_json::from_slice(&en.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let item_en = page_en["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["market"] == market)
+        .expect("market");
+    assert_eq!(item_en["title"], "US CPI YoY");
+    assert_eq!(item_en["is_translation"], false);
+
+    let search = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/markets?q=%E7%BE%8E%E5%9B%BD&limit=20")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let page_q: serde_json::Value =
+        serde_json::from_slice(&search.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(page_q["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["market"] == market));
+}
+
+#[tokio::test]
+async fn list_markets_defaults_trading_and_stake_order() {
+    let (store, first) = seeded();
+    let mut hot = store.get(&first).unwrap();
+    hot.market = "Hot111111111111111111111111111111111111111".into();
+    hot.stake_usdc = 99;
+    hot.slot = 1;
+    hot.status = 1;
+    store.upsert(hot);
+    let mut settled = store.get(&first).unwrap();
+    settled.market = "Set111111111111111111111111111111111111111".into();
+    settled.status = 3;
+    settled.stake_usdc = 1_000;
+    store.upsert(settled);
+    let mut cool = store.get(&first).unwrap();
+    cool.market = "Low111111111111111111111111111111111111111".into();
+    cool.stake_usdc = 1;
+    cool.slot = 99;
+    cool.status = 1;
+    store.upsert(cool);
+    let app = router(store);
+
+    let def = app
+        .clone()
+        .oneshot(Request::builder().uri("/v1/markets?limit=20").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_slice(&def.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let items = v["items"].as_array().unwrap();
+    assert!(items.iter().all(|it| it["status"] == 1));
+    assert!(items.iter().all(|it| it["market"] != "Set111111111111111111111111111111111111111"));
+    let stakes: Vec<u64> = items
+        .iter()
+        .map(|it| it["stake_usdc"].as_u64().unwrap_or(0))
+        .collect();
+    let mut ordered = stakes.clone();
+    ordered.sort_by(|a, b| b.cmp(a));
+    assert_eq!(stakes, ordered);
+    assert_eq!(items[0]["market"], "Hot111111111111111111111111111111111111111");
+
+    let all = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/markets?status=all&limit=20")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let va: serde_json::Value =
+        serde_json::from_slice(&all.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(va["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|it| it["status"] == 3));
 }

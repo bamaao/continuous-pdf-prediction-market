@@ -55,7 +55,7 @@ export function CommitteeDesk({ initialMarket = "" }: { initialMarket?: string }
           if (!stop) setRoster(null);
         });
     load();
-    const tick = window.setInterval(load, 4000);
+    const tick = window.setInterval(load, 60_000);
     return () => {
       stop = true;
       window.clearInterval(tick);
@@ -64,7 +64,7 @@ export function CommitteeDesk({ initialMarket = "" }: { initialMarket?: string }
 
   useEffect(() => {
     let stop = false;
-    listMarketsPage(MARKET_API, { q, page, limit: 10 })
+    listMarketsPage(MARKET_API, { q, page, limit: 10, status: "all" })
       .then((cat) => {
         if (stop) return;
         setItems(cat.items);

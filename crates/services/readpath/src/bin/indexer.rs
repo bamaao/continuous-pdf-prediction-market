@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     let client = RpcClient::new_with_commitment(rpc.clone(), CommitmentConfig::confirmed());
     let slot = poll_once(&client, &store, pool.as_ref()).await.unwrap_or(0);
     eprintln!("indexer start slot={slot} markets={} pg={}", store.list().len(), pool.is_some());
-    spawn_poller(rpc, store, pool, 400);
+    spawn_poller(rpc, store, pool, readpath::poll_interval_ms());
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
     }

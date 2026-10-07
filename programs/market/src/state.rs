@@ -5,6 +5,7 @@ pub const GRID_SEED: &[u8] = b"grid";
 pub const GRID_DUMP_SEED: &[u8] = b"gdump";
 pub const POS_SEED: &[u8] = b"pos";
 pub const COMMITTEE_SEED: &[u8] = b"committee";
+pub const PROTOCOL_SEED: &[u8] = b"protocol";
 
 pub const MAX_N: u16 = 1024;
 pub const MAX_COMMITTEE: usize = 16;
@@ -85,10 +86,22 @@ pub struct Market {
     pub wide_tag: u64,
     /// bit0 = active, bit1 = buy
     pub wide_flags: u8,
+    /// Earliest `submit_result`. Required at create; MUST be ≥ `close_ts`. No early-YES bypass.
+    pub report_open_ts: i64,
+    /// USDC locked by the committee. Slashed if the platform writes $x^*$ after a missed report.
+    pub committee_bond: u64,
 }
 
 impl Market {
-    pub const SIZE: usize = 8 + 576;
+    pub const SIZE: usize = 8 + 592;
+
+    pub fn report_opens_at(&self) -> i64 {
+        if self.report_open_ts > 0 {
+            self.report_open_ts
+        } else {
+            self.close_ts
+        }
+    }
 
     pub fn fee_on_fill(&self) -> bool {
         self.fee_timing != FEE_ON_CLAIM
@@ -107,6 +120,36 @@ pub struct Committee {
     pub m: u8,
     pub bump: u8,
     pub epoch: u32,
+}
+
+/// Official listing policy. Init once; `platform` never changes. Create copies these fields.
+#[account]
+pub struct Protocol {
+    pub platform: Pubkey,
+    pub fee_bps: u16,
+    pub fee_timing: u8,
+    pub report_window_secs: i64,
+    pub challenge_secs: i64,
+    pub committee_bond: u64,
+    pub tap_cap_max: u64,
+    pub alpha_r_bps: u16,
+    pub bump: u8,
+}
+
+impl Protocol {
+    pub const SIZE: usize = 8 + 32 + 2 + 1 + 8 + 8 + 8 + 8 + 2 + 1;
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct ProtocolArgs {
+    pub platform: Pubkey,
+    pub fee_bps: u16,
+    pub fee_timing: u8,
+    pub report_window_secs: i64,
+    pub challenge_secs: i64,
+    pub committee_bond: u64,
+    pub tap_cap_max: u64,
+    pub alpha_r_bps: u16,
 }
 
 impl Committee {
@@ -227,16 +270,26 @@ pub struct CreateCommon {
     pub risk_lock_ts: i64,
     pub beta: i128,
     pub c_m: u64,
+    /// Ignored at create. Market copies `Protocol.fee_bps`.
     pub fee_bps: u16,
+    /// Ignored at create. Market copies `Protocol.fee_timing`.
     pub fee_timing: u8,
     pub authorized_reporter: Pubkey,
+    /// Ignored at create. Market copies `Protocol.report_window_secs`.
     pub report_window_secs: i64,
+    /// Ignored at create. Market copies `Protocol.challenge_secs`.
     pub challenge_secs: i64,
     pub n_layers: u8,
     pub d_unit: u64,
     pub gamma_bps: u16,
+    /// Ignored at create. Market copies `Protocol.alpha_r_bps`.
     pub alpha_r_bps: u16,
+    /// Ignored at create. Market copies `Protocol.platform`.
     pub platform: Pubkey,
+    /// Required. MUST be ≥ `close_ts`. Equal to `close_ts` is allowed when the result is known at close.
+    pub report_open_ts: i64,
+    /// Ignored at create. Market copies `Protocol.committee_bond`.
+    pub committee_bond: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -439,6 +492,8 @@ mod tests {
             wide_write: 0,
             wide_tag: 0,
             wide_flags: 0,
+            report_open_ts: 0,
+            committee_bond: 0,
         };
         let mut buf = Vec::new();
         m.try_serialize(&mut buf).unwrap();

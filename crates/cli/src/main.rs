@@ -35,7 +35,9 @@ struct Opt {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create the vault config (Circle USDC mint must already exist on the cluster).
+    /// Write official listing policy (platform signer). Required before create_*.
+    ProtocolInit,
+    /// Initialize the user/protocol vault account.
     VaultInit,
     Deposit {
         amount: u64,
@@ -535,32 +537,62 @@ fn plan_close(close_in: i64, close_ts: Option<i64>) -> Result<(i64, i64)> {
     Ok((close, close))
 }
 
+fn protocol_args(platform: Pubkey) -> client::market::state::ProtocolArgs {
+    fn u64_env(key: &str, default: u64) -> u64 {
+        std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    }
+    fn i64_env(key: &str, default: i64) -> i64 {
+        std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    }
+    client::market::state::ProtocolArgs {
+        platform,
+        fee_bps: u64_env("PROTOCOL_FEE_BPS", 0).min(10_000) as u16,
+        fee_timing: if u64_env("PROTOCOL_FEE_TIMING", 0) == 1 { 1 } else { 0 },
+        report_window_secs: i64_env("PROTOCOL_REPORT_WINDOW_SECS", 86_400).max(1),
+        challenge_secs: i64_env("PROTOCOL_CHALLENGE_SECS", 3_600).max(1),
+        committee_bond: u64_env("PROTOCOL_COMMITTEE_BOND", 100).max(1),
+        tap_cap_max: u64_env("PROTOCOL_TAP_CAP_MAX", 0),
+        alpha_r_bps: u64_env("PROTOCOL_ALPHA_R_BPS", 7_000).min(10_000) as u16,
+    }
+}
+
+fn official_platform(me: Pubkey) -> Result<Pubkey> {
+    match std::env::var("PLATFORM_PUBKEY") {
+        Ok(s) if !s.trim().is_empty() => Pubkey::from_str(s.trim()).map_err(|e| anyhow::anyhow!("PLATFORM_PUBKEY: {e}")),
+        _ => Ok(me),
+    }
+}
+
 fn common(
     me: Pubkey,
     id_hash: [u8; 32],
     n: u16,
     close_ts: i64,
     risk_lock_ts: i64,
-    challenge_secs: i64,
-) -> client::market::state::CreateCommon {
-    client::market::state::CreateCommon {
+    _challenge_secs: i64,
+) -> Result<client::market::state::CreateCommon> {
+    let platform = official_platform(me)?;
+    let pol = protocol_args(platform);
+    Ok(client::market::state::CreateCommon {
         id_hash,
         n,
         close_ts,
         risk_lock_ts,
         beta: Q64::from_int(100).raw(),
         c_m: 0,
-        fee_bps: 0,
-        fee_timing: 0,
+        fee_bps: pol.fee_bps,
+        fee_timing: pol.fee_timing,
         authorized_reporter: Pubkey::default(),
-        report_window_secs: 400,
-        challenge_secs,
+        report_window_secs: pol.report_window_secs,
+        challenge_secs: pol.challenge_secs,
         n_layers: 1,
         d_unit: 10,
-        gamma_bps: 1_000,
-        alpha_r_bps: 7_000,
-        platform: me,
-    }
+        gamma_bps: 0,
+        alpha_r_bps: pol.alpha_r_bps,
+        platform: pol.platform,
+        report_open_ts: close_ts,
+        committee_bond: pol.committee_bond,
+    })
 }
 
 fn next_nonce(rpc: &RpcClient, owner: &Pubkey, market: &Pubkey, explicit: u64) -> Result<u64> {
@@ -1525,6 +1557,15 @@ fn main() -> Result<()> {
             let sig = send(&opt.url, &kp, client::initialize_vault(me))?;
             println!("ok {sig}");
         }
+        Cmd::ProtocolInit => {
+            let platform = official_platform(me)?;
+            if platform != me {
+                anyhow::bail!("PLATFORM_PUBKEY must be the signer ({me})");
+            }
+            let args = protocol_args(me);
+            let sig = send(&opt.url, &kp, client::init_protocol(me, args))?;
+            println!("ok {sig} protocol={}", client::protocol_pda());
+        }
         Cmd::Deposit { amount } => {
             let sig = send(&opt.url, &kp, client::deposit(me, amount))?;
             println!("ok {sig} user={}", client::user_vault(&me));
@@ -1653,7 +1694,7 @@ fn main() -> Result<()> {
             let id_hash = client::market::ids::interval(client::market::state::Family::Gaussian as u8, &topic, &tag);
             let market = client::market_pda(&id_hash);
             let args = client::market::state::IntervalArgs {
-                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs)?,
                 topic,
                 tag,
                 x_min: Q64::from_int(0).raw(),
@@ -1679,7 +1720,7 @@ fn main() -> Result<()> {
             let id_hash = client::market::ids::interval(client::market::state::Family::Lognormal as u8, &topic, &tag);
             let market = client::market_pda(&id_hash);
             let args = client::market::state::IntervalArgs {
-                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs)?,
                 topic,
                 tag,
                 x_min: Q64::from_int(1).raw(),
@@ -1704,7 +1745,7 @@ fn main() -> Result<()> {
             let market = client::market_pda(&id_hash);
             let alpha = vec![Q64::from_int(1).raw(); n as usize];
             let args = client::market::state::DirichletArgs {
-                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs)?,
                 topic,
                 layout: client::market::state::DIRICHLET_ATOMS,
                 top_n: 0,
@@ -1729,7 +1770,7 @@ fn main() -> Result<()> {
             let market = client::market_pda(&id_hash);
             let n = 2;
             let args = client::market::state::BernoulliArgs {
-                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs)?,
                 topic,
                 tag,
                 deadline_ts: close_ts,
@@ -1758,7 +1799,7 @@ fn main() -> Result<()> {
             let n = client::market::state::FOOTBALL_N;
             let prior_kind = prior_kind.unwrap_or(if dc_rho != 0.0 { 1 } else { 0 });
             let args = client::market::state::SkellamArgs {
-                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs),
+                common: common(me, id_hash, n, close_ts, risk_lock_ts, challenge_secs)?,
                 topic,
                 score_scope,
                 kickoff_ts: close_ts,
@@ -2000,14 +2041,14 @@ fn main() -> Result<()> {
         Cmd::Trade(TradeCmd::BuySet { market, mask, shares, nonce, session, gateway }) => {
             trade_cmd(&opt.url, &opt.er_url, &kp, me, market, mask, shares, nonce, session, gateway, true)?;
         }
-        Cmd::Trade(TradeCmd::SellSet { market, mask, shares, nonce, session, gateway }) => {
-            trade_cmd(&opt.url, &opt.er_url, &kp, me, market, mask, shares, nonce, session, gateway, false)?;
+        Cmd::Trade(TradeCmd::SellSet { .. }) => {
+            anyhow::bail!("Sells are closed. A fill stays until settlement claim (or VOID refund).");
         }
         Cmd::Trade(TradeCmd::BuySkellam { market, shares, kind, a, b, nonce, session, gateway }) => {
             trade_skellam_cmd(&opt.url, &opt.er_url, &kp, me, market, kind, a, b, shares, nonce, session, gateway, true)?;
         }
-        Cmd::Trade(TradeCmd::SellSkellam { market, shares, kind, a, b, nonce, session, gateway }) => {
-            trade_skellam_cmd(&opt.url, &opt.er_url, &kp, me, market, kind, a, b, shares, nonce, session, gateway, false)?;
+        Cmd::Trade(TradeCmd::SellSkellam { .. }) => {
+            anyhow::bail!("Sells are closed. A fill stays until settlement claim (or VOID refund).");
         }
         Cmd::Risk(RiskCmd::Open { market }) => {
             let market = Pubkey::from_str(&market)?;

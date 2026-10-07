@@ -1,4 +1,5 @@
-//! Market program: create by distribution family, `p0` once, L1 `buy_set`/`sell_set`.
+//! Market program: create by distribution family, `p0` once, L1 `buy_set`.
+//! Product sells are closed (`sell_set` / `sell_skellam_set` / wide `is_buy=false`).
 //! Listing names (CPI, election, BTC) are metadata, not instructions.
 //! Session PDA authorizes in-board fills (FR-WAL-04–06). After `delegate_book`, L1 fills return `Delegated`.
 
@@ -56,6 +57,54 @@ pub mod market {
         let epoch = committee.epoch.saturating_add(1);
         write_roster(committee, authority, bump, members, m)?;
         committee.epoch = epoch;
+        Ok(())
+    }
+
+    /// One-time official policy. Signer MUST be `args.platform`.
+    pub fn init_protocol(ctx: Context<InitProtocol>, args: ProtocolArgs) -> Result<()> {
+        require!(ctx.accounts.authority.key() == args.platform, MarketError::NotOfficial);
+        require!(args.platform != Pubkey::default(), MarketError::BadCapital);
+        require!(args.fee_bps <= 10_000, MarketError::BadFee);
+        require!(
+            args.fee_timing == FEE_ON_FILL || args.fee_timing == FEE_ON_CLAIM,
+            MarketError::BadFee
+        );
+        require!(args.report_window_secs > 0 && args.challenge_secs > 0, MarketError::BadClock);
+        require!(args.committee_bond > 0, MarketError::BadCapital);
+        require!(args.alpha_r_bps <= 10_000, MarketError::BadFee);
+        let p = &mut ctx.accounts.protocol;
+        p.platform = args.platform;
+        p.fee_bps = args.fee_bps;
+        p.fee_timing = args.fee_timing;
+        p.report_window_secs = args.report_window_secs;
+        p.challenge_secs = args.challenge_secs;
+        p.committee_bond = args.committee_bond;
+        p.tap_cap_max = args.tap_cap_max;
+        p.alpha_r_bps = args.alpha_r_bps;
+        p.bump = ctx.bumps.protocol;
+        Ok(())
+    }
+
+    /// Platform may update policy numbers. `platform` stays the init key.
+    pub fn set_protocol(ctx: Context<SetProtocol>, args: ProtocolArgs) -> Result<()> {
+        let p = &mut ctx.accounts.protocol;
+        require!(ctx.accounts.authority.key() == p.platform, MarketError::NotOfficial);
+        require!(args.platform == p.platform, MarketError::NotOfficial);
+        require!(args.fee_bps <= 10_000, MarketError::BadFee);
+        require!(
+            args.fee_timing == FEE_ON_FILL || args.fee_timing == FEE_ON_CLAIM,
+            MarketError::BadFee
+        );
+        require!(args.report_window_secs > 0 && args.challenge_secs > 0, MarketError::BadClock);
+        require!(args.committee_bond > 0, MarketError::BadCapital);
+        require!(args.alpha_r_bps <= 10_000, MarketError::BadFee);
+        p.fee_bps = args.fee_bps;
+        p.fee_timing = args.fee_timing;
+        p.report_window_secs = args.report_window_secs;
+        p.challenge_secs = args.challenge_secs;
+        p.committee_bond = args.committee_bond;
+        p.tap_cap_max = args.tap_cap_max;
+        p.alpha_r_bps = args.alpha_r_bps;
         Ok(())
     }
 
@@ -549,7 +598,7 @@ pub mod market {
         write_p0_range(&mut data, &ctx.accounts.market, start, start + local)
     }
 
-    /// Creator or roster member stops fills (early YES, VOID, or after close).
+    /// Creator or roster member stops fills (VOID, including Bernoulli early occurrence, or after close).
     pub fn halt(ctx: Context<Halt>) -> Result<()> {
         require_book_keys(
             &ctx.accounts.authority.key(),
@@ -1010,17 +1059,19 @@ fn open_board(
     require!(common.n as usize == p0.len(), MarketError::BadGrid);
     require!((2..=MAX_N).contains(&common.n), MarketError::BadGrid);
     require!(common.beta > 0, MarketError::BadBeta);
-    require!(common.fee_bps <= 10_000, MarketError::BadFee);
-    require!(
-        common.fee_timing == crate::state::FEE_ON_FILL || common.fee_timing == crate::state::FEE_ON_CLAIM,
-        MarketError::BadFee
-    );
     require!(now < common.close_ts, MarketError::BadClock);
     require!(common.risk_lock_ts <= common.close_ts, MarketError::BadClock);
     lock_clocks(common)?;
     lock_layers(common)?;
-    require!(common.alpha_r_bps <= 10_000, MarketError::BadFee);
-    require!(common.platform != Pubkey::default(), MarketError::BadCapital);
+    let protocol = &ctx.accounts.protocol;
+    lock_protocol(protocol)?;
+    let fee_bps = protocol.fee_bps;
+    let fee_timing = protocol.fee_timing;
+    let report_window_secs = protocol.report_window_secs;
+    let challenge_secs = protocol.challenge_secs;
+    let committee_bond = protocol.committee_bond;
+    let alpha_r_bps = protocol.alpha_r_bps;
+    let platform = protocol.platform;
 
     let market = &mut ctx.accounts.market;
     market.family = family as u8;
@@ -1028,24 +1079,26 @@ fn open_board(
     market.bump = ctx.bumps.market;
     market.grid_bump = ctx.bumps.grid;
     market.n = common.n;
-    market.fee_bps = common.fee_bps;
-    market.fee_timing = common.fee_timing;
+    market.fee_bps = fee_bps;
+    market.fee_timing = fee_timing;
     market.creator = ctx.accounts.creator.key();
     market.committee = Pubkey::find_program_address(&[COMMITTEE_SEED], &crate::ID).0;
     market.authorized_reporter = common.authorized_reporter;
     market.close_ts = common.close_ts;
     market.risk_lock_ts = common.risk_lock_ts;
-    market.report_window_secs = common.report_window_secs;
-    market.challenge_secs = common.challenge_secs;
-    market.n_layers = common.n_layers;
+    market.report_open_ts = common.report_open_ts;
+    market.committee_bond = committee_bond;
+    market.report_window_secs = report_window_secs;
+    market.challenge_secs = challenge_secs;
+    market.n_layers = 1;
     market.d_unit = common.d_unit;
-    market.gamma_bps = if common.gamma_bps == 0 { 1_000 } else { common.gamma_bps };
+    market.gamma_bps = 0;
     market.beta = common.beta;
     market.c_m = 0;
     market.fees_accrued = 0;
     market.trading_revenue = 0;
-    market.alpha_r_bps = common.alpha_r_bps;
-    market.platform = common.platform;
+    market.alpha_r_bps = alpha_r_bps;
+    market.platform = platform;
     market.l_max = 0;
     market.id_hash = common.id_hash;
     market.extra = extra;
@@ -1704,7 +1757,13 @@ fn apply_seal_p0(ctx: Context<GrowGrid>) -> Result<()> {
     Ok(())
 }
 
+fn require_buy(is_buy: bool) -> Result<()> {
+    require!(is_buy, MarketError::SellsClosed);
+    Ok(())
+}
+
 fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: bool) -> Result<()> {
+    require_buy(is_buy)?;
     require!(q_raw > 0, MarketError::ZeroQty);
     require!(
         ctx.accounts.market.status == Status::Trading as u8,
@@ -1862,6 +1921,7 @@ fn wide_params_ok(m: &Market, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: 
 }
 
 fn wide_gate(ctx: &Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: bool) -> Result<bool> {
+    require_buy(is_buy)?;
     require!(q_raw > 0, MarketError::ZeroQty);
     require!(
         ctx.accounts.market.status == Status::Trading as u8,
@@ -2161,6 +2221,7 @@ fn fill_skellam(
     nonce: u64,
     is_buy: bool,
 ) -> Result<()> {
+    require_buy(is_buy)?;
     require!(q_raw > 0, MarketError::ZeroQty);
     require!(
         ctx.accounts.market.family == Family::Skellam as u8,
@@ -2316,9 +2377,25 @@ fn check_common(id_hash: &[u8; 32], n: u16, common: &CreateCommon) -> Result<()>
 
 fn lock_clocks(common: &CreateCommon) -> Result<()> {
     require!(
-        common.report_window_secs > 0 && common.challenge_secs > 0,
+        common.report_open_ts >= common.close_ts,
         MarketError::BadClock
     );
+    Ok(())
+}
+
+fn lock_protocol(protocol: &Protocol) -> Result<()> {
+    require!(protocol.platform != Pubkey::default(), MarketError::BadCapital);
+    require!(protocol.fee_bps <= 10_000, MarketError::BadFee);
+    require!(
+        protocol.fee_timing == crate::state::FEE_ON_FILL || protocol.fee_timing == crate::state::FEE_ON_CLAIM,
+        MarketError::BadFee
+    );
+    require!(
+        protocol.report_window_secs > 0 && protocol.challenge_secs > 0,
+        MarketError::BadClock
+    );
+    require!(protocol.committee_bond > 0, MarketError::BadCapital);
+    require!(protocol.alpha_r_bps <= 10_000, MarketError::BadFee);
     Ok(())
 }
 
@@ -2647,6 +2724,11 @@ pub struct CreateBoard<'info> {
         bump
     )]
     pub grid: Account<'info, Grid>,
+    #[account(
+        seeds = [PROTOCOL_SEED],
+        bump = protocol.bump
+    )]
+    pub protocol: Account<'info, Protocol>,
     pub system_program: Program<'info, System>,
 }
 
@@ -3129,6 +3211,28 @@ pub struct InitCommittee<'info> {
 }
 
 #[derive(Accounts)]
+pub struct InitProtocol<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(
+        init,
+        payer = authority,
+        space = Protocol::SIZE,
+        seeds = [PROTOCOL_SEED],
+        bump
+    )]
+    pub protocol: Account<'info, Protocol>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetProtocol<'info> {
+    pub authority: Signer<'info>,
+    #[account(mut, seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+}
+
+#[derive(Accounts)]
 pub struct SetRoster<'info> {
     pub authority: Signer<'info>,
     #[account(mut, seeds = [COMMITTEE_SEED], bump = committee.bump)]
@@ -3199,6 +3303,10 @@ pub enum MarketError {
     InsufficientVault,
     #[msg("another wide fill is in progress on this market")]
     WideFillBusy,
+    #[msg("sells are closed; inventory stays until settlement claim")]
+    SellsClosed,
+    #[msg("create fields must match the official protocol account")]
+    NotOfficial,
 }
 
 #[cfg(test)]
@@ -3227,6 +3335,12 @@ mod tests {
     fn mask_roundtrip_bits() {
         let m = mask::decode(&[0b0000_0011], 2).unwrap();
         assert_eq!(m, vec![true, true]);
+    }
+
+    #[test]
+    fn sells_are_closed() {
+        assert!(super::require_buy(true).is_ok());
+        assert!(super::require_buy(false).is_err());
     }
 
     #[test]
@@ -3279,6 +3393,8 @@ mod tests {
             gamma_bps: 1_000,
             alpha_r_bps: 7_000,
             platform: a,
+            report_open_ts: 10,
+            committee_bond: 1,
         };
         assert!(lock_layers(&common).is_ok());
         common.n_layers = 0;
@@ -3289,5 +3405,37 @@ mod tests {
         common.d_unit = 10_000;
         common.gamma_bps = 10_001;
         assert!(lock_layers(&common).is_err());
+    }
+
+    #[test]
+    fn report_open_cannot_precede_close() {
+        use super::{lock_clocks, CreateCommon};
+        use anchor_lang::prelude::Pubkey;
+        let a = Pubkey::new_from_array([1u8; 32]);
+        let mut common = CreateCommon {
+            id_hash: [0; 32],
+            n: 2,
+            close_ts: 10,
+            risk_lock_ts: 10,
+            beta: 1,
+            c_m: 1,
+            fee_bps: 0,
+            fee_timing: 0,
+            authorized_reporter: Pubkey::default(),
+            report_window_secs: 60,
+            challenge_secs: 30,
+            n_layers: 1,
+            d_unit: 10_000,
+            gamma_bps: 0,
+            alpha_r_bps: 7_000,
+            platform: a,
+            report_open_ts: 10,
+            committee_bond: 1,
+        };
+        assert!(lock_clocks(&common).is_ok());
+        common.report_open_ts = 0;
+        assert!(lock_clocks(&common).is_err());
+        common.report_open_ts = 9;
+        assert!(lock_clocks(&common).is_err());
     }
 }

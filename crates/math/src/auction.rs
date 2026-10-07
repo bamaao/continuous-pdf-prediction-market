@@ -18,6 +18,19 @@ pub fn sort_bids(mut bids: Vec<Bid>) -> Vec<Bid> {
     bids
 }
 
+/// Pay `budget` down already-ranked caps (cheapest first). Stops when the budget is gone.
+pub fn waterfall_pay(budget: u64, ranked_caps: &[u64]) -> Vec<u64> {
+    let mut left = budget;
+    ranked_caps
+        .iter()
+        .map(|&cap| {
+            let take = cap.min(left);
+            left = left.saturating_sub(take);
+            take
+        })
+        .collect()
+}
+
 /// `premium * SCALE / capacity` so integer USDC amounts stay ordered.
 pub fn unit_premium(premium: u64, capacity: u64) -> Option<u128> {
     if capacity == 0 {
@@ -62,5 +75,13 @@ mod tests {
             },
         ]);
         assert_eq!(ordered[0].idx, 1);
+    }
+
+    #[test]
+    fn waterfall_stops_when_budget_is_gone() {
+        assert_eq!(waterfall_pay(100, &[80, 50, 40]), vec![80, 20, 0]);
+        assert_eq!(waterfall_pay(30, &[80, 50]), vec![30, 0]);
+        assert_eq!(waterfall_pay(200, &[10, 15]), vec![10, 15]);
+        assert_eq!(waterfall_pay(0, &[10]), vec![0]);
     }
 }

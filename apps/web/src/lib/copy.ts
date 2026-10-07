@@ -12,7 +12,7 @@ export const ENTER_MARKET = "Open prediction market";
 
 /** One-line rule for pages that lock or move funds / write committee state. */
 export const SESSION_BOARD_ONLY =
-  "A trading Session can only buy and sell in a prediction market. This page uses the connected wallet.";
+  "A trading Session can only buy in a prediction market. Sells are closed. This page uses the connected wallet.";
 
 export const OPEN_IN_PHANTOM = "Open in Phantom";
 export const OPEN_IN_SOLFLARE = "Open in Solflare";
@@ -26,4 +26,6 @@ export const LOCK_RHO_HINT =
 export const OPEN_REFUNDS = "Open refunds";
 export const CLAIM_ON_PORTFOLIO = "Claim on Portfolio";
 export const LMSR_COST_HINT =
-  "The same interval costs more after it is bought: C_S for the same q rises on hot cells. That is LMSR, not the clock and not a popularity fee. Cold or disjoint cells can get cheaper. Selling presses the price back. Coverage does not change C_S.";
+  "The same interval costs more after it is bought: C_S for the same q rises on hot cells. That is LMSR, not the clock and not a popularity fee. Cold or disjoint cells can get cheaper. Coverage does not change C_S.";
+export const SELLS_CLOSED =
+  "Sells are closed. A fill stays until settlement claim (or VOID refund). It is not unwound at the live LMSR price.";

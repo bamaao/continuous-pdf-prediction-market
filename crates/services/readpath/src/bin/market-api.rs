@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
         Some(open_required_pool(&store).await?)
     };
     if std::env::var("EMBED_INDEXER").unwrap_or_else(|_| "1".into()) != "0" {
-        spawn_poller(rpc, store.clone(), pool.clone(), 400);
+        spawn_poller(rpc, store.clone(), pool.clone(), readpath::poll_interval_ms());
         eprintln!(
             "market-api embed-indexer on {listen} pg={}",
             if pool.is_some() { "on" } else { "off" }

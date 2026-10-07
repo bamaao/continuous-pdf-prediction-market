@@ -1,6 +1,6 @@
 "use client";
 
-import { compose, familyName, fetchResolution, ResolutionSnap } from "@cpm/sdk";
+import { compose, familyName, fetchInfo, fetchProtocol, fetchResolution, ResolutionSnap } from "@cpm/sdk";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MARKET_API } from "@/lib/env";
@@ -68,6 +68,8 @@ export function ResultForm({ market, family }: { market: string; family: number 
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now() / 1000);
+  const [platform, setPlatform] = useState("");
+  const [committeeBond, setCommitteeBond] = useState(100);
   const kind = defaultKind(family);
 
   const load = useCallback(async () => {
@@ -75,8 +77,17 @@ export function ResultForm({ market, family }: { market: string; family: number 
   }, [market]);
 
   useEffect(() => {
-    load().catch(() => setRec(null));
-    const t = window.setInterval(() => load().catch(() => undefined), 3000);
+    fetchInfo(MARKET_API, market)
+      .then((info) => setPlatform(info.platform ?? ""))
+      .catch(() => setPlatform(""));
+    fetchProtocol(MARKET_API)
+      .then((p) => setCommitteeBond(p.committee_bond))
+      .catch(() => undefined);
+  }, [market]);
+
+  useEffect(() => {
+    load().catch(() => undefined);
+    const t = window.setInterval(() => load().catch(() => undefined), 60_000);
     return () => window.clearInterval(t);
   }, [load]);
 
@@ -132,10 +143,17 @@ export function ResultForm({ market, family }: { market: string; family: number 
   const reporter = !!me && !!rec && rec.authorized_reporter !== ZERO && rec.authorized_reporter === me;
   const canPropose = member || reporter;
   const role = !me ? "connect a wallet" : member ? "committee member (this window)" : reporter ? "authorized reporter · propose only" : "observer";
+  const reportOpen = rec?.report_open_ts || rec?.close_ts || 0;
+  const reportReady = !!rec && now >= reportOpen;
 
   const clock = useMemo(() => {
     if (!rec) return { label: "window", text: "not opened", elapsed: true };
-    if (rec.phase === 0) return { label: "report window", ...remain(rec.report_deadline, now) };
+    if (rec.phase === 0) {
+      const open = rec.report_open_ts || rec.close_ts;
+      if (now < open) return { label: "report opens", ...remain(open, now) };
+      if (now >= rec.report_deadline) return { label: "awaiting platform", text: "report missed", elapsed: true };
+      return { label: "report window", ...remain(rec.report_deadline, now) };
+    }
     if (rec.phase === 1) return { label: "challenge window", ...remain(rec.challenge_end, now) };
     if (rec.phase === 2) return { label: "vote window", ...remain(rec.vote_end, now) };
     return { label: "window", text: "closed", elapsed: true };
@@ -144,15 +162,25 @@ export function ResultForm({ market, family }: { market: string; family: number 
   const terminal = rec != null && rec.phase >= 3;
   const canChallenge = !!rec && rec.phase === 1 && member && me !== rec.proposer && !clock.elapsed;
   const canVote = !!rec && rec.phase === 2 && member;
+  const isAdmin = !!me && !!platform && me === platform;
+  const reportElapsed = !!rec && now >= rec.report_deadline;
+  const bondLocked = !!rec && (rec.bond_locked ?? 0) > 0 && !rec.bond_slashed;
+  const canLockBond = !!rec && !terminal && (canPropose || member) && !bondLocked;
+  const canReleaseBond =
+    !!rec && terminal && bondLocked && !rec.slash_due && !!me && me === rec.bond_holder;
   const canFinalize =
     !!rec &&
-    ((rec.phase === 0 && now >= rec.report_deadline) ||
-      (rec.phase === 1 && now >= rec.challenge_end) ||
+    ((rec.phase === 1 && now >= rec.challenge_end) ||
       (rec.phase === 2 && (rec.votes_proposal >= rec.m || rec.votes_challenge >= rec.m || now >= rec.vote_end)));
-  const canVoid = !!rec && !terminal && member && now >= rec.close_ts;
+  const canVoid =
+    !!rec &&
+    !terminal &&
+    member &&
+    now < rec.report_deadline &&
+    (now >= rec.close_ts || rec.early_resolve);
 
   async function run(
-    op: "resolve_open" | "submit_result" | "challenge" | "vote" | "finalize" | "void_resolution" | "begin_settle" | "begin_refund",
+    op: "resolve_open" | "submit_result" | "challenge" | "vote" | "finalize" | "void_resolution" | "begin_settle" | "begin_refund" | "halt" | "admin_submit_result" | "admin_void_resolution" | "slash_committee_bond" | "lock_committee_bond" | "release_committee_bond",
     extra: Record<string, unknown> = {},
   ) {
     if (!publicKey || !signTransaction) {
@@ -172,11 +200,50 @@ export function ResultForm({ market, family }: { market: string; family: number 
         value: family === 4 ? yes : family === 1 || family === 2 ? Math.round(value * 1000) : value,
         value_b: family === 0 ? valueB : 0,
         evidence_hex: hash || undefined,
-        include_pool: op === "begin_settle" ? true : undefined,
         ...extra,
       });
       const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
-      if (op === "void_resolution") {
+      if (op === "resolve_open") {
+        try {
+          await sendSigned(connection, signTransaction, publicKey, [
+            await compose(MARKET_API, {
+              op: "lock_committee_bond",
+              owner: publicKey.toBase58(),
+              market,
+              amount: 100,
+            }),
+          ]);
+        } catch {
+          /* already locked or vault short */
+        }
+      }
+      if (op === "admin_submit_result") {
+        const holder = rec?.bond_holder || rec?.members?.[0];
+        if (holder) {
+          try {
+            await sendSigned(connection, signTransaction, publicKey, [
+              await compose(MARKET_API, {
+                op: "slash_committee_bond",
+                owner: publicKey.toBase58(),
+                market,
+                trader: holder,
+              }),
+            ]);
+          } catch {
+            /* bond may not be locked */
+          }
+        }
+      }
+      if (op === "finalize" || op === "void_resolution" || op === "admin_void_resolution") {
+        try {
+          await sendSigned(connection, signTransaction, publicKey, [
+            await compose(MARKET_API, { op: "release_committee_bond", owner: publicKey.toBase58(), market }),
+          ]);
+        } catch {
+          /* slashed or never locked */
+        }
+      }
+      if (op === "void_resolution" || op === "admin_void_resolution") {
         try {
           await sendSigned(connection, signTransaction, publicKey, [
             await compose(MARKET_API, { op: "begin_refund", owner: publicKey.toBase58(), market }),
@@ -334,9 +401,28 @@ export function ResultForm({ market, family }: { market: string; family: number 
                 {busy ? "Opening…" : "Open window"}
               </button>
             )}
+            {canLockBond && (
+              <button className="w-full border border-amber py-2 text-amber disabled:opacity-50" disabled={busy} onClick={() => run("lock_committee_bond")}>
+                {busy ? "Locking…" : `Lock committee bond (${committeeBond} USDC)`}
+              </button>
+            )}
+            {canReleaseBond && (
+              <button className="w-full border border-rule py-2 text-paper/70 disabled:opacity-50" disabled={busy} onClick={() => run("release_committee_bond")}>
+                {busy ? "Releasing…" : "Release committee bond"}
+              </button>
+            )}
+            {member && rec?.early_resolve && !terminal && (
+              <button className="w-full border border-rule py-2 text-paper/70 disabled:opacity-50" disabled={busy} onClick={() => run("halt")}>
+                {busy ? "Halting…" : "Halt trading"}
+              </button>
+            )}
             {rec?.phase === 0 && (canPropose || !me) && (
-              <button className="w-full bg-amber py-2 text-ink disabled:opacity-50" disabled={busy} onClick={() => run("submit_result")}>
-                {busy ? "Submitting…" : "Submit result"}
+              <button
+                className="w-full bg-amber py-2 text-ink disabled:opacity-50"
+                disabled={busy || !reportReady || !bondLocked}
+                onClick={() => run("submit_result")}
+              >
+                {busy ? "Submitting…" : !bondLocked ? "Lock committee bond first" : reportReady ? "Submit result" : "Waiting for report open"}
               </button>
             )}
             {canChallenge && (
@@ -372,6 +458,17 @@ export function ResultForm({ market, family }: { market: string; family: number 
                 Void market
               </button>
             )}
+            {isAdmin && rec?.phase === 0 && reportElapsed && (
+              <>
+                <p className="text-[10px] normal-case text-amber">Report window closed. Platform: write x* (slash committee bond) or VOID (return bond).</p>
+                <button className="w-full bg-amber py-2 text-ink disabled:opacity-50" disabled={busy} onClick={() => run("admin_submit_result")}>
+                  {busy ? "Submitting…" : "Admin submit result (slash bond)"}
+                </button>
+                <button className="w-full border border-rule py-2 text-paper/70 disabled:opacity-50" disabled={busy} onClick={() => run("admin_void_resolution")}>
+                  Admin VOID (no slash)
+                </button>
+              </>
+            )}
           </div>
           {note && <p className={`mt-2 text-[10px] ${isErrNote(note) ? "text-rust" : "text-paper/60"}`}>{note}</p>}
         </aside>
@@ -383,7 +480,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
             {failed
               ? "RESOLUTION_FAILED. This prediction market is void. Open refunds, then reclaim on Portfolio."
               : voided
-                ? "Committee voided this prediction market after close."
+                ? "Committee voided this prediction market. Positions refund cost_paid."
                 : `Finalized at ${rec?.final_outcome.label ?? "x*"}. ${LOCK_RHO_HINT}`}
           </p>
           {rec?.has_final && (

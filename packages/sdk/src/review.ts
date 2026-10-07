@@ -1,3 +1,5 @@
+import type { ListingI18n } from "./listing";
+
 export type ListingApplication = {
   id: number;
   applicant: string;
@@ -9,6 +11,10 @@ export type ListingApplication = {
   topic?: string;
   tag?: string;
   blocked_regions: string[];
+  source_locale?: string;
+  i18n?: ListingI18n;
+  image_id?: string;
+  image_url?: string;
   dup_key: string;
   status: number;
   status_name: string;
@@ -41,6 +47,9 @@ export async function submitListingApplication(
     topic?: string;
     tag?: string;
     blocked_regions?: string[];
+    source_locale?: string;
+    i18n?: ListingI18n;
+    image_id?: string;
     compose?: Record<string, unknown>;
   },
 ): Promise<ListingApplication> {

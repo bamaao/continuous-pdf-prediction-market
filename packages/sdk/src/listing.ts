@@ -37,6 +37,14 @@ export async function deleteCatalogTag(api: string, name: string): Promise<void>
   if (!r.ok) throw new Error(`tag ${r.status}`);
 }
 
+export type LocaleCopy = {
+  title?: string;
+  event?: string;
+  description?: string;
+};
+
+export type ListingI18n = Record<string, LocaleCopy>;
+
 export type ListingMeta = {
   market: string;
   title: string;
@@ -47,6 +55,15 @@ export type ListingMeta = {
   description?: string;
   event?: string;
   blocked_regions?: string[];
+  source_locale?: string;
+  i18n?: ListingI18n;
+  image_id?: string;
+  image_url?: string;
+  title_en?: string;
+  event_en?: string;
+  description_en?: string;
+  locale?: string;
+  is_translation?: boolean;
 };
 
 const LS = "cpm.listings.v3";
@@ -161,23 +178,41 @@ export function localListing(market: string): ListingMeta | null {
   return readLocal()[market] ?? null;
 }
 
+/** Prefer title_en / event_en / description_en so a translated desk view cannot seed identity. */
+export function canonicalListing(meta: ListingMeta): ListingMeta {
+  return {
+    ...meta,
+    title: (meta.title_en ?? meta.title).trim(),
+    event: (meta.event_en ?? meta.event ?? "").trim(),
+    description: (meta.description_en ?? meta.description ?? "").trim(),
+    title_en: meta.title_en ?? meta.title,
+    event_en: meta.event_en ?? meta.event,
+    description_en: meta.description_en ?? meta.description,
+  };
+}
+
 export async function saveListing(api: string, meta: ListingMeta): Promise<void> {
-  rememberListing(meta);
+  const canon = canonicalListing(meta);
+  rememberListing({ ...canon, i18n: meta.i18n ?? {} });
   const r = await fetch(`${api}/v1/listings`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      market: meta.market,
-      title: meta.title,
-      tags: meta.tags?.length ? meta.tags : parseTagsInput(meta.category ?? ""),
-      category: meta.category ?? meta.tags?.[0] ?? "",
-      topic: meta.topic ?? "",
-      tag: meta.tag ?? "",
-      description: meta.description ?? "",
-      event: meta.event ?? "",
-      blocked_regions: meta.blocked_regions ?? [],
+      market: canon.market,
+      title: canon.title,
+      tags: canon.tags?.length ? canon.tags : parseTagsInput(canon.category ?? ""),
+      category: canon.category ?? canon.tags?.[0] ?? "",
+      topic: canon.topic ?? "",
+      tag: canon.tag ?? "",
+      description: canon.description ?? "",
+      event: canon.event ?? "",
+      blocked_regions: canon.blocked_regions ?? [],
+      source_locale: canon.source_locale ?? "en",
+      i18n: meta.i18n ?? {},
+      image_id: canon.image_id ?? meta.image_id ?? "",
     }),
   });
+  if (r.status === 409) throw new Error("listing 409 — canonical English locked after OPEN");
   if (!r.ok) throw new Error(`listing ${r.status}`);
 }
 
@@ -187,27 +222,32 @@ export async function hydrateListings(api: string): Promise<number> {
   let n = 0;
   await Promise.all(
     Object.values(all).map(async (meta) => {
-      if (!meta?.market || !meta.title?.trim()) return;
-      if (!(meta.tags && meta.tags.length) && !meta.category?.trim()) return;
+      const canon = canonicalListing(meta);
+      if (!canon?.market || !canon.title?.trim()) return;
+      if (!(canon.tags && canon.tags.length) && !canon.category?.trim()) return;
       try {
-        const cur = await fetch(`${api}/v1/listings/${meta.market}`);
+        // Force English so a translated Accept-Language view never seeds the wrong identity.
+        const cur = await fetch(`${api}/v1/listings/${canon.market}?locale=en`);
         if (cur.ok) {
-          const v = (await cur.json()) as ListingMeta;
-          if (v?.title?.trim()) return;
+          const v = (await cur.json()) as ListingMeta & { title_en?: string };
+          if ((v?.title_en ?? v?.title)?.trim()) return;
         }
         const r = await fetch(`${api}/v1/listings`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            market: meta.market,
-            title: meta.title,
-            tags: meta.tags?.length ? meta.tags : parseTagsInput(meta.category ?? ""),
-            category: meta.category ?? meta.tags?.[0] ?? "",
-            topic: meta.topic ?? "",
-            tag: meta.tag ?? "",
-            description: meta.description ?? "",
-            event: meta.event ?? "",
-            blocked_regions: meta.blocked_regions ?? [],
+            market: canon.market,
+            title: canon.title,
+            tags: canon.tags?.length ? canon.tags : parseTagsInput(canon.category ?? ""),
+            category: canon.category ?? canon.tags?.[0] ?? "",
+            topic: canon.topic ?? "",
+            tag: canon.tag ?? "",
+            description: canon.description ?? "",
+            event: canon.event ?? "",
+            blocked_regions: canon.blocked_regions ?? [],
+            source_locale: canon.source_locale ?? "en",
+            i18n: meta.i18n ?? {},
+            image_id: canon.image_id ?? meta.image_id ?? "",
           }),
         });
         if (r.ok) n += 1;
@@ -219,28 +259,94 @@ export async function hydrateListings(api: string): Promise<number> {
   return n;
 }
 
-export async function fetchListing(api: string, market: string): Promise<ListingMeta | null> {
+export async function fetchListing(api: string, market: string, acceptLanguage?: string): Promise<ListingMeta | null> {
   try {
-    const r = await fetch(`${api}/v1/listings/${market}`);
+    const headers: Record<string, string> = {};
+    if (acceptLanguage) headers["accept-language"] = acceptLanguage;
+    const r = await fetch(`${api}/v1/listings/${market}`, { headers });
     if (r.ok) {
-      const v = (await r.json()) as ListingMeta;
-      if (v?.title) {
-        const meta = {
+      const v = (await r.json()) as ListingMeta & {
+        title_en?: string;
+        event_en?: string;
+        description_en?: string;
+        locale?: string;
+        is_translation?: boolean;
+        source_locale?: string;
+        i18n?: ListingI18n;
+        blocked_regions?: string[];
+      };
+      if (v?.title || v?.title_en) {
+        const titleEn = (v.title_en ?? v.title ?? "").trim();
+        const eventEn = (v.event_en ?? v.event ?? "").trim();
+        const descriptionEn = (v.description_en ?? v.description ?? "").trim();
+        // Cache always stores canonical English so hydrate cannot seed a translation as identity.
+        rememberListing({
           market,
-          title: v.title,
+          title: titleEn,
+          title_en: titleEn,
           tags: v.tags?.length ? v.tags : parseTagsInput(v.category ?? ""),
           category: v.category ?? v.tags?.[0] ?? "",
           topic: v.topic,
           tag: v.tag,
-          description: v.description,
-          event: v.event,
+          description: descriptionEn,
+          description_en: descriptionEn,
+          event: eventEn,
+          event_en: eventEn,
+          source_locale: v.source_locale ?? "en",
+          i18n: v.i18n ?? {},
+          blocked_regions: v.blocked_regions ?? [],
+          image_id: v.image_id ?? "",
+          image_url: v.image_url ?? "",
+        });
+        return {
+          market,
+          title: v.title ?? titleEn,
+          title_en: titleEn,
+          tags: v.tags?.length ? v.tags : parseTagsInput(v.category ?? ""),
+          category: v.category ?? v.tags?.[0] ?? "",
+          topic: v.topic,
+          tag: v.tag,
+          description: v.description ?? descriptionEn,
+          description_en: descriptionEn,
+          event: v.event ?? eventEn,
+          event_en: eventEn,
+          locale: v.locale,
+          is_translation: v.is_translation,
+          source_locale: v.source_locale ?? "en",
+          i18n: v.i18n ?? {},
+          blocked_regions: v.blocked_regions ?? [],
+          image_id: v.image_id ?? "",
+          image_url: v.image_url ?? "",
         };
-        rememberListing(meta);
-        return meta;
       }
     }
   } catch {
     /* offline — local cache */
   }
   return localListing(market);
+}
+
+/** Absolute URL for a listing cover (`/v1/media/{id}` from Market API). Empty when none. */
+export function listingImageSrc(api: string, imageUrl?: string | null): string {
+  const u = (imageUrl ?? "").trim();
+  if (!u) return "";
+  if (/^https?:\/\//i.test(u)) return u;
+  const base = api.replace(/\/$/, "");
+  return `${base}${u.startsWith("/") ? u : `/${u}`}`;
+}
+
+export async function uploadListingMedia(
+  api: string,
+  owner: string,
+  file: Blob,
+): Promise<{ id: string; url: string }> {
+  const fd = new FormData();
+  fd.set("owner", owner);
+  fd.set("file", file);
+  const r = await fetch(`${api}/v1/listings/media`, { method: "POST", body: fd });
+  if (r.status === 401) throw new Error("sign in, then upload");
+  if (r.status === 413) throw new Error("cover must be ≤ 2 MiB");
+  if (r.status === 415) throw new Error("cover must be jpeg, png, or webp");
+  if (!r.ok) throw new Error(`media ${r.status}`);
+  return r.json() as Promise<{ id: string; url: string }>;
 }

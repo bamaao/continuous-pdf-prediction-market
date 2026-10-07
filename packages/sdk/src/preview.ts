@@ -61,12 +61,20 @@ export type MarketListItem = {
   l_max_usdc?: number;
   c_r?: number;
   title?: string;
+  title_en?: string;
   tags?: string[];
   category?: string;
   topic?: string;
   tag?: string;
   description?: string;
+  description_en?: string;
   event?: string;
+  event_en?: string;
+  locale?: string;
+  is_translation?: boolean;
+  source_locale?: string;
+  i18n?: Record<string, { title?: string; event?: string; description?: string }>;
+  image_url?: string;
   close_ts?: number;
   risk_lock_ts?: number;
   report_open_ts?: number;
@@ -95,11 +103,15 @@ export type PeakRisk = {
 export type MarketListQuery = {
   q?: string;
   family?: number;
-  status?: number;
+  status?: number | "all";
   category?: string;
   tag?: string;
+  locale?: string;
+  sort?: "slot" | "peak";
   page?: number;
   limit?: number;
+  /** Forward browser Accept-Language (Next headers / client navigator). */
+  acceptLanguage?: string;
 };
 
 export type MarketListPage = {
@@ -118,12 +130,20 @@ export type MarketListPage = {
 export type MarketInfo = {
   market: string;
   title?: string;
+  title_en?: string;
   tags?: string[];
   category?: string;
   topic?: string;
   tag?: string;
   description?: string;
+  description_en?: string;
   event?: string;
+  event_en?: string;
+  locale?: string;
+  is_translation?: boolean;
+  source_locale?: string;
+  i18n?: Record<string, { title?: string; event?: string; description?: string }>;
+  image_url?: string;
   close_ts?: number;
   risk_lock_ts?: number;
   report_open_ts?: number;
@@ -158,6 +178,7 @@ export type MarketInfo = {
   c_p_pool?: number;
   peak_risk?: PeakRisk;
   cells: { cell: number; p_bps: number; e: number }[];
+  platform?: string;
 };
 
 export async function listMarketsPage(api: string, query: MarketListQuery = {}): Promise<MarketListPage> {
@@ -167,10 +188,14 @@ export async function listMarketsPage(api: string, query: MarketListQuery = {}):
   if (query.status != null) usp.set("status", String(query.status));
   if (query.category) usp.set("category", query.category);
   if (query.tag) usp.set("tag", query.tag);
+  if (query.locale) usp.set("locale", query.locale);
+  if (query.sort) usp.set("sort", query.sort);
   if (query.page) usp.set("page", String(query.page));
   if (query.limit) usp.set("limit", String(query.limit));
   const qs = usp.toString();
-  const r = await fetch(`${api}/v1/markets${qs ? `?${qs}` : ""}`);
+  const headers: Record<string, string> = {};
+  if (query.acceptLanguage) headers["accept-language"] = query.acceptLanguage;
+  const r = await fetch(`${api}/v1/markets${qs ? `?${qs}` : ""}`, { headers });
   if (!r.ok) throw new Error(`markets ${r.status}`);
   const v = await r.json();
   if (Array.isArray(v)) {
@@ -333,8 +358,13 @@ export function ticketPrompt(prompt: string): string {
   }
 }
 
-export async function fetchInfo(api: string, market: string): Promise<MarketInfo> {
-  const r = await fetch(`${api}/v1/markets/${market}/info`);
+export async function fetchInfo(api: string, market: string, acceptLanguage?: string): Promise<MarketInfo> {
+  const headers: Record<string, string> = {};
+  if (acceptLanguage) headers["accept-language"] = acceptLanguage;
+  else if (typeof navigator !== "undefined" && navigator.language) {
+    headers["accept-language"] = navigator.languages?.join(",") || navigator.language;
+  }
+  const r = await fetch(`${api}/v1/markets/${market}/info`, { headers });
   if (!r.ok) throw new Error(`info ${r.status}`);
   return r.json();
 }
@@ -345,12 +375,17 @@ export async function fetchAuctions(
 ): Promise<{ page: number; limit: number; total: number; pages: number; items: (MarketListItem & { coverage_bps?: number; layers?: number })[] }> {
   const usp = new URLSearchParams();
   if (query.q) usp.set("q", query.q);
+  if (query.family != null) usp.set("family", String(query.family));
+  if (query.status != null) usp.set("status", String(query.status));
   if (query.category) usp.set("category", query.category);
   if (query.tag) usp.set("tag", query.tag);
+  if (query.locale) usp.set("locale", query.locale);
   if (query.page) usp.set("page", String(query.page));
   if (query.limit) usp.set("limit", String(query.limit));
   const qs = usp.toString();
-  const r = await fetch(`${api}/v1/auctions${qs ? `?${qs}` : ""}`);
+  const headers: Record<string, string> = {};
+  if (query.acceptLanguage) headers["accept-language"] = query.acceptLanguage;
+  const r = await fetch(`${api}/v1/auctions${qs ? `?${qs}` : ""}`, { headers });
   if (!r.ok) throw new Error(`auctions ${r.status}`);
   return r.json();
 }
@@ -403,6 +438,7 @@ export async function fetchLayers(api: string, market: string): Promise<{
 export type RiskQuoteItem = {
   quote: string;
   market: string;
+  platform?: string;
   title?: string;
   category?: string;
   layer: number;
@@ -417,6 +453,7 @@ export type RiskQuoteItem = {
   attachment: number;
   weight_sum: number;
   board_phase?: number;
+  pnl?: number;
 };
 
 export async function fetchOwnerRisk(
@@ -428,12 +465,21 @@ export async function fetchOwnerRisk(
   return r.json();
 }
 
+export type CoverClock = {
+  cover_open?: boolean;
+  cover_window_start?: number;
+  cover_window_end?: number;
+  cover_epoch_secs?: number;
+  cover_window_secs?: number;
+};
+
 export async function fetchOpsStatus(api: string): Promise<{
   slot: number;
   boards: number;
   boards_with_coverage: number;
   c_r_total: number;
   c_p_pool: number;
+  cover_pool?: number;
   vault_mint: string;
   keeper_heartbeat_slot: number;
   keeper_ok?: boolean;
@@ -442,9 +488,30 @@ export async function fetchOpsStatus(api: string): Promise<{
   index_lag_slots: number;
   read_only: boolean;
   withdraw_disabled: boolean;
-}> {
+  /** Create-time default (`PLATFORM_PUBKEY`). Not each market's `Market.platform`. */
+  create_platform?: string;
+} & CoverClock> {
   const r = await fetch(`${api}/v1/ops/status`);
   if (!r.ok) throw new Error(`ops ${r.status}`);
+  return r.json();
+}
+
+export type ProtocolPolicy = {
+  platform: string;
+  fee_bps: number;
+  fee_timing: number;
+  report_window_secs: number;
+  challenge_secs: number;
+  committee_bond: number;
+  tap_cap_max: number;
+  alpha_r_bps: number;
+  vault_mint?: string;
+  source?: string;
+};
+
+export async function fetchProtocol(api: string): Promise<ProtocolPolicy> {
+  const r = await fetch(`${api}/v1/protocol`);
+  if (!r.ok) throw new Error(`protocol ${r.status}`);
   return r.json();
 }
 
@@ -464,8 +531,9 @@ export async function fetchRoles(api: string, owner: string): Promise<RolesSnap>
 
 export async function fetchPool(api: string): Promise<{
   c_p_pool: number;
+  cover_pool?: number;
   boards: { market: string; title?: string; category?: string; c_m: number; c_r: number; c_p_board?: number; c_p_alloc?: number }[];
-}> {
+} & CoverClock> {
   const r = await fetch(`${api}/v1/pool`);
   if (!r.ok) throw new Error(`pool ${r.status}`);
   return r.json();
@@ -496,6 +564,7 @@ export type ResolutionSnap = {
   refunds_due: boolean;
   early_resolve: boolean;
   close_ts: number;
+  report_open_ts?: number;
   report_deadline: number;
   challenge_end: number;
   vote_end: number;
@@ -512,6 +581,10 @@ export type ResolutionSnap = {
   has_proposed: boolean;
   has_challenged: boolean;
   has_final: boolean;
+  slash_due?: boolean;
+  bond_holder?: string;
+  bond_locked?: number;
+  bond_slashed?: boolean;
 };
 
 export function resolutionPhaseName(phase: number | null | undefined): string {

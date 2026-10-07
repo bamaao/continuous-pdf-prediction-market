@@ -35,8 +35,11 @@ import {
   handicap1x2Mask,
   skellamMasks,
   statusName,
+  type ListingI18n,
   type MarketComment,
 } from "@cpm/sdk";
+import { ListingI18nEditor } from "./listing-i18n-editor";
+import { ListingLocale } from "./listing-locale";
 import { MarketCard } from "./market-card";
 import { PdfChart } from "./pdf-chart";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
@@ -44,12 +47,20 @@ import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { MARKET_API } from "@/lib/env";
-import { CLAIM_ON_PORTFOLIO, LOCK_RHO, LOCK_RHO_HINT, LMSR_COST_HINT, NEED_WALLET, OPEN_REFUNDS } from "@/lib/copy";
+import { CLAIM_ON_PORTFOLIO, LOCK_RHO, LOCK_RHO_HINT, LMSR_COST_HINT, NEED_WALLET, OPEN_REFUNDS, SELLS_CLOSED } from "@/lib/copy";
 import { sendSigned, submitGateway } from "@/lib/tx";
 
 function nonceKey(market: string) {
   return `cpm.nonce.${market}`;
 }
+
+/** FR-UI-42: page+limit default 20, newest first. */
+const COMMENT_LIMIT = 20;
+/** FR-UI-39: HTTP fallback while the PDF socket is down. */
+const PDF_POLL_MS = 30_000;
+const WS_CONNECT_MS = 2_500;
+const WS_RETRY_MIN_MS = 1_000;
+const WS_RETRY_MAX_MS = 30_000;
 
 export function Board({ market }: { market: string }) {
   const { connection } = useConnection();
@@ -74,15 +85,27 @@ export function Board({ market }: { market: string }) {
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState<ResolutionSnap | null>(null);
   const [listingTitle, setListingTitle] = useState("");
+  const [listingTitleEn, setListingTitleEn] = useState("");
   const [listingTags, setListingTags] = useState<string[]>([]);
   const [listingDescription, setListingDescription] = useState("");
+  const [listingDescriptionEn, setListingDescriptionEn] = useState("");
   const [listingEvent, setListingEvent] = useState("");
+  const [listingEventEn, setListingEventEn] = useState("");
+  const [listingLocale, setListingLocale] = useState("en");
+  const [listingIsTranslation, setListingIsTranslation] = useState(false);
+  const [listingI18n, setListingI18n] = useState<ListingI18n>({});
+  const [listingSourceLocale, setListingSourceLocale] = useState("en");
+  const [listingTopic, setListingTopic] = useState("");
+  const [listingTag, setListingTag] = useState("");
   const [pdfMode, setPdfMode] = useState<"idle" | "live" | "poll" | "frozen">("idle");
   const [pdfAt, setPdfAt] = useState(0);
   const [heldApi, setHeldApi] = useState<{ kind?: string; mask?: string; skellam_kind?: number; a?: number; b?: number } | null>(
     null,
   );
   const [comments, setComments] = useState<MarketComment[]>([]);
+  const [commentPage, setCommentPage] = useState(1);
+  const [commentPages, setCommentPages] = useState(1);
+  const [commentTotal, setCommentTotal] = useState(0);
   const [commentBody, setCommentBody] = useState("");
   const [commentBusy, setCommentBusy] = useState(false);
   const [commentNote, setCommentNote] = useState("");
@@ -105,9 +128,18 @@ export function Board({ market }: { market: string }) {
         if (stop) return;
         setInfo(desk);
         setListingTitle(desk.title ?? "");
+        setListingTitleEn(desk.title_en ?? desk.title ?? "");
         setListingTags(desk.tags?.length ? desk.tags : desk.category ? [desk.category] : []);
         setListingDescription(desk.description ?? "");
+        setListingDescriptionEn(desk.description_en ?? desk.description ?? "");
         setListingEvent(desk.event ?? "");
+        setListingEventEn(desk.event_en ?? desk.event ?? "");
+        setListingLocale(desk.locale ?? "en");
+        setListingIsTranslation(!!desk.is_translation);
+        setListingI18n(desk.i18n ?? {});
+        setListingSourceLocale(desk.source_locale ?? "en");
+        setListingTopic(desk.topic ?? "");
+        setListingTag(desk.tag ?? "");
         setFamily(desk.family);
         setN(desk.n);
         setPdf(desk.cells);
@@ -132,19 +164,23 @@ export function Board({ market }: { market: string }) {
         if (!stop) setRes(r);
       })
       .catch(() => undefined);
-    fetchListing(MARKET_API, market)
+    fetchListing(MARKET_API, market, typeof navigator !== "undefined" ? navigator.languages?.join(",") || navigator.language : undefined)
       .then((row) => {
         if (stop || !row) return;
         if (row.title) setListingTitle(row.title);
+        if (row.title_en) setListingTitleEn(row.title_en);
         if (row.tags?.length) setListingTags(row.tags);
         else if (row.category) setListingTags([row.category]);
         if (row.description) setListingDescription(row.description);
+        if (row.description_en) setListingDescriptionEn(row.description_en);
         if (row.event) setListingEvent(row.event);
-      })
-      .catch(() => undefined);
-    listComments(MARKET_API, market)
-      .then((page) => {
-        if (!stop) setComments(page.items ?? []);
+        if (row.event_en) setListingEventEn(row.event_en);
+        if (row.locale) setListingLocale(row.locale);
+        if (row.is_translation != null) setListingIsTranslation(!!row.is_translation);
+        if (row.i18n) setListingI18n(row.i18n);
+        if (row.source_locale) setListingSourceLocale(row.source_locale);
+        if (row.topic) setListingTopic(row.topic);
+        if (row.tag) setListingTag(row.tag);
       })
       .catch(() => undefined);
     return () => {
@@ -153,12 +189,38 @@ export function Board({ market }: { market: string }) {
   }, [market, publicKey]);
 
   useEffect(() => {
+    setCommentPage(1);
+  }, [market]);
+
+  useEffect(() => {
+    let stop = false;
+    listComments(MARKET_API, market, commentPage, COMMENT_LIMIT)
+      .then((page) => {
+        if (stop) return;
+        setComments(page.items ?? []);
+        setCommentPages(page.pages ?? 1);
+        setCommentTotal(page.total ?? 0);
+        if (page.page && page.page !== commentPage) setCommentPage(page.page);
+      })
+      .catch(() => {
+        if (!stop) {
+          setComments([]);
+          setCommentPages(1);
+          setCommentTotal(0);
+        }
+      });
+    return () => {
+      stop = true;
+    };
+  }, [market, commentPage]);
+
+  useEffect(() => {
     if (!publicKey) {
       setHeldApi(null);
       return;
     }
     let stop = false;
-    fetchOwnerPositions(MARKET_API, publicKey.toBase58(), { limit: 50 })
+    fetchOwnerPositions(MARKET_API, publicKey.toBase58(), { q: market, limit: 20 })
       .then((book) => {
         if (stop) return;
         const t = (book.items ?? []).find((row) => row.market === market);
@@ -183,7 +245,11 @@ export function Board({ market }: { market: string }) {
     }
     let stop = false;
     let poll = 0;
-    let backoff = 0;
+    let connectWait = 0;
+    let retry = 0;
+    let delay = WS_RETRY_MIN_MS;
+    let gen = 0;
+    let ws: WebSocket | null = null;
     const applyPush = (push: PdfPush) => {
       setPdf((prev) => cellsFromPush(push, prev));
       setPdfAt(Date.now());
@@ -212,13 +278,61 @@ export function Board({ market }: { market: string }) {
         })
         .catch(() => undefined);
     };
-    let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(marketWsUrl(MARKET_API, market));
-      ws.onopen = () => {
-        if (!stop) setPdfMode("live");
+    const clearPoll = () => {
+      if (poll) {
+        window.clearInterval(poll);
+        poll = 0;
+      }
+    };
+    const ensurePoll = () => {
+      if (stop || poll) return;
+      pull();
+      poll = window.setInterval(pull, PDF_POLL_MS);
+    };
+    const scheduleRetry = () => {
+      if (stop || retry) return;
+      const wait = delay;
+      delay = Math.min(delay * 2, WS_RETRY_MAX_MS);
+      retry = window.setTimeout(() => {
+        retry = 0;
+        attach();
+      }, wait);
+    };
+    const attach = () => {
+      if (stop) return;
+      gen += 1;
+      const my = gen;
+      if (retry) {
+        window.clearTimeout(retry);
+        retry = 0;
+      }
+      if (connectWait) {
+        window.clearTimeout(connectWait);
+        connectWait = 0;
+      }
+      try {
+        ws?.close();
+      } catch {
+        /* ignore */
+      }
+      let sock: WebSocket;
+      try {
+        sock = new WebSocket(marketWsUrl(MARKET_API, market));
+      } catch {
+        setPdfMode("poll");
+        ensurePoll();
+        scheduleRetry();
+        return;
+      }
+      ws = sock;
+      sock.onopen = () => {
+        if (stop || my !== gen) return;
+        delay = WS_RETRY_MIN_MS;
+        clearPoll();
+        setPdfMode("live");
       };
-      ws.onmessage = (ev) => {
+      sock.onmessage = (ev) => {
+        if (stop || my !== gen) return;
         try {
           applyPush(JSON.parse(String(ev.data)) as PdfPush);
           setPdfMode("live");
@@ -226,30 +340,35 @@ export function Board({ market }: { market: string }) {
           /* ignore */
         }
       };
-      ws.onclose = () => {
+      sock.onerror = () => {
+        sock.close();
+      };
+      sock.onclose = () => {
+        if (my !== gen) return;
+        if (ws === sock) ws = null;
         if (stop) return;
         setPdfMode("poll");
-        pull();
-        poll = window.setInterval(pull, 2000);
+        ensurePoll();
+        scheduleRetry();
       };
-      ws.onerror = () => {
-        ws?.close();
-      };
-      backoff = window.setTimeout(() => {
-        if (stop) return;
-        if (ws && ws.readyState === WebSocket.CONNECTING) {
-          ws.close();
-        }
-      }, 2500);
-    } catch {
-      setPdfMode("poll");
-      poll = window.setInterval(pull, 2000);
-    }
+      connectWait = window.setTimeout(() => {
+        if (stop || my !== gen) return;
+        if (sock.readyState === WebSocket.CONNECTING) sock.close();
+      }, WS_CONNECT_MS);
+    };
+    attach();
     return () => {
       stop = true;
-      ws?.close();
-      if (poll) window.clearInterval(poll);
-      if (backoff) window.clearTimeout(backoff);
+      gen += 1;
+      try {
+        ws?.close();
+      } catch {
+        /* ignore */
+      }
+      ws = null;
+      clearPoll();
+      if (connectWait) window.clearTimeout(connectWait);
+      if (retry) window.clearTimeout(retry);
     };
   }, [market, info?.board_phase]);
 
@@ -332,7 +451,6 @@ export function Board({ market }: { market: string }) {
         op,
         owner: publicKey.toBase58(),
         market,
-        include_pool: op === "begin_settle" ? true : undefined,
       });
       const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
       setNote(`${op} ${sig}`);
@@ -367,8 +485,12 @@ export function Board({ market }: { market: string }) {
   }
 
   async function trade(buy: boolean) {
+    if (!buy) {
+      setErr(SELLS_CLOSED);
+      return;
+    }
     if (tradingClosed) {
-      setErr("trading closed — no buys or sells after the deadline");
+      setErr("trading closed — no buys after the deadline");
       return;
     }
     if (!publicKey || !signTransaction) {
@@ -480,17 +602,28 @@ export function Board({ market }: { market: string }) {
       <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-amber">
         {listingTags.length || info?.tags?.length || info?.category ? formatTags(listingTags.length ? listingTags : info?.tags, info?.category) : "Prediction market"}
       </p>
-      <h1 className="mt-1 font-display text-4xl">
-        {listingHeadline({ title: listingTitle || info?.title, family: info?.family, market })}
-      </h1>
-      {(listingEvent || info?.event) ? (
-        <p className="mt-2 max-w-3xl text-lg leading-snug text-paper/80">{listingEvent || info?.event}</p>
-      ) : null}
-      {(listingDescription || info?.description) ? (
-        <p className="mt-2 max-w-3xl whitespace-pre-wrap text-sm leading-relaxed text-paper/70">
-          {listingDescription || info?.description}
-        </p>
-      ) : null}
+      <ListingLocale
+        title={listingTitle || info?.title}
+        titleEn={listingTitleEn || info?.title_en || info?.title}
+        event={listingEvent || info?.event}
+        eventEn={listingEventEn || info?.event_en || info?.event}
+        description={listingDescription || info?.description}
+        descriptionEn={listingDescriptionEn || info?.description_en || info?.description}
+        locale={listingLocale || info?.locale}
+        isTranslation={listingIsTranslation || !!info?.is_translation}
+      >
+        {({ title, event, description }) => (
+          <>
+            <h1 className="mt-1 font-display text-4xl">
+              {listingHeadline({ title, family: info?.family, market })}
+            </h1>
+            {event ? <p className="mt-2 max-w-3xl text-lg leading-snug text-paper/80">{event}</p> : null}
+            {description ? (
+              <p className="mt-2 max-w-3xl whitespace-pre-wrap text-sm leading-relaxed text-paper/70">{description}</p>
+            ) : null}
+          </>
+        )}
+      </ListingLocale>
       <p className="mt-1 break-all font-mono text-[11px] text-paper/40">{market}</p>
       <div className="mt-4 border border-rule p-4">
         <p className="font-mono text-[11px] uppercase tracking-widest text-amber">Market card</p>
@@ -516,9 +649,44 @@ export function Board({ market }: { market: string }) {
             payable_usdc: info?.payable_usdc,
             peak_risk: info?.peak_risk,
             resolution_phase: res?.phase,
+            image_url: info?.image_url,
           }}
         />
       </div>
+      <ListingI18nEditor
+        market={market}
+        meta={{
+          titleEn: listingTitleEn || info?.title_en || listingTitle || info?.title || "",
+          eventEn: listingEventEn || info?.event_en || listingEvent || info?.event || "",
+          descriptionEn: listingDescriptionEn || info?.description_en || listingDescription || info?.description || "",
+          tags: listingTags.length ? listingTags : info?.tags ?? [],
+          topic: listingTopic || info?.topic,
+          tag: listingTag || info?.tag,
+          sourceLocale: listingSourceLocale || info?.source_locale,
+          i18n: listingI18n,
+        }}
+        onSaved={(next) => {
+          setListingI18n(next.i18n ?? {});
+          setListingSourceLocale(next.source_locale ?? "en");
+          setListingTitleEn(next.title_en ?? next.title);
+          setListingEventEn(next.event_en ?? next.event ?? "");
+          setListingDescriptionEn(next.description_en ?? next.description ?? "");
+          const accept =
+            typeof navigator !== "undefined" ? navigator.languages?.join(",") || navigator.language : undefined;
+          void fetchListing(MARKET_API, market, accept).then((row) => {
+            if (!row) return;
+            if (row.title) setListingTitle(row.title);
+            if (row.title_en) setListingTitleEn(row.title_en);
+            if (row.event) setListingEvent(row.event);
+            if (row.event_en) setListingEventEn(row.event_en);
+            if (row.description) setListingDescription(row.description);
+            if (row.description_en) setListingDescriptionEn(row.description_en);
+            if (row.locale) setListingLocale(row.locale);
+            if (row.is_translation != null) setListingIsTranslation(!!row.is_translation);
+            if (row.i18n) setListingI18n(row.i18n);
+          });
+        }}
+      />
       <p className="mt-3 max-w-2xl text-sm text-paper/65">
         The chart is the trading-implied PDF p_k = implied_probs(p0, θ, β). E is liability on that atom, not
         the distribution. Coverage / ρ̂ are displayed and not baked into the quote.
@@ -688,7 +856,7 @@ export function Board({ market }: { market: string }) {
                 ? LOCK_RHO_HINT
                 : tradingClosed
                 ? "Trading closed at the deadline. No buys or sells on any prediction market after close_ts."
-                : "Session may sign buy / sell. Same nonce retries the same fill. Coverage is display only."}
+                : "Session may sign buy. Sells are closed. Same nonce retries the same fill. Coverage is display only."}
           </p>
           <label className="mt-4 block text-[10px] uppercase tracking-widest text-paper/50">Shares q</label>
           <input
@@ -752,9 +920,10 @@ export function Board({ market }: { market: string }) {
           <button className="mt-4 w-full bg-amber py-2 text-ink disabled:opacity-50" disabled={busy || tradingClosed} onClick={() => trade(true)}>
             {busy ? "Pending…" : tradingClosed ? "Trading closed" : typedLine() ? "Buy line" : "Buy set"}
           </button>
-          <button className="mt-2 w-full border border-rule py-2 disabled:opacity-50" disabled={busy || tradingClosed} onClick={() => trade(false)}>
-            {tradingClosed ? "Trading closed" : typedLine() ? "Sell line" : "Sell set"}
+          <button className="mt-2 w-full border border-rule py-2 disabled:opacity-50" disabled onClick={() => trade(false)}>
+            Sells closed
           </button>
+          <p className="mt-2 text-[10px] text-paper/45">{SELLS_CLOSED}</p>
           {note && (
             <p className={`mt-2 text-[10px] ${note.startsWith("pending") ? "text-amber" : "text-moss"}`}>
               {note}
@@ -767,6 +936,10 @@ export function Board({ market }: { market: string }) {
         <p className="font-mono text-[11px] uppercase tracking-widest text-amber">Comments</p>
         <p className="mt-1 text-[11px] text-paper/45">
           After the market is live. Off-chain catalog — not settlement, not C_P. Connect a wallet to post.
+          Newest first · {COMMENT_LIMIT} per page.
+        </p>
+        <p className="mt-3 font-mono text-[11px] text-paper/45">
+          {commentTotal} comments · page {commentPage} of {commentPages}
         </p>
         {comments.length === 0 ? (
           <p className="mt-4 font-mono text-xs text-paper/40">No comments yet.</p>
@@ -781,6 +954,29 @@ export function Board({ market }: { market: string }) {
               </li>
             ))}
           </ol>
+        )}
+        {commentPages > 1 && (
+          <nav className="mt-3 flex items-center justify-between font-mono text-[11px] uppercase tracking-widest">
+            <button
+              type="button"
+              disabled={commentPage <= 1}
+              className="disabled:text-paper/25"
+              onClick={() => setCommentPage((p) => Math.max(1, p - 1))}
+            >
+              Previous
+            </button>
+            <span className="text-paper/45">
+              page {commentPage} / {commentPages}
+            </span>
+            <button
+              type="button"
+              disabled={commentPage >= commentPages}
+              className="disabled:text-paper/25"
+              onClick={() => setCommentPage((p) => Math.min(commentPages, p + 1))}
+            >
+              Next
+            </button>
+          </nav>
         )}
         <label className="mt-4 block font-mono text-[10px] uppercase tracking-widest text-paper/50">Write a comment</label>
         <textarea
@@ -804,8 +1000,15 @@ export function Board({ market }: { market: string }) {
             try {
               await postComment(MARKET_API, market, publicKey.toBase58(), commentBody);
               setCommentBody("");
-              const page = await listComments(MARKET_API, market);
-              setComments(page.items ?? []);
+              // Newest-first: new posts land on page 1 (FR-UI-42).
+              if (commentPage === 1) {
+                const page = await listComments(MARKET_API, market, 1, COMMENT_LIMIT);
+                setComments(page.items ?? []);
+                setCommentPages(page.pages ?? 1);
+                setCommentTotal(page.total ?? 0);
+              } else {
+                setCommentPage(1);
+              }
             } catch (e) {
               setCommentNote(e instanceof Error ? e.message : "comment");
             } finally {

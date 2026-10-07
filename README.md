@@ -7,7 +7,8 @@ Prediction market on a continuous PDF (LMSR) plus a risk-capital auction. Settle
 | Doc | Role |
 | --- | --- |
 | [docs/software-requirements-specification.md](docs/software-requirements-specification.md) | SRS — numbered SHALL / SHALL NOT for tickets and QA |
-| [docs/product-specification.md](docs/product-specification.md) | Product rules: markets, LMSR (§1.2.4: later buys of a hot interval cost more), soft solvency, $\rho$, committee |
+| [docs/product-specification.md](docs/product-specification.md) | Product rules: markets, LMSR (§1.2.4), listing language (§1.2.5), soft solvency, $\rho$, committee |
+| [docs/risk-capital-guide.md](docs/risk-capital-guide.md) | Risk LP handbook: auction, rank, draw, surplus 20% cover pool (Chinese: [risk-capital-guide.zh.md](docs/risk-capital-guide.zh.md)) |
 | [docs/system-architecture.md](docs/system-architecture.md) | Clients, services, funds, crash recovery, data security |
 | [docs/technical-architecture.md](docs/technical-architecture.md) | Next.js / Anchor / Axum, algorithms, wallets |
 

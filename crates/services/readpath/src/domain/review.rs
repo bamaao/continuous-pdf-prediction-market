@@ -1,4 +1,4 @@
-use super::{valid_pubkey, DomainError, Listing};
+use super::{normalize_i18n, normalize_source_locale, valid_pubkey, DomainError, I18nMap, Listing};
 
 pub const APP_PENDING: u8 = 0;
 pub const APP_APPROVED: u8 = 1;
@@ -25,6 +25,9 @@ pub struct ListingApplication {
     pub reviewed_at: i64,
     pub compose_json: String,
     pub market: String,
+    pub source_locale: String,
+    pub i18n: I18nMap,
+    pub image_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -88,7 +91,21 @@ impl ListingApplication {
             reviewed_at: 0,
             compose_json,
             market: String::new(),
+            source_locale: "en".into(),
+            i18n: I18nMap::new(),
+            image_id: String::new(),
         })
+    }
+
+    pub fn with_locale(mut self, source_locale: impl Into<String>, i18n: I18nMap) -> Result<Self, DomainError> {
+        self.source_locale = normalize_source_locale(&source_locale.into())?;
+        self.i18n = normalize_i18n(i18n)?;
+        Ok(self)
+    }
+
+    pub fn with_image(mut self, image_id: impl Into<String>) -> Self {
+        self.image_id = image_id.into().trim().to_string();
+        self
     }
 
     pub fn is_blocking_duplicate(&self) -> bool {

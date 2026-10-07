@@ -17,6 +17,7 @@ cpi = ["no-entrypoint"]
 
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+bytemuck = { version = "1", features = ["derive"] }
 market = { path = "../market", default-features = false, features = ["cpi"] }
 math = { path = "../../crates/math" }
 vault = { path = "../vault", default-features = false, features = ["cpi"] }

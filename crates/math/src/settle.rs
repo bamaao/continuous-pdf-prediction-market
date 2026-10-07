@@ -105,6 +105,25 @@ pub fn surplus_parts(s: u64, alpha_r_bps: u16) -> (u64, u64) {
     (sr, s.saturating_sub(sr))
 }
 
+/// Slice of surplus that funds the protocol loss-cover pool (20%).
+pub const COVER_BPS: u16 = 2_000;
+
+pub fn surplus_cover(s: u64) -> u64 {
+    ((s as u128) * (COVER_BPS as u128) / 10_000) as u64
+}
+
+/// $(S_C, S_R, S_P)$. $S_C=20\%S$ always when $S>0$. Remainder: all $S_P$ if no $C_R$, else $\alpha_R$ split.
+pub fn surplus_split(s: u64, alpha_r_bps: u16, has_cr: bool) -> (u64, u64, u64) {
+    let sc = surplus_cover(s);
+    let rest = s.saturating_sub(sc);
+    if !has_cr {
+        (sc, 0, rest)
+    } else {
+        let (sr, sp) = surplus_parts(rest, alpha_r_bps);
+        (sc, sr, sp)
+    }
+}
+
 /// $H_{A,D}(L)=\min((L-A)^+, D)$.
 pub fn layer_loss(liability: Q64, attachment: Q64, thickness: Q64) -> Q64 {
     let over = liability.saturating_sub(attachment);
@@ -197,6 +216,9 @@ mod tests {
     #[test]
     fn surplus_split_and_zero_when_haircut() {
         assert_eq!(surplus_parts(100, 7_000), (70, 30));
+        assert_eq!(surplus_split(100, 7_000, true), (20, 56, 24));
+        assert_eq!(surplus_split(100, 7_000, false), (20, 0, 80));
+        assert_eq!(surplus_split(0, 7_000, true), (0, 0, 0));
         let s = usdc(surplus(
             Q64::from_int(10),
             Q64::from_int(10),

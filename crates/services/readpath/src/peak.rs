@@ -164,10 +164,12 @@ mod tests {
             close_ts: 0,
             risk_lock_ts: 0,
             report_window_secs: 0,
+            report_open_ts: 0,
             extra_a: Q64::from_int(-2).raw(),
             extra_b: Q64::from_int(12).raw(),
             extra_u2: 0,
             delegated: false,
+            platform: String::new(),
         };
         let peak = peak_risk(&row);
         assert_eq!(peak.cell, 2);
@@ -214,10 +216,12 @@ mod tests {
             close_ts: 0,
             risk_lock_ts: 0,
             report_window_secs: 0,
+            report_open_ts: 0,
             extra_a: Q64::from_int(-2).raw(),
             extra_b: Q64::from_int(12).raw(),
             extra_u2: 0,
             delegated: false,
+            platform: String::new(),
         };
         let peak = peak_risk(&row);
         assert_eq!(peak.run_lo, 1);

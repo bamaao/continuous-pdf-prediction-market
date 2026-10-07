@@ -29,6 +29,7 @@ pub struct Case {
     pub phase: Phase,
     pub now: i64,
     pub close_ts: i64,
+    pub report_open_ts: i64,
     pub report_deadline: i64,
     pub challenge_end: i64,
     pub vote_end: i64,
@@ -37,6 +38,7 @@ pub struct Case {
     pub n: u8,
     pub votes_proposal: u8,
     pub votes_challenge: u8,
+    /// Bernoulli: if the defined event occurs before `close_ts`, VOID (refund), do not settle YES.
     pub early_ok: bool,
 }
 
@@ -50,6 +52,10 @@ pub enum Event {
     VoteTimeout,
     ReportTimeout,
     Void,
+    /// Super-admin after `report_deadline`: write $x^*$ and slash the committee bond.
+    AdminSubmit,
+    /// Super-admin after `report_deadline`: VOID, return the committee bond.
+    AdminVoid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,8 +75,11 @@ pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
     }
     match ev {
         Event::Submit => {
-            if case.now < case.close_ts && !case.early_ok {
+            if case.now < case.close_ts {
                 return Err("market still open");
+            }
+            if case.now < case.report_open_ts {
+                return Err("report window not open");
             }
             if case.now >= case.report_deadline {
                 return Err("report window closed");
@@ -142,15 +151,32 @@ pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
             if case.now < case.report_deadline {
                 return Err("report window still open");
             }
-            if case.extensions == 0 {
-                Ok(Effect::ExtendOnce)
-            } else {
-                Ok(Effect::Fail)
-            }
+            Err("awaiting admin")
         }
         Event::Void => {
-            if case.now < case.close_ts {
+            if case.now < case.close_ts && !case.early_ok {
                 return Err("void only after close");
+            }
+            if case.now >= case.report_deadline {
+                return Err("awaiting admin");
+            }
+            Ok(Effect::Void)
+        }
+        Event::AdminSubmit => {
+            if case.phase != Phase::Open {
+                return Err("not open");
+            }
+            if case.now < case.report_deadline {
+                return Err("report window still open");
+            }
+            Ok(Effect::FinalizeProposal)
+        }
+        Event::AdminVoid => {
+            if case.phase != Phase::Open {
+                return Err("not open");
+            }
+            if case.now < case.report_deadline {
+                return Err("report window still open");
             }
             Ok(Effect::Void)
         }
@@ -166,6 +192,7 @@ mod tests {
             phase: Phase::Open,
             now: 100,
             close_ts: 90,
+            report_open_ts: 90,
             report_deadline: 200,
             challenge_end: 150,
             vote_end: 180,
@@ -185,6 +212,19 @@ mod tests {
         assert_eq!(apply(&c, Event::Submit), Err("market still open"));
         c.now = 100;
         assert_eq!(apply(&c, Event::Submit), Ok(Effect::BecomeProposed));
+    }
+
+    #[test]
+    fn submit_waits_for_report_open() {
+        let mut c = base();
+        c.report_open_ts = 150;
+        c.now = 100;
+        assert_eq!(apply(&c, Event::Submit), Err("report window not open"));
+        c.now = 150;
+        assert_eq!(apply(&c, Event::Submit), Ok(Effect::BecomeProposed));
+        c.early_ok = true;
+        c.now = 80;
+        assert_eq!(apply(&c, Event::Submit), Err("market still open"));
     }
 
     #[test]
@@ -230,26 +270,27 @@ mod tests {
     }
 
     #[test]
-    fn missed_report_extends_once_then_fails() {
+    fn missed_report_waits_for_admin() {
         let mut c = base();
         c.now = 150;
         assert_eq!(apply(&c, Event::ReportTimeout), Err("report window still open"));
         c.now = 200;
-        assert_eq!(apply(&c, Event::ReportTimeout), Ok(Effect::ExtendOnce));
-        c.extensions = 1;
-        c.report_deadline = 260;
-        c.now = 260;
-        assert_eq!(apply(&c, Event::ReportTimeout), Ok(Effect::Fail));
+        assert_eq!(apply(&c, Event::ReportTimeout), Err("awaiting admin"));
+        assert_eq!(apply(&c, Event::Submit), Err("report window closed"));
+        assert_eq!(apply(&c, Event::Void), Err("awaiting admin"));
+        assert_eq!(apply(&c, Event::AdminSubmit), Ok(Effect::FinalizeProposal));
+        assert_eq!(apply(&c, Event::AdminVoid), Ok(Effect::Void));
     }
 
     #[test]
-    fn early_resolve_can_submit_before_close() {
+    fn early_resolve_voids_before_close_not_submit() {
         let mut c = base();
         c.now = 80;
         c.early_ok = true;
-        assert_eq!(apply(&c, Event::Submit), Ok(Effect::BecomeProposed));
-        c.early_ok = false;
         assert_eq!(apply(&c, Event::Submit), Err("market still open"));
+        assert_eq!(apply(&c, Event::Void), Ok(Effect::Void));
+        c.early_ok = false;
+        assert_eq!(apply(&c, Event::Void), Err("void only after close"));
     }
 
     #[test]

@@ -207,6 +207,26 @@ async fn delegate_rejects_l1_buy_commit_leaves_vault() {
     .await
     .unwrap();
 
+    send(
+        &mut ctx,
+        vec![client::init_protocol(
+            creator.pubkey(),
+            market::state::ProtocolArgs {
+                platform: creator.pubkey(),
+                fee_bps: 0,
+                fee_timing: 0,
+                report_window_secs: 400,
+                challenge_secs: 20,
+                committee_bond: 1,
+                tap_cap_max: 0,
+                alpha_r_bps: 7_000,
+            },
+        )],
+        &[&creator],
+    )
+    .await
+    .unwrap();
+
     let args = market::state::IntervalArgs {
         common: market::state::CreateCommon {
             id_hash,
@@ -225,6 +245,8 @@ async fn delegate_rejects_l1_buy_commit_leaves_vault() {
             gamma_bps: 1_000,
             alpha_r_bps: 7_000,
             platform: creator.pubkey(),
+            report_open_ts: 1_000,
+            committee_bond: 1,
         },
         topic,
         tag,
@@ -241,6 +263,7 @@ async fn delegate_rejects_l1_buy_commit_leaves_vault() {
                 creator: creator.pubkey(),
                 market: market_pda,
                 grid: grid_pda,
+                protocol: client::protocol_pda(),
                 system_program: system_program::ID,
             }
             .to_account_metas(None),

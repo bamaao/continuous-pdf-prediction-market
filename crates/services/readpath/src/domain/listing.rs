@@ -1,4 +1,4 @@
-use super::DomainError;
+use super::{normalize_i18n, normalize_source_locale, DomainError, I18nMap};
 
 pub const DEFAULT_CATALOG_TAGS: &[&str] = &["football", "epl", "world cup", "macro", "cpi", "price", "election", "binary"];
 
@@ -27,6 +27,9 @@ pub struct Listing {
     pub tag: String,
     pub description: String,
     pub event: String,
+    pub source_locale: String,
+    pub i18n: I18nMap,
+    pub image_id: String,
 }
 
 pub fn normalize_tag(raw: &str) -> Result<String, DomainError> {
@@ -111,7 +114,21 @@ impl Listing {
             tag: tag.into().trim().to_string(),
             description,
             event,
+            source_locale: "en".into(),
+            i18n: I18nMap::new(),
+            image_id: String::new(),
         })
+    }
+
+    pub fn with_locale(mut self, source_locale: impl Into<String>, i18n: I18nMap) -> Result<Self, DomainError> {
+        self.source_locale = normalize_source_locale(&source_locale.into())?;
+        self.i18n = normalize_i18n(i18n)?;
+        Ok(self)
+    }
+
+    pub fn with_image(mut self, image_id: impl Into<String>) -> Self {
+        self.image_id = image_id.into().trim().to_string();
+        self
     }
 }
 

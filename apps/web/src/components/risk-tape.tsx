@@ -6,30 +6,33 @@ import { useEffect, useState } from "react";
 import { MARKET_API } from "@/lib/env";
 
 /** Live list of each prediction market's thickest interval overlap. Polls the indexer projection. */
-export function RiskTape({ limit = 20 }: { limit?: number }) {
-  const [rows, setRows] = useState<MarketListItem[]>([]);
+export function RiskTape({
+  limit = 20,
+  initial = [],
+}: {
+  limit?: number;
+  initial?: MarketListItem[];
+}) {
+  const [rows, setRows] = useState<MarketListItem[]>(initial);
   const [err, setErr] = useState("");
   const [at, setAt] = useState(0);
 
   useEffect(() => {
     let stop = false;
     const pull = () => {
-      listMarketsPage(MARKET_API, { limit, page: 1 })
+      listMarketsPage(MARKET_API, { limit, page: 1, sort: "peak", status: 1 })
         .then((page) => {
           if (stop) return;
-          const items = [...(page.items ?? [])].sort(
-            (a, b) => (b.peak_risk?.payout_usdc ?? b.l_max_usdc ?? 0) - (a.peak_risk?.payout_usdc ?? a.l_max_usdc ?? 0),
-          );
-          setRows(items);
+          setRows(page.items ?? []);
           setAt(Date.now());
           setErr("");
         })
         .catch((e) => {
-          if (!stop) setErr(e instanceof Error ? e.message : "risk tape unreachable");
+          if (!stop) setErr(e instanceof Error ? e.message : "highest-risk list unreachable");
         });
     };
     pull();
-    const id = window.setInterval(pull, 2000);
+    const id = window.setInterval(pull, 60_000);
     return () => {
       stop = true;
       window.clearInterval(id);
@@ -40,7 +43,7 @@ export function RiskTape({ limit = 20 }: { limit?: number }) {
     <section className="mt-8">
       <p className="font-mono text-[11px] uppercase tracking-widest text-amber">Highest risk payout</p>
       <p className="mt-2 max-w-2xl text-[12px] text-paper/50">
-        During trading this is where bought intervals stack the thickest, refreshed every 2s. Gaussian /
+        During trading this is where bought intervals stack the thickest, refreshed every 60s. Gaussian /
         lognormal show that overlap as a print band on Ω — not a volume ranking of tickets. Settlement still
         pays only the realized print.
       </p>

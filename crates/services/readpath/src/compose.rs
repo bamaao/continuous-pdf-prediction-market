@@ -74,6 +74,10 @@ pub struct ComposeBody {
     #[serde(default)]
     pub report_window_secs: Option<i64>,
     #[serde(default)]
+    pub report_open_ts: Option<i64>,
+    #[serde(default)]
+    pub committee_bond: Option<u64>,
+    #[serde(default)]
     pub n_layers: Option<u8>,
     #[serde(default)]
     pub d_unit: Option<u64>,
@@ -245,6 +249,12 @@ fn create_common(owner: Pubkey, body: &ComposeBody, id_hash: [u8; 32], n: u16) -
         .unwrap_or(0);
     let close_ts = body.close_ts.unwrap_or(now + 86_400);
     let risk_lock_ts = body.risk_lock_ts.unwrap_or(close_ts);
+    let report_open_ts = body.report_open_ts.ok_or(StatusCode::BAD_REQUEST)?;
+    if report_open_ts < close_ts {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let pol = active_policy()?;
+    let _ = owner;
     Ok(client::market::state::CreateCommon {
         id_hash,
         n,
@@ -252,30 +262,134 @@ fn create_common(owner: Pubkey, body: &ComposeBody, id_hash: [u8; 32], n: u16) -
         risk_lock_ts,
         beta: q_int(body.beta.unwrap_or(100)),
         c_m: 0,
-        fee_bps: body.fee_bps.unwrap_or(0).min(10_000),
-        fee_timing: if body.fee_timing.unwrap_or(0) == 1 { 1 } else { 0 },
+        fee_bps: pol.fee_bps,
+        fee_timing: pol.fee_timing,
         authorized_reporter: Pubkey::default(),
-        report_window_secs: body.report_window_secs.unwrap_or(400).max(1),
-        challenge_secs: body.challenge_secs.unwrap_or(3_600).max(1),
-        n_layers: body.n_layers.unwrap_or(1).clamp(1, 8),
+        report_window_secs: pol.report_window_secs,
+        challenge_secs: pol.challenge_secs,
+        n_layers: 1,
         d_unit: body.d_unit.unwrap_or(10).max(1),
-        gamma_bps: 1_000,
-        alpha_r_bps: 7_000,
-        platform: platform_pubkey(owner, body)?,
+        gamma_bps: 0,
+        alpha_r_bps: pol.alpha_r_bps,
+        platform: pol.platform,
+        report_open_ts,
+        committee_bond: pol.committee_bond,
     })
 }
 
-fn platform_pubkey(owner: Pubkey, body: &ComposeBody) -> Result<Pubkey, StatusCode> {
-    if let Some(p) = body.platform.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        return pk(p);
+#[derive(Clone)]
+pub struct OfficialPolicy {
+    pub platform: Pubkey,
+    pub fee_bps: u16,
+    pub fee_timing: u8,
+    pub report_window_secs: i64,
+    pub challenge_secs: i64,
+    pub committee_bond: u64,
+    pub tap_cap_max: u64,
+    pub alpha_r_bps: u16,
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
+fn env_i64(key: &str, default: i64) -> i64 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
+pub fn official_policy() -> Result<OfficialPolicy, StatusCode> {
+    let platform = official_platform()?;
+    Ok(OfficialPolicy {
+        platform,
+        fee_bps: env_u64("PROTOCOL_FEE_BPS", 0).min(10_000) as u16,
+        fee_timing: if env_u64("PROTOCOL_FEE_TIMING", 0) == 1 { 1 } else { 0 },
+        report_window_secs: env_i64("PROTOCOL_REPORT_WINDOW_SECS", 86_400).max(1),
+        challenge_secs: env_i64("PROTOCOL_CHALLENGE_SECS", 3_600).max(1),
+        committee_bond: env_u64("PROTOCOL_COMMITTEE_BOND", 100).max(1),
+        tap_cap_max: env_u64("PROTOCOL_TAP_CAP_MAX", 0),
+        alpha_r_bps: env_u64("PROTOCOL_ALPHA_R_BPS", 7_000).min(10_000) as u16,
+    })
+}
+
+thread_local! {
+    static LIVE_POLICY: std::cell::RefCell<Option<OfficialPolicy>> = std::cell::RefCell::new(None);
+}
+
+/// Indexed Protocol PDA when present; else operator env (`PLATFORM_PUBKEY` / `PROTOCOL_*`).
+pub fn live_policy(store: &crate::store::MemoryStore) -> Result<OfficialPolicy, StatusCode> {
+    let Some(p) = store.protocol() else {
+        return official_policy();
+    };
+    Ok(OfficialPolicy {
+        platform: pk(&p.platform)?,
+        fee_bps: p.fee_bps,
+        fee_timing: p.fee_timing,
+        report_window_secs: p.report_window_secs.max(1),
+        challenge_secs: p.challenge_secs.max(1),
+        committee_bond: p.committee_bond.max(1),
+        tap_cap_max: p.tap_cap_max,
+        alpha_r_bps: p.alpha_r_bps,
+    })
+}
+
+pub fn with_live_policy<T>(
+    policy: OfficialPolicy,
+    f: impl FnOnce() -> Result<T, StatusCode>,
+) -> Result<T, StatusCode> {
+    LIVE_POLICY.with(|c| *c.borrow_mut() = Some(policy));
+    let out = f();
+    LIVE_POLICY.with(|c| *c.borrow_mut() = None);
+    out
+}
+
+fn active_policy() -> Result<OfficialPolicy, StatusCode> {
+    if let Some(p) = LIVE_POLICY.with(|c| c.borrow().clone()) {
+        return Ok(p);
     }
+    official_policy()
+}
+
+fn protocol_args(pol: &OfficialPolicy) -> client::market::state::ProtocolArgs {
+    client::market::state::ProtocolArgs {
+        platform: pol.platform,
+        fee_bps: pol.fee_bps,
+        fee_timing: pol.fee_timing,
+        report_window_secs: pol.report_window_secs,
+        challenge_secs: pol.challenge_secs,
+        committee_bond: pol.committee_bond,
+        tap_cap_max: pol.tap_cap_max,
+        alpha_r_bps: pol.alpha_r_bps,
+    }
+}
+
+fn official_platform() -> Result<Pubkey, StatusCode> {
     if let Ok(p) = std::env::var("PLATFORM_PUBKEY") {
         let t = p.trim();
         if !t.is_empty() {
             return pk(t);
         }
     }
-    Ok(owner)
+    if cfg!(test) {
+        return Ok(Pubkey::new_from_array([7u8; 32]));
+    }
+    Err(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn platform_pubkey(_owner: Pubkey, _body: &ComposeBody) -> Result<Pubkey, StatusCode> {
+    official_platform()
+}
+
+/// `claim_fees` / `cover_lp_loss` must be signed by `Market.platform`.
+/// `pay_surplus_platform` credits that vault; the connected `owner` need not be it.
+fn platform_authority(body: &ComposeBody, owner: Pubkey) -> Result<Pubkey, StatusCode> {
+    let Some(p) = body.platform.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(owner);
+    };
+    let platform = pk(p)?;
+    if platform != owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(platform)
 }
 
 fn interval_bounds(body: &ComposeBody, family: u8) -> (i128, i128) {
@@ -339,6 +453,10 @@ pub fn mask_bytes(s: &str) -> Result<Vec<u8>, StatusCode> {
     mask_hex(s)
 }
 
+pub fn is_sell_op(op: &str) -> bool {
+    matches!(op, "sell_set" | "sell_skellam_set")
+}
+
 fn mask_hex(s: &str) -> Result<Vec<u8>, StatusCode> {
     let h = s.trim().trim_start_matches("0x");
     if h.len() % 2 != 0 {
@@ -351,6 +469,9 @@ fn mask_hex(s: &str) -> Result<Vec<u8>, StatusCode> {
 }
 
 pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
+    if is_sell_op(&body.op) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let owner = pk(&body.owner)?;
     match body.op.as_str() {
         "deposit" => Ok(client::deposit(owner, body.amount.ok_or(StatusCode::BAD_REQUEST)?)),
@@ -364,6 +485,20 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
         "set_roster" => {
             let members = roster_from(body)?;
             Ok(client::set_roster(owner, members, body.m.unwrap_or(1).max(1)))
+        }
+        "init_protocol" => {
+            let pol = official_policy()?;
+            if owner != pol.platform {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            Ok(client::init_protocol(owner, protocol_args(&pol)))
+        }
+        "set_protocol" => {
+            let pol = official_policy()?;
+            if owner != pol.platform {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            Ok(client::set_protocol(owner, protocol_args(&pol)))
         }
         "open_session" => {
             let authority = pk(body.authority.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
@@ -479,15 +614,41 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
                 body.weight_sum.unwrap_or(1),
             ))
         }
+        "pay_surplus_cover" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::pay_surplus_cover(market))
+        }
+        "pay_surplus_platform" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            let dest = match body.platform.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(p) => pk(p)?,
+                None => owner,
+            };
+            Ok(client::pay_surplus_platform(dest, market))
+        }
+        "cover_lp_loss" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            let lp = match body.trader.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(t) => pk(t)?,
+                None => owner,
+            };
+            Ok(client::cover_lp_loss(
+                platform_authority(body, owner)?,
+                market,
+                lp,
+            ))
+        }
         "init_pool" => Ok(client::init_pool(owner)),
         "fund_pool" => Ok(client::fund_pool(owner, body.amount.ok_or(StatusCode::BAD_REQUEST)?)),
         "set_tap" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
-            Ok(client::set_tap(owner, market, body.amount.unwrap_or(0)))
+            let pol = active_policy()?;
+            let cap = body.amount.unwrap_or(0).min(pol.tap_cap_max);
+            Ok(client::set_tap(owner, market, cap))
         }
         "claim_fees" | "sweep_fees" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
-            Ok(client::claim_fees(owner, market))
+            Ok(client::claim_fees(platform_authority(body, owner)?, market))
         }
         "begin_refund" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
@@ -727,6 +888,36 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             Ok(client::void_resolution(owner, market))
         }
+        "admin_submit_result" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::admin_submit_result(
+                owner,
+                market,
+                outcome_from(body),
+                hash32(body.evidence_hex.as_deref())?,
+            ))
+        }
+        "admin_void_resolution" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::admin_void_resolution(owner, market))
+        }
+        "lock_committee_bond" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::lock_committee_bond(
+                owner,
+                market,
+                active_policy()?.committee_bond,
+            ))
+        }
+        "slash_committee_bond" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            let committee = pk(body.trader.as_deref().or(body.authority.as_deref()).ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::slash_committee_bond(owner, market, committee))
+        }
+        "release_committee_bond" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::release_committee_bond(owner, market))
+        }
         "risk_open_book" | "open_book" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             Ok(client::risk_open_book(owner, market))
@@ -778,7 +969,10 @@ fn fill_set_from_body(owner: Pubkey, body: &ComposeBody) -> Result<Vec<Instructi
 }
 
 pub fn build_ixs(body: &ComposeBody) -> Result<Vec<Instruction>, StatusCode> {
-    if body.op == "buy_set" || body.op == "sell_set" {
+    if is_sell_op(&body.op) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if body.op == "buy_set" {
         return fill_set_from_body(pk(&body.owner)?, body);
     }
     Ok(vec![build(body)?])
@@ -986,20 +1180,10 @@ mod tests {
     }
 
     #[test]
-    fn sell_set_is_not_buy_set() {
+    fn sell_set_is_forbidden() {
         let owner = Pubkey::new_unique();
         let market = Pubkey::new_unique();
-        let buy = build(&ComposeBody {
-            op: "buy_set".into(),
-            owner: owner.to_string(),
-            market: Some(market.to_string()),
-            mask: Some("01".into()),
-            shares: Some(1),
-            nonce: Some(1),
-            ..Default::default()
-        })
-        .unwrap();
-        let sell = build(&ComposeBody {
+        let err = build(&ComposeBody {
             op: "sell_set".into(),
             owner: owner.to_string(),
             market: Some(market.to_string()),
@@ -1008,9 +1192,19 @@ mod tests {
             nonce: Some(1),
             ..Default::default()
         })
-        .unwrap();
-        assert_ne!(buy.data, sell.data);
-        assert_eq!(buy.program_id, sell.program_id);
+        .unwrap_err();
+        assert_eq!(err, StatusCode::FORBIDDEN);
+        let err = compose_out(&ComposeBody {
+            op: "sell_skellam_set".into(),
+            owner: owner.to_string(),
+            market: Some(market.to_string()),
+            kind: Some(0),
+            shares: Some(1),
+            nonce: Some(1),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(err, StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -1051,6 +1245,8 @@ mod tests {
             n: Some(32),
             mu: Some(2),
             sigma: Some(1),
+            close_ts: Some(1_900_000_000),
+            report_open_ts: Some(1_900_000_000),
             ..Default::default()
         })
         .unwrap();
@@ -1065,6 +1261,8 @@ mod tests {
             x_max: Some(12_000),
             mu: Some(2_400),
             sigma: Some(350),
+            close_ts: Some(1_900_000_000),
+            report_open_ts: Some(1_900_000_000),
             ..Default::default()
         })
         .unwrap();
@@ -1076,6 +1274,8 @@ mod tests {
             tag: Some("print".into()),
             members: Some(vec![owner.to_string()]),
             m: Some(1),
+            close_ts: Some(1_900_000_000),
+            report_open_ts: Some(1_900_000_000),
             ..Default::default()
         })
         .is_err());
@@ -1122,6 +1322,8 @@ mod tests {
             layout: Some(client::market::state::DIRICHLET_SIMPLEX),
             bins: Some(158),
             k: Some(2),
+            close_ts: Some(1_900_000_000),
+            report_open_ts: Some(1_900_000_000),
             ..Default::default()
         })
         .unwrap();
@@ -1133,6 +1335,8 @@ mod tests {
             layout: Some(client::market::state::DIRICHLET_SIMPLEX),
             bins: Some(158),
             k: Some(2),
+            close_ts: Some(1_900_000_000),
+            report_open_ts: Some(1_900_000_000),
             ..Default::default()
         })
         .unwrap();
@@ -1142,6 +1346,8 @@ mod tests {
             owner: owner.to_string(),
             topic: Some("ds".into()),
             n: Some(4),
+            close_ts: Some(1_900_000_000),
+            report_open_ts: Some(1_900_000_000),
             ..Default::default()
         })
         .unwrap();
@@ -1154,6 +1360,8 @@ mod tests {
             layout: Some(client::market::state::DIRICHLET_SIMPLEX),
             bins: Some(10),
             k: Some(4),
+            close_ts: Some(1_900_000_000),
+            report_open_ts: Some(1_900_000_000),
             ..Default::default()
         })
         .unwrap();
@@ -1166,6 +1374,8 @@ mod tests {
             layout: Some(client::market::state::DIRICHLET_TOP_N),
             top_n: Some(2),
             k: Some(4),
+            close_ts: Some(1_900_000_000),
+            report_open_ts: Some(1_900_000_000),
             ..Default::default()
         })
         .unwrap();
@@ -1268,5 +1478,71 @@ mod tests {
         assert_eq!(want.data, got.data);
         assert_eq!(want.program_id, got.program_id);
         assert_eq!(want.accounts.len(), got.accounts.len());
+    }
+
+    #[test]
+    fn compose_cover_ops() {
+        let owner = Pubkey::new_unique();
+        let market = Pubkey::new_unique();
+        let cover = build(&ComposeBody {
+            op: "pay_surplus_cover".into(),
+            owner: owner.to_string(),
+            market: Some(market.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cover.program_id, client::pay_surplus_cover(market).program_id);
+        let plat = build(&ComposeBody {
+            op: "pay_surplus_platform".into(),
+            owner: owner.to_string(),
+            market: Some(market.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            plat.program_id,
+            client::pay_surplus_platform(owner, market).program_id
+        );
+        let other = Pubkey::new_unique();
+        let plat_any = build(&ComposeBody {
+            op: "pay_surplus_platform".into(),
+            owner: other.to_string(),
+            platform: Some(owner.to_string()),
+            market: Some(market.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            plat_any.program_id,
+            client::pay_surplus_platform(owner, market).program_id
+        );
+        let claim = build(&ComposeBody {
+            op: "cover_lp_loss".into(),
+            owner: owner.to_string(),
+            market: Some(market.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            claim.program_id,
+            client::cover_lp_loss(owner, market, owner).program_id
+        );
+        let denied = compose_out(&ComposeBody {
+            op: "claim_fees".into(),
+            owner: other.to_string(),
+            platform: Some(owner.to_string()),
+            market: Some(market.to_string()),
+            ..Default::default()
+        });
+        assert_eq!(denied.unwrap_err(), StatusCode::FORBIDDEN);
+        let fees = build(&ComposeBody {
+            op: "claim_fees".into(),
+            owner: owner.to_string(),
+            platform: Some(owner.to_string()),
+            market: Some(market.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(fees.program_id, client::claim_fees(owner, market).program_id);
     }
 }

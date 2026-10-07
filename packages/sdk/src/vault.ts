@@ -7,16 +7,27 @@ export type UserVaultSnap = {
   available: number;
   reserved: number;
   free: number;
+  risk_pnl?: number;
+  cover_paid?: number;
   wallet_usdc: number;
   mint: "Circle SPL USDC";
 };
 
-export function decodeUserVault(data: Uint8Array): { available: number; reserved: number } | null {
+/** Borsh: disc + owner + available + reserved + bump + risk_pnl + bond + cover_paid */
+export function decodeUserVault(
+  data: Uint8Array,
+): { available: number; reserved: number; risk_pnl: number; cover_paid: number } | null {
   if (data.length < 8 + 32 + 8 + 8) return null;
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const pnlOff = 8 + 32 + 8 + 8 + 1;
+  const risk_pnl = data.length >= pnlOff + 8 ? Number(view.getBigInt64(pnlOff, true)) : 0;
+  const coverOff = pnlOff + 8 + 8;
+  const cover_paid = data.length >= coverOff + 8 ? Number(view.getBigUint64(coverOff, true)) : 0;
   return {
     available: Number(view.getBigUint64(8 + 32, true)),
     reserved: Number(view.getBigUint64(8 + 40, true)),
+    risk_pnl,
+    cover_paid,
   };
 }
 
@@ -28,6 +39,8 @@ export async function fetchUserVault(connection: Connection, owner: PublicKey): 
     available: 0,
     reserved: 0,
     free: 0,
+    risk_pnl: 0,
+    cover_paid: 0,
     wallet_usdc: 0,
     mint: "Circle SPL USDC",
   };
@@ -46,6 +59,8 @@ export async function fetchUserVault(connection: Connection, owner: PublicKey): 
     available: dec.available,
     reserved: dec.reserved,
     free,
+    risk_pnl: dec.risk_pnl,
+    cover_paid: dec.cover_paid,
     wallet_usdc,
     mint: "Circle SPL USDC",
   };

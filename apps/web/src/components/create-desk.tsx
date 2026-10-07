@@ -15,7 +15,11 @@ import {
   listCatalogTags,
   TAG_HINTS,
   listingIdHash,
+  listingImageSrc,
+  uploadListingMedia,
   marketPda,
+  fetchInfo,
+  fetchProtocol,
   type PriorSnap,
   DIRICHLET_ATOMS,
   DIRICHLET_SIMPLEX,
@@ -39,7 +43,7 @@ const FAMILY_BLURB: Record<number, { x: string; hint: string }> = {
   1: { x: "scalar print", hint: "CPI / macro. x* is the first official print. Units are percentage points." },
   2: { x: "positive scalar", hint: "Daily price. Lock price_rule off-chain; x* is the defined print. Ω > 0." },
   3: { x: "winner / top-n / vote share", hint: "Election. One family, three layouts: atoms, top-n combinations, vote-share simplex." },
-  4: { x: "YES or NO", hint: "Binary. Early YES only when the defined event has occurred." },
+  4: { x: "YES or NO", hint: "Binary. If the event occurs before close, VOID and refund — do not settle YES." },
 };
 
 const OPS = ["create_skellam", "create_gaussian", "create_lognormal", "create_dirichlet", "create_bernoulli"] as const;
@@ -134,6 +138,8 @@ export function CreateDesk() {
   const [beta, setBeta] = useState(100);
   const [closeIn, setCloseIn] = useState(86400);
   const [closeTs, setCloseTs] = useState(() => Math.floor(Date.now() / 1000) + 86400);
+  const [reportOpenTs, setReportOpenTs] = useState(() => Math.floor(Date.now() / 1000) + 86400);
+  const [committeeBond, setCommitteeBond] = useState(100);
   const [lambdaH, setLambdaH] = useState(1.4);
   const [lambdaA, setLambdaA] = useState(1.1);
   /** Dixon–Coles ρ; 0 = independent Poisson (default). */
@@ -150,18 +156,29 @@ export function CreateDesk() {
   const [topN, setTopN] = useState(1);
   const [poolAmt, setPoolAmt] = useState(0);
   const [tapCap, setTapCap] = useState(0);
+  const [tapCapMax, setTapCapMax] = useState(0);
   const [feeBps, setFeeBps] = useState(0);
   const [feeTiming, setFeeTiming] = useState(0);
+  const [reportWindowSecs, setReportWindowSecs] = useState(86_400);
+  const [challengeSecs, setChallengeSecs] = useState(3_600);
   const [market, setMarket] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [listed, setListed] = useState(false);
   const [blockedText, setBlockedText] = useState("");
+  const [sourceLocale, setSourceLocale] = useState("en");
+  const [nativeLocale, setNativeLocale] = useState("");
+  const [nativeTitle, setNativeTitle] = useState("");
+  const [nativeEvent, setNativeEvent] = useState("");
+  const [nativeDescription, setNativeDescription] = useState("");
   const [appId, setAppId] = useState(0);
   const [appStatus, setAppStatus] = useState("");
   const [preset, setPreset] = useState("us_cpi_yoy");
   const [prior, setPrior] = useState<PriorSnap | null>(null);
   const [catalogTags, setCatalogTags] = useState<string[]>([...TAG_HINTS]);
+  const [coverId, setCoverId] = useState("");
+  const [coverPreview, setCoverPreview] = useState("");
+  const [platformPk, setPlatformPk] = useState("");
 
   const op = OPS[family];
   const dirichletN =
@@ -218,6 +235,40 @@ export function CreateDesk() {
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    fetchProtocol(MARKET_API)
+      .then((p) => {
+        setFeeBps(p.fee_bps);
+        setFeeTiming(p.fee_timing);
+        setCommitteeBond(p.committee_bond);
+        setReportWindowSecs(p.report_window_secs);
+        setChallengeSecs(p.challenge_secs);
+        setTapCapMax(p.tap_cap_max ?? 0);
+        setTapCap((c) => Math.min(c, p.tap_cap_max ?? 0));
+        if (p.platform) setPlatformPk((cur) => cur || p.platform);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const id = market.trim();
+    if (!id) {
+      setPlatformPk("");
+      return;
+    }
+    let alive = true;
+    fetchInfo(MARKET_API, id)
+      .then((info) => {
+        if (alive) setPlatformPk(info.platform ?? "");
+      })
+      .catch(() => {
+        if (alive) setPlatformPk("");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [market]);
 
   useEffect(() => {
     let alive = true;
@@ -316,12 +367,24 @@ export function CreateDesk() {
   }
 
   function listingFields() {
+    const i18n: Record<string, { title: string; event: string; description: string }> = {};
+    const loc = nativeLocale.trim().replace(/_/g, "-");
+    if (loc && !/^en(-|$)/i.test(loc) && (nativeTitle.trim() || nativeEvent.trim() || nativeDescription.trim())) {
+      i18n[loc] = {
+        title: nativeTitle.trim(),
+        event: nativeEvent.trim(),
+        description: nativeDescription.trim(),
+      };
+    }
     return {
       title: title.trim(),
       tags: parseTagsInput(tagsText),
       event: event.trim(),
       description: description.trim(),
       blocked_regions: parseTagsInput(blockedText).map((r) => r.toUpperCase()),
+      source_locale: sourceLocale.trim() || "en",
+      i18n,
+      image_id: coverId,
     };
   }
 
@@ -336,10 +399,12 @@ export function CreateDesk() {
       close_in: closeIn,
       close_ts: closeTs,
       risk_lock_ts: closeTs,
+      report_open_ts: Math.max(reportOpenTs, closeTs),
+      committee_bond: Math.max(1, committeeBond),
       fee_bps: feeBps,
       fee_timing: feeTiming,
-      challenge_secs: closeIn <= 120 ? 8 : 3600,
-      report_window_secs: closeIn <= 120 ? 90 : 400,
+      challenge_secs: challengeSecs,
+      report_window_secs: reportWindowSecs,
       early_resolve: early,
       tap_cap: tapCap,
       ...listingFields(),
@@ -382,6 +447,29 @@ export function CreateDesk() {
     } catch {
       setNote("SIWS first — connect and sign in, then submit for review");
       return false;
+    }
+  }
+
+  async function onCoverFile(file: File | undefined) {
+    if (!file) {
+      setCoverId("");
+      setCoverPreview("");
+      return;
+    }
+    if (!publicKey) {
+      setNote(NEED_WALLET);
+      return;
+    }
+    if (!(await requireSiws())) return;
+    try {
+      const out = await uploadListingMedia(MARKET_API, publicKey.toBase58(), file);
+      setCoverId(out.id);
+      setCoverPreview(listingImageSrc(MARKET_API, out.url));
+      setNote("cover uploaded");
+    } catch (e) {
+      setCoverId("");
+      setCoverPreview("");
+      setNote(e instanceof Error ? e.message : "cover upload failed");
     }
   }
 
@@ -521,6 +609,14 @@ export function CreateDesk() {
       setNote(NEED_WALLET_AND_MARKET);
       return;
     }
+    if (!platformPk) {
+      setNote("Market.platform is not indexed yet — wait for the indexer, then retry.");
+      return;
+    }
+    if (publicKey.toBase58() !== platformPk) {
+      setNote(`Connect Market.platform (${platformPk}) to claim φ`);
+      return;
+    }
     setBusy(true);
     try {
       const sig = await sendSigned(connection, signTransaction, publicKey, [
@@ -529,6 +625,28 @@ export function CreateDesk() {
       setNote(`claim_fees ${sig}`);
     } catch (e) {
       setNote(e instanceof Error ? e.message : "claim_fees failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function claimPlatformSurplus() {
+    if (!publicKey || !signTransaction || !market) {
+      setNote(NEED_WALLET_AND_MARKET);
+      return;
+    }
+    if (!platformPk) {
+      setNote("Market.platform is not indexed yet — wait for the indexer, then retry.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const sig = await sendSigned(connection, signTransaction, publicKey, [
+        await compose(MARKET_API, { op: "pay_surplus_platform", owner: publicKey.toBase58(), market }),
+      ]);
+      setNote(`pay_surplus_platform ${sig}`);
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "claim S_P failed");
     } finally {
       setBusy(false);
     }
@@ -596,6 +714,16 @@ export function CreateDesk() {
               />
             </label>
             <label className="block text-[10px] uppercase text-paper/50">
+              Cover (optional, jpeg/png/webp ≤ 2 MiB)
+              <input
+                className="mt-1 w-full border border-rule bg-ink px-2 py-1 text-[12px] normal-case tracking-normal"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={(e) => void onCoverFile(e.target.files?.[0])}
+              />
+            </label>
+            {coverPreview ? <img src={coverPreview} alt="" className="max-h-32 w-full object-cover" /> : null}
+            <label className="block text-[10px] uppercase text-paper/50">
               Tags
               <input
                 className="mt-1 w-full border border-rule bg-ink px-2 py-1 text-[12px] normal-case tracking-normal"
@@ -651,7 +779,60 @@ export function CreateDesk() {
             <p className="text-[10px] normal-case leading-relaxed text-paper/40">
               Required. Write the situation traders need: fixture or print, settle rule, source, and what does
               not count (extra time, revisions, later data). This is shown on the lobby and the market page.
+              Canonical English above is what settles identity — optional locale copy below is display only.
             </p>
+            <label className="block text-[10px] uppercase text-paper/50">
+              Source locale
+              <input
+                className="mt-1 w-full border border-rule bg-ink px-2 py-1 text-[12px] normal-case tracking-normal"
+                value={sourceLocale}
+                onChange={(e) => setSourceLocale(e.target.value)}
+                placeholder="en"
+                maxLength={16}
+              />
+            </label>
+            <p className="text-[10px] normal-case leading-relaxed text-paper/40">
+              Optional native draft (BCP-47, not <code className="text-paper/70">en</code>). Lobby may show it
+              when the browser language matches; English remains the settlement copy.
+            </p>
+            <label className="block text-[10px] uppercase text-paper/50">
+              Native locale
+              <input
+                className="mt-1 w-full border border-rule bg-ink px-2 py-1 text-[12px] normal-case tracking-normal"
+                value={nativeLocale}
+                onChange={(e) => setNativeLocale(e.target.value)}
+                placeholder="zh-Hans"
+                maxLength={16}
+              />
+            </label>
+            <label className="block text-[10px] uppercase text-paper/50">
+              Native title
+              <input
+                className="mt-1 w-full border border-rule bg-ink px-2 py-1 text-[12px] normal-case tracking-normal"
+                value={nativeTitle}
+                onChange={(e) => setNativeTitle(e.target.value)}
+                maxLength={120}
+              />
+            </label>
+            <label className="block text-[10px] uppercase text-paper/50">
+              Native trading event
+              <input
+                className="mt-1 w-full border border-rule bg-ink px-2 py-1 text-[12px] normal-case tracking-normal"
+                value={nativeEvent}
+                onChange={(e) => setNativeEvent(e.target.value)}
+                maxLength={160}
+              />
+            </label>
+            <label className="block text-[10px] uppercase text-paper/50">
+              Native description
+              <textarea
+                className="mt-1 min-h-[5rem] w-full border border-rule bg-ink px-2 py-1 text-[12px] normal-case tracking-normal"
+                value={nativeDescription}
+                onChange={(e) => setNativeDescription(e.target.value)}
+                rows={3}
+                maxLength={2000}
+              />
+            </label>
           </div>
 
           <div className="mt-8 space-y-3 border border-amber/40 bg-amber/5 p-4 font-mono text-xs">
@@ -795,7 +976,7 @@ export function CreateDesk() {
             )}
             {family === 4 && (
               <label className="flex items-center gap-2 text-[11px] uppercase">
-                <input type="checkbox" checked={early} onChange={(e) => setEarly(e.target.checked)} /> early YES allowed
+                <input type="checkbox" checked={early} onChange={(e) => setEarly(e.target.checked)} /> early occurrence → VOID / refund
               </label>
             )}
             {family === 3 && (
@@ -835,12 +1016,44 @@ export function CreateDesk() {
                   if (!ts) return;
                   setCloseTs(ts);
                   setCloseIn(Math.max(1, ts - Math.floor(Date.now() / 1000)));
+                  setReportOpenTs((prev) => (prev < ts ? ts : prev));
                 }}
               />
             </label>
             <p className="text-[10px] normal-case text-paper/40">
               Locked at submit. Football = full-time whistle. CPI = first print. Review does not move this clock.
               Chain Clock only knows &quot;now&quot; and rejects create if that moment is already past.
+            </p>
+            <label className="block text-[10px] uppercase text-paper/50">
+              Committee may report from
+              <input
+                className="mt-1 w-full border border-rule bg-ink px-2 py-1"
+                type="datetime-local"
+                value={localFromUnix(reportOpenTs)}
+                onChange={(e) => {
+                  const ts = unixFromLocal(e.target.value);
+                  if (!ts) return;
+                  setReportOpenTs(Math.max(ts, closeTs));
+                }}
+              />
+            </label>
+            <p className="text-[10px] normal-case text-paper/40">
+              Required. Earliest submit_result. Must be ≥ trading close. Official print can land after the whistle.
+              The report window length is official protocol policy (not set on this form).
+            </p>
+            <label className="block text-[10px] uppercase text-paper/50">
+              Committee bond (USDC)
+              <input
+                className="mt-1 w-full border border-rule bg-ink px-2 py-1"
+                type="number"
+                min={1}
+                value={committeeBond}
+                disabled
+                readOnly
+              />
+            </label>
+            <p className="text-[10px] normal-case text-paper/40">
+              Official protocol amount. Committee locks this from unused vault margin.
             </p>
             <label className="block text-[10px] uppercase text-paper/50">
               Or seconds from now
@@ -850,8 +1063,10 @@ export function CreateDesk() {
                 value={closeIn}
                 onChange={(e) => {
                   const secs = Number(e.target.value);
+                  const ts = Math.floor(Date.now() / 1000) + Math.max(1, secs);
                   setCloseIn(secs);
-                  setCloseTs(Math.floor(Date.now() / 1000) + Math.max(1, secs));
+                  setCloseTs(ts);
+                  setReportOpenTs((prev) => (prev < ts ? ts : prev));
                 }}
               />
             </label>
@@ -863,22 +1078,23 @@ export function CreateDesk() {
                 min={0}
                 max={10000}
                 value={feeBps}
-                onChange={(e) => setFeeBps(Math.max(0, Math.min(10000, Number(e.target.value) || 0)))}
+                disabled
+                readOnly
               />
             </label>
-            <p className="text-[10px] text-paper/45">When the fee is taken. Locked at apply. Does not enter C_P.</p>
+            <p className="text-[10px] text-paper/45">Official protocol fee. Does not enter C_P.</p>
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
+                disabled
                 className={`border px-2 py-1 text-[10px] uppercase ${feeTiming === 0 ? "border-amber text-amber" : "border-rule text-paper/50"}`}
-                onClick={() => setFeeTiming(0)}
               >
                 At fill
               </button>
               <button
                 type="button"
+                disabled
                 className={`border px-2 py-1 text-[10px] uppercase ${feeTiming === 1 ? "border-amber text-amber" : "border-rule text-paper/50"}`}
-                onClick={() => setFeeTiming(1)}
               >
                 At claim
               </button>
@@ -952,7 +1168,14 @@ export function CreateDesk() {
           </div>
           <label className="mt-4 block text-[10px] uppercase text-paper/50">
             C_P tap cap (MAY be 0)
-            <input className="mt-1 w-full border border-rule bg-ink px-2 py-1" type="number" min={0} value={tapCap} onChange={(e) => setTapCap(Number(e.target.value))} />
+            <input
+              className="mt-1 w-full border border-rule bg-ink px-2 py-1"
+              type="number"
+              min={0}
+              max={tapCapMax}
+              value={tapCap}
+              onChange={(e) => setTapCap(Math.max(0, Math.min(tapCapMax, Number(e.target.value) || 0)))}
+            />
           </label>
           {appStatus !== "open" && (
             <button className="mt-4 w-full bg-amber py-2 text-ink disabled:opacity-50" disabled={busy || appStatus === "pending_review" || appStatus === "approved"} onClick={applyForReview}>
@@ -1007,15 +1230,37 @@ export function CreateDesk() {
 
       <section className="mt-10 grid gap-8 lg:grid-cols-2">
         <div className="space-y-3 border border-rule p-4 font-mono text-xs">
-          <p className="uppercase tracking-widest text-amber">Platform fees</p>
+          <p className="uppercase tracking-widest text-amber">Platform φ and S_P</p>
           <p className="text-[10px] text-paper/45">
-            φ·C_S accrues on this prediction market’s fee ledger. It never enters C_P. The platform can claim
-            into its vault at any time, then withdraw.
+            Two ledgers, both land in Market.platform’s UserVault. φ (`claim_fees`) requires the platform signer —
+            claim anytime, including VOID; it never enters T, C_P, or surplus. S_P (`pay_surplus_platform`) is this
+            market’s leftover after winners are whole (ρ=1) and after 20% cover; any wallet MAY credit it into the
+            platform vault; only the platform owner can withdraw. Haircut / draw / VOID → S_P = 0. Do not sweep
+            either into C_P. Fund C_P is a separate fund_pool action below.
           </p>
+          {platformPk ? (
+            <p className="break-all text-[10px] text-paper/50">platform {platformPk}</p>
+          ) : (
+            <p className="text-[10px] text-paper/40">Indexed platform appears after the market is on-chain.</p>
+          )}
           <input className="w-full border border-rule bg-ink px-2 py-1" placeholder="market pubkey" value={market} onChange={(e) => setMarket(e.target.value)} />
-          <button className="w-full border border-rule py-2 disabled:opacity-50" disabled={busy} onClick={claimFees}>
-            Claim fees
+          <button
+            className="w-full border border-rule py-2 disabled:opacity-50"
+            disabled={busy || !publicKey || !market || !platformPk || publicKey.toBase58() !== platformPk}
+            onClick={claimFees}
+          >
+            Claim fees (φ)
           </button>
+          <button
+            className="w-full border border-amber py-2 text-amber disabled:opacity-50"
+            disabled={busy || !publicKey || !market || !platformPk}
+            onClick={claimPlatformSurplus}
+          >
+            Claim S_P
+          </button>
+          {note && /claim_fees|pay_surplus_platform|claim S_P|φ|platform/i.test(note) && (
+            <p className={`text-[10px] ${isErrNote(note) ? "text-rust" : "text-paper/60"}`}>{note}</p>
+          )}
         </div>
       </section>
 
@@ -1024,14 +1269,21 @@ export function CreateDesk() {
           <p className="uppercase tracking-widest text-amber">C_P pool</p>
           <p className="text-[10px] text-paper/45">
             One protocol pool. Per-market tap is a cap, not a reserved pot. Drawn only if L &gt; R_net.
-            Fees do not fund this pool.
+            Fees do not fund this pool. Claiming φ or S_P does not move cash here.
           </p>
           <input className="w-full border border-rule bg-ink px-2 py-1" type="number" value={poolAmt} onChange={(e) => setPoolAmt(Number(e.target.value))} />
           <button className="w-full border border-rule py-2 disabled:opacity-50" disabled={busy} onClick={fundPool}>
             Fund C_P
           </button>
           <input className="w-full border border-rule bg-ink px-2 py-1" placeholder="market pubkey for tap" value={market} onChange={(e) => setMarket(e.target.value)} />
-          <input className="w-full border border-rule bg-ink px-2 py-1" type="number" value={tapCap} onChange={(e) => setTapCap(Number(e.target.value))} />
+          <input
+            className="w-full border border-rule bg-ink px-2 py-1"
+            type="number"
+            min={0}
+            max={tapCapMax}
+            value={tapCap}
+            onChange={(e) => setTapCap(Math.max(0, Math.min(tapCapMax, Number(e.target.value) || 0)))}
+          />
           <button className="w-full border border-rule py-2 disabled:opacity-50" disabled={busy} onClick={setBoardTap}>
             Set market tap cap
           </button>

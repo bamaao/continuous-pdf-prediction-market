@@ -527,6 +527,25 @@
     {
       "kind": "auto",
       "evidence": [
+        "programs/resolution/src/machine.rs",
+        "programs/market/src/lib.rs",
+        "apps/web/src/components/create-desk.tsx"
+      ],
+      "id": "FR-RES-06"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "programs/resolution/src/machine.rs",
+        "programs/resolution/src/lib.rs",
+        "programs/vault/src/lib.rs",
+        "apps/web/src/components/result-form.tsx"
+      ],
+      "id": "FR-RES-07"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
         "crates/math/src/settle.rs",
         "programs/vault/src/settle.rs",
         "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
@@ -559,6 +578,15 @@
         "tests/settle-flow/tests/cpi_market_rho_haircut.rs"
       ],
       "id": "FR-SET-04"
+    },
+    {
+      "kind": "auto",
+      "evidence": [
+        "crates/math/src/settle.rs",
+        "programs/vault/src/settle.rs",
+        "crates/services/readpath/src/api.rs"
+      ],
+      "id": "FR-SET-12"
     },
     {
       "kind": "auto",
@@ -721,6 +749,7 @@
     {
       "kind": "auto",
       "evidence": [
+        "crates/services/readpath/tests/http_quote.rs",
         "scripts/phase6-playwright.py",
         "scripts/phase6-flow-playwright.py",
         "docs/srs11-manual.md"

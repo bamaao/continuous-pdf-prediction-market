@@ -22,6 +22,8 @@ const DROP = new Set([
   "event",
   "description",
   "blocked_regions",
+  "source_locale",
+  "i18n",
 ]);
 
 export async function openBoardAsOwner(args: {
@@ -38,6 +40,9 @@ export async function openBoardAsOwner(args: {
     description: string;
     event: string;
     blocked_regions?: string[];
+    source_locale?: string;
+    i18n?: Record<string, { title?: string; event?: string; description?: string }>;
+    image_id?: string;
   };
 }): Promise<{ market: string; sig: string; created: boolean }> {
   const owner = args.owner.toBase58();
@@ -131,6 +136,9 @@ export async function openBoardAsOwner(args: {
     description: args.listing.description,
     event: args.listing.event,
     blocked_regions: args.listing.blocked_regions ?? [],
+    source_locale: args.listing.source_locale ?? "en",
+    i18n: args.listing.i18n ?? {},
+    image_id: args.listing.image_id ?? "",
   });
   return { market, sig, created };
 }

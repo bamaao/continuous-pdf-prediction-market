@@ -1,4 +1,4 @@
-import { fetchOpsStatus, fetchPool, listingHeadline } from "@cpm/sdk";
+import { fetchOpsStatus, fetchPool, listMarketsPage, listingHeadline } from "@cpm/sdk";
 import { RiskTape } from "@/components/risk-tape";
 import { MARKET_API } from "@/lib/env";
 
@@ -21,8 +21,16 @@ export default async function OpsPage() {
     withdraw_disabled: true,
   };
   let pool = { c_p_pool: 0, boards: [] as { market: string; title?: string; category?: string; c_m: number; c_r: number; c_p_board?: number; c_p_alloc?: number }[] };
+  let tape: Awaited<ReturnType<typeof listMarketsPage>>["items"] = [];
   try {
-    [ops, pool] = await Promise.all([fetchOpsStatus(MARKET_API), fetchPool(MARKET_API)]);
+    const [opsRow, poolRow, peaks] = await Promise.all([
+      fetchOpsStatus(MARKET_API),
+      fetchPool(MARKET_API),
+      listMarketsPage(MARKET_API, { page: 1, limit: 50, sort: "peak", status: 1 }).catch(() => null),
+    ]);
+    ops = opsRow;
+    pool = poolRow;
+    tape = peaks?.items ?? [];
   } catch (e) {
     err = e instanceof Error ? e.message : "ops unreachable";
   }
@@ -40,6 +48,8 @@ export default async function OpsPage() {
         <Stat k="With coverage" v={String(ops.boards_with_coverage)} />
         <Stat k="C_R total" v={`${ops.c_r_total} USDC`} />
         <Stat k="C_P pool" v={`${ops.c_p_pool} USDC`} />
+        <Stat k="LP cover pool" v={`${ops.cover_pool ?? pool.cover_pool ?? 0} USDC`} />
+        <Stat k="Cover" v="platform reimburses; vault books Π and cover paid" />
         <Stat k="Fees" v="platform ledger, not C_P" />
         <Stat k="Vault mint" v={ops.vault_mint} />
         <Stat
@@ -48,7 +58,7 @@ export default async function OpsPage() {
         />
         <Stat k="Withdraw" v="disabled" />
       </dl>
-      <RiskTape limit={50} />
+      <RiskTape limit={50} initial={tape} />
       <p className="mt-8 font-mono text-[11px] uppercase tracking-widest text-amber">Per-market C_P caps</p>
       <ul className="mt-3 divide-y divide-rule border border-rule font-mono text-[11px]">
         {pool.boards.map((b) => (

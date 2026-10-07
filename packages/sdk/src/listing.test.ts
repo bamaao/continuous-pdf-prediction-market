@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { defaultDescription, defaultTags, defaultTitle, familyFallbackTitle, formatTags, listingHeadline, parseTagsInput } from "./listing";
+import {
+  canonicalListing,
+  defaultDescription,
+  defaultTags,
+  defaultTitle,
+  familyFallbackTitle,
+  formatTags,
+  listingHeadline,
+  parseTagsInput,
+} from "./listing";
 
 describe("listing identity", () => {
   it("keeps CPI wording on the create preset only", () => {
@@ -22,5 +31,22 @@ describe("listing identity", () => {
     expect(formatTags(["football", "epl"])).toBe("football · epl");
     expect(defaultTags(0)).toEqual(["football"]);
     expect(defaultDescription(0)).toContain("full-time");
+  });
+
+  it("canonicalListing prefers English fields over a translated desk view", () => {
+    const canon = canonicalListing({
+      market: "M",
+      title: "美国 CPI",
+      title_en: "US CPI YoY",
+      event: "首次打印",
+      event_en: "US CPI YoY first print",
+      description: "中文说明",
+      description_en: "First official print.",
+      is_translation: true,
+      locale: "zh-Hans",
+    });
+    expect(canon.title).toBe("US CPI YoY");
+    expect(canon.event).toBe("US CPI YoY first print");
+    expect(canon.description).toBe("First official print.");
   });
 });

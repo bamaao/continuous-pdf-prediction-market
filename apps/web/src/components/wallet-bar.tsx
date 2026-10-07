@@ -27,6 +27,11 @@ export function WalletBar() {
   const [busy, setBusy] = useState("");
   const [meta, setMeta] = useState<SessionMeta | null>(null);
   const [browse, setBrowse] = useState<{ phantom: string; solflare: string } | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     const injected = readInjectedWallet(window);
@@ -230,8 +235,12 @@ export function WalletBar() {
             {OPEN_IN_SOLFLARE}
           </a>
         </>
-      ) : (
+      ) : mounted ? (
         <WalletMultiButton />
+      ) : (
+        <button className="wallet-adapter-button wallet-adapter-button-trigger" type="button" disabled>
+          Select Wallet
+        </button>
       )}
       {connected && siws !== "on" && (
         <button className="border border-amber px-2 py-1 font-mono text-[11px] uppercase" onClick={signIn}>

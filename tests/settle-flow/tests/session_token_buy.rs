@@ -67,6 +67,22 @@ async fn send(ctx: &mut ProgramTestContext, ixs: Vec<Instruction>, extra: &[&Key
     ctx.banks_client.process_transaction(tx).await.unwrap();
 }
 
+async fn send_err(ctx: &mut ProgramTestContext, ixs: Vec<Instruction>, extra: &[&Keypair]) -> String {
+    let payer = ctx.payer.insecure_clone();
+    let blockhash = ctx.banks_client.get_latest_blockhash().await.unwrap();
+    let mut signers: Vec<&Keypair> = vec![&payer];
+    signers.extend_from_slice(extra);
+    let tx = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &signers, blockhash);
+    format!("{:?}", ctx.banks_client.process_transaction(tx).await.unwrap_err())
+}
+
+fn sells_closed(msg: &str) {
+    assert!(
+        msg.contains("SellsClosed") || msg.contains("Custom(6031)"),
+        "want SellsClosed, got {msg}"
+    );
+}
+
 fn ata(owner: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
         &[
@@ -97,6 +113,8 @@ fn create_common(owner: Pubkey, id_hash: [u8; 32], n: u16) -> market::state::Cre
         gamma_bps: 1_000,
         alpha_r_bps: 7_000,
         platform: owner,
+        report_open_ts: 1_000,
+        committee_bond: 1,
     }
 }
 
@@ -132,6 +150,24 @@ async fn fund_owner(ctx: &mut ProgramTestContext, mint_auth: &Keypair, owner: &K
     send(
         ctx,
         vec![client::init_committee(owner.pubkey(), vec![owner.pubkey()], 1)],
+        &[owner],
+    )
+    .await;
+    send(
+        ctx,
+        vec![client::init_protocol(
+            owner.pubkey(),
+            market::state::ProtocolArgs {
+                platform: owner.pubkey(),
+                fee_bps: 0,
+                fee_timing: 0,
+                report_window_secs: 400,
+                challenge_secs: 20,
+                committee_bond: 1,
+                tap_cap_max: 0,
+                alpha_r_bps: 7_000,
+            },
+        )],
         &[owner],
     )
     .await;
@@ -285,7 +321,7 @@ async fn session_token_v2_then_sell_set() {
         &[&session],
     )
     .await;
-    send(
+    let msg = send_err(
         &mut ctx,
         vec![client::sell_set_session(
             owner.pubkey(),
@@ -298,11 +334,12 @@ async fn session_token_v2_then_sell_set() {
         &[&session],
     )
     .await;
+    sells_closed(&msg);
 
     let pos = client::position_pda(&market_pda, &owner.pubkey(), &market::ids::set_hash(&mask));
     let data = ctx.banks_client.get_account(pos).await.unwrap().unwrap().data;
     let decoded = client::decode_position(&data).expect("position");
-    assert!(decoded.q > 0, "partial sell must leave residual shares");
+    assert_eq!(decoded.q, q(5), "rejected sell must leave the buy intact");
 }
 
 #[tokio::test]
@@ -351,7 +388,7 @@ async fn session_token_v2_then_skellam_buy_sell() {
         &[&session],
     )
     .await;
-    send(
+    let msg = send_err(
         &mut ctx,
         vec![client::sell_skellam_set_session(
             owner.pubkey(),
@@ -366,9 +403,10 @@ async fn session_token_v2_then_skellam_buy_sell() {
         &[&session],
     )
     .await;
+    sells_closed(&msg);
 
     let pos = client::skellam_position(&market_pda, &owner.pubkey(), 0, 0, 0);
     let data = ctx.banks_client.get_account(pos).await.unwrap().unwrap().data;
     let decoded = client::decode_position(&data).expect("skellam position");
-    assert!(decoded.q > 0, "session skellam fill/sell must leave residual");
+    assert_eq!(decoded.q, q(3), "rejected skellam sell must leave the buy intact");
 }

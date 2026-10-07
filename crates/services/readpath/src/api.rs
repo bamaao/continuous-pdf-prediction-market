@@ -3,8 +3,9 @@
 use crate::application::CatalogService;
 use crate::compose::{compose_out, ComposeBody};
 use crate::domain::{
-    normalize_tags, region_blocked, valid_pubkey, CatalogTag, Comment, DomainError, Fill, Listing, ListingApplication,
-    ReviewLog, APP_APPROVED, APP_DUPLICATE, APP_PENDING, APP_REJECTED,
+    accept_language_chain, i18n_from_json, i18n_to_json, normalize_i18n, normalize_source_locale, normalize_tags,
+    pick_display, region_blocked, valid_pubkey, CatalogTag, Comment, DomainError, Fill, I18nMap, Listing,
+    ListingApplication, ReviewLog, APP_APPROVED, APP_DUPLICATE, APP_PENDING, APP_REJECTED,
 };
 use crate::peak::{peak_risk, PeakRisk};
 use crate::store::{ApplicationRow, CommentRow, FillMeta, ListingMeta, MarketProj, MemoryStore, ReviewLogRow};
@@ -115,12 +116,20 @@ pub struct MarketListItem {
     pub l_max_usdc: u64,
     pub c_r: u64,
     pub title: String,
+    pub title_en: String,
     pub tags: Vec<String>,
     pub category: String,
     pub topic: String,
     pub tag: String,
     pub description: String,
+    pub description_en: String,
     pub event: String,
+    pub event_en: String,
+    pub locale: String,
+    pub is_translation: bool,
+    pub source_locale: String,
+    pub i18n: I18nMap,
+    pub image_url: String,
     pub close_ts: i64,
     pub risk_lock_ts: i64,
     pub report_open_ts: i64,
@@ -155,13 +164,49 @@ pub struct ListQ {
     #[serde(default)]
     pub q: String,
     pub family: Option<u8>,
-    pub status: Option<u8>,
+    /// Omitted → Trading (1). `all` / `-1` lists every status.
+    pub status: Option<String>,
     pub category: Option<String>,
     pub tag: Option<String>,
+    /// Force display locale (`en` for canonical). Overrides Accept-Language when set.
+    pub locale: Option<String>,
+    /// Default: `stake_usdc` desc then `slot` desc. `peak` is highest-risk tape only.
+    #[serde(default)]
+    pub sort: String,
     #[serde(default = "page_one")]
     pub page: u32,
     #[serde(default = "limit_default")]
     pub limit: u32,
+}
+
+fn preferred_locales(headers: &HeaderMap, override_locale: Option<&str>) -> Vec<String> {
+    if let Some(raw) = override_locale.map(str::trim).filter(|s| !s.is_empty()) {
+        if raw.eq_ignore_ascii_case("en") || raw.to_ascii_lowercase().starts_with("en-") {
+            return vec!["en".into()];
+        }
+        let mut out = vec![raw.to_string()];
+        if let Some((parent, _)) = raw.split_once('-') {
+            out.push(parent.to_string());
+        }
+        return out;
+    }
+    let header = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    accept_language_chain(header)
+}
+
+fn listing_i18n(meta: &ListingMeta) -> I18nMap {
+    i18n_from_json(&meta.i18n_json)
+}
+
+fn parse_i18n_body(raw: Option<serde_json::Value>) -> Result<I18nMap, StatusCode> {
+    let Some(v) = raw.filter(|v| !v.is_null()) else {
+        return Ok(I18nMap::new());
+    };
+    let map: I18nMap = serde_json::from_value(v).map_err(|_| StatusCode::BAD_REQUEST)?;
+    normalize_i18n(map).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
 fn page_one() -> u32 {
@@ -172,6 +217,19 @@ fn limit_default() -> u32 {
     20
 }
 
+/// Clamp `page` onto the last window so a stale `?page=` does not render an empty catalog.
+fn page_window(total: u64, page: u32, limit: u32) -> (u32, u32, u32, usize) {
+    let limit = limit.clamp(1, 100);
+    let pages = if total == 0 {
+        1
+    } else {
+        ((total + u64::from(limit) - 1) / u64::from(limit)) as u32
+    };
+    let page = page.max(1).min(pages);
+    let start = (u64::from(page.saturating_sub(1)).saturating_mul(u64::from(limit))) as usize;
+    (page, limit, pages, start)
+}
+
 fn family_label(family: u8) -> &'static str {
     match family {
         0 => "skellam",
@@ -180,6 +238,15 @@ fn family_label(family: u8) -> &'static str {
         3 => "dirichlet",
         4 => "bernoulli",
         _ => "unknown",
+    }
+}
+
+/// `None` = no status filter. Default (omitted query) is Trading.
+fn catalog_status_filter(raw: &Option<String>) -> Option<u8> {
+    match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => Some(1),
+        Some(s) if s.eq_ignore_ascii_case("all") || s == "-1" => None,
+        Some(s) => s.parse::<u8>().ok().or(Some(1)),
     }
 }
 
@@ -199,7 +266,7 @@ fn market_matches(m: &crate::store::MarketProj, listing: Option<&ListingMeta>, q
             return false;
         }
     }
-    if let Some(s) = q.status {
+    if let Some(s) = catalog_status_filter(&q.status) {
         if m.status != s {
             return false;
         }
@@ -226,6 +293,16 @@ fn market_matches(m: &crate::store::MarketProj, listing: Option<&ListingMeta>, q
     let tag = listing.map(|l| l.tag.to_ascii_lowercase()).unwrap_or_default();
     let description = listing.map(|l| l.description.to_ascii_lowercase()).unwrap_or_default();
     let event = listing.map(|l| l.event.to_ascii_lowercase()).unwrap_or_default();
+    let i18n_hay = listing
+        .map(|l| {
+            listing_i18n(l)
+                .values()
+                .flat_map(|c| [c.title.clone(), c.event.clone(), c.description.clone()])
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
     m.market.to_ascii_lowercase().contains(&needle)
         || family_label(m.family).contains(needle.as_str())
         || status_label(m.status).contains(needle.as_str())
@@ -235,6 +312,7 @@ fn market_matches(m: &crate::store::MarketProj, listing: Option<&ListingMeta>, q
         || tag.contains(&needle)
         || description.contains(&needle)
         || event.contains(&needle)
+        || i18n_hay.contains(&needle)
 }
 
 fn display_title(listing: &ListingMeta, family: u8) -> String {
@@ -615,7 +693,24 @@ fn final_result_of(res: Option<&crate::store::ResolutionRow>) -> String {
     }
 }
 
-fn to_list_item(m: crate::store::MarketProj, listing: ListingMeta, res: Option<crate::store::ResolutionRow>) -> MarketListItem {
+fn report_open_of(m: &crate::store::MarketProj, res: Option<&crate::store::ResolutionRow>, close_ts: i64) -> i64 {
+    if m.report_open_ts > 0 {
+        return m.report_open_ts;
+    }
+    if let Some(r) = res {
+        if r.report_open_ts > 0 {
+            return r.report_open_ts;
+        }
+    }
+    close_ts
+}
+
+fn to_list_item(
+    m: crate::store::MarketProj,
+    listing: ListingMeta,
+    res: Option<crate::store::ResolutionRow>,
+    preferred: &[String],
+) -> MarketListItem {
     let book = m.book();
     let c_max = book.c_max_usdc();
     let l = if m.board_phase >= 1 { m.liability } else { book.l_max_usdc() };
@@ -626,7 +721,10 @@ fn to_list_item(m: crate::store::MarketProj, listing: ListingMeta, res: Option<c
     } else {
         res.as_ref().map(|r| r.close_ts).unwrap_or(0)
     };
-    let title = display_title(&listing, m.family);
+    let report_open_ts = report_open_of(&m, res.as_ref(), close_ts);
+    let title_en = display_title(&listing, m.family);
+    let i18n = listing_i18n(&listing);
+    let disp = pick_display(&title_en, &listing.event, &listing.description, &i18n, preferred);
     let abnormal = abnormal_of(&m, res.as_ref());
     let final_result = final_result_of(res.as_ref());
     let liability = if m.board_phase >= 1 { m.liability } else { 0 };
@@ -641,16 +739,28 @@ fn to_list_item(m: crate::store::MarketProj, listing: ListingMeta, res: Option<c
         stake_usdc: m.stake_usdc,
         l_max_usdc: book.l_max_usdc(),
         c_r: m.c_r,
-        title,
+        title: disp.title,
+        title_en,
         tags: listing.resolved_tags(),
         category: listing.resolved_tags().first().cloned().unwrap_or_default(),
         topic: listing.topic,
         tag: listing.tag,
-        description: listing.description,
-        event: listing.event,
+        description: disp.description,
+        description_en: listing.description,
+        event: disp.event,
+        event_en: listing.event,
+        locale: disp.locale,
+        is_translation: disp.is_translation,
+        source_locale: if listing.source_locale.trim().is_empty() {
+            "en".into()
+        } else {
+            listing.source_locale
+        },
+        i18n,
+        image_url: crate::media::image_url(&listing.image_id),
         close_ts,
         risk_lock_ts: m.risk_lock_ts,
-        report_open_ts: close_ts,
+        report_open_ts,
         extensions,
         abnormal,
         final_result,
@@ -709,6 +819,11 @@ async fn resolution_one(State(st): State<AppState>, Path(market): Path<String>) 
         "challenged": row.challenged,
         "final_outcome": row.final_outcome,
         "evidence_hash": row.evidence_hash,
+        "slash_due": row.slash_due,
+        "report_open_ts": row.report_open_ts,
+        "bond_holder": row.bond_holder,
+        "bond_locked": row.bond_locked,
+        "bond_slashed": row.bond_slashed,
         "has_proposed": row.proposer != zero,
         "has_challenged": row.challenger != zero,
         "has_final": row.phase == 3,
@@ -985,10 +1100,7 @@ async fn owner_positions(
     let paid_usdc = rows.iter().map(|p| p.paid_usdc).sum();
     let net_claimed = rows.iter().filter_map(|p| p.net_usdc).sum();
     let total = rows.len() as u64;
-    let limit = q.limit.clamp(1, 100);
-    let page = q.page.max(1);
-    let pages = if total == 0 { 1 } else { ((total + u64::from(limit) - 1) / u64::from(limit)) as u32 };
-    let start = (u64::from(page.saturating_sub(1)).saturating_mul(u64::from(limit))) as usize;
+    let (page, limit, pages, start) = page_window(total, q.page, q.limit);
     let items = rows.into_iter().skip(start).take(limit as usize).collect();
     Json(OwnerPositionsPage {
         owner,
@@ -1019,6 +1131,7 @@ async fn list_markets(
 ) -> Result<impl IntoResponse, StatusCode> {
     require_index_fresh(&st)?;
     let country = request_country(&headers);
+    let preferred = preferred_locales(&headers, q.locale.as_deref());
     let mut rows: Vec<_> = st
         .store
         .list()
@@ -1030,16 +1143,24 @@ async fn list_markets(
                 && market_matches(m, listing.as_ref(), &q)
         })
         .collect();
-    rows.sort_by(|a, b| b.slot.cmp(&a.slot).then_with(|| a.market.cmp(&b.market)));
-    let total = rows.len() as u64;
-    let limit = q.limit.clamp(1, 100);
-    let page = q.page.max(1);
-    let pages = if total == 0 {
-        1
+    if q.sort.eq_ignore_ascii_case("peak") || q.sort.eq_ignore_ascii_case("peak_risk") {
+        rows.sort_by(|a, b| {
+            peak_risk(b)
+                .payout_usdc
+                .cmp(&peak_risk(a).payout_usdc)
+                .then_with(|| b.slot.cmp(&a.slot))
+                .then_with(|| a.market.cmp(&b.market))
+        });
     } else {
-        ((total + u64::from(limit) - 1) / u64::from(limit)) as u32
-    };
-    let start = (u64::from(page.saturating_sub(1)).saturating_mul(u64::from(limit))) as usize;
+        rows.sort_by(|a, b| {
+            b.stake_usdc
+                .cmp(&a.stake_usdc)
+                .then_with(|| b.slot.cmp(&a.slot))
+                .then_with(|| a.market.cmp(&b.market))
+        });
+    }
+    let total = rows.len() as u64;
+    let (page, limit, pages, start) = page_window(total, q.page, q.limit);
     let items = rows
         .into_iter()
         .skip(start)
@@ -1047,7 +1168,7 @@ async fn list_markets(
         .map(|m| {
             let res = st.store.resolution_of(&m.market);
             let listing = st.store.listing_of(&m.market).unwrap_or_default();
-            to_list_item(m, listing, res)
+            to_list_item(m, listing, res, &preferred)
         })
         .collect();
     Ok(Json(MarketListPage {
@@ -1057,7 +1178,7 @@ async fn list_markets(
         pages,
         q: q.q,
         family: q.family,
-        status: q.status,
+        status: catalog_status_filter(&q.status),
         category: q.category,
         tag: q.tag,
         items,
@@ -1164,12 +1285,20 @@ async fn preview_one(
 pub struct InfoJson {
     pub market: String,
     pub title: String,
+    pub title_en: String,
     pub tags: Vec<String>,
     pub category: String,
     pub topic: String,
     pub tag: String,
     pub description: String,
+    pub description_en: String,
     pub event: String,
+    pub event_en: String,
+    pub locale: String,
+    pub is_translation: bool,
+    pub source_locale: String,
+    pub i18n: I18nMap,
+    pub image_url: String,
     pub close_ts: i64,
     pub risk_lock_ts: i64,
     pub report_open_ts: i64,
@@ -1204,6 +1333,7 @@ pub struct InfoJson {
     pub c_p_pool: u64,
     pub peak_risk: PeakRisk,
     pub cells: Vec<PdfCell>,
+    pub platform: String,
 }
 
 async fn info_one(
@@ -1220,26 +1350,43 @@ async fn info_one(
     let p = book.pdf();
     let cells = pdf_cells(&p, &book.state.exposure);
     let listing = st.store.listing_of(&market).unwrap_or_default();
+    let preferred = preferred_locales(&headers, None);
+    let i18n = listing_i18n(&listing);
+    let title_en = display_title(&listing, row.family);
+    let disp = pick_display(&title_en, &listing.event, &listing.description, &i18n, &preferred);
     let res = st.store.resolution_of(&market);
     let close_ts = if row.close_ts > 0 {
         row.close_ts
     } else {
         res.as_ref().map(|r| r.close_ts).unwrap_or(0)
     };
+    let report_open_ts = report_open_of(&row, res.as_ref(), close_ts);
     let c_max = book.c_max_usdc();
     let l = if row.board_phase >= 1 { row.liability } else { book.l_max_usdc() };
     Ok(Json(InfoJson {
         market,
-        title: display_title(&listing, row.family),
+        title: disp.title,
+        title_en,
         tags: listing.resolved_tags(),
         category: listing.resolved_tags().first().cloned().unwrap_or_default(),
         topic: listing.topic,
         tag: listing.tag,
-        description: listing.description,
-        event: listing.event,
+        description: disp.description,
+        description_en: listing.description,
+        event: disp.event,
+        event_en: listing.event,
+        locale: disp.locale,
+        is_translation: disp.is_translation,
+        source_locale: if listing.source_locale.trim().is_empty() {
+            "en".into()
+        } else {
+            listing.source_locale
+        },
+        i18n,
+        image_url: crate::media::image_url(&listing.image_id),
         close_ts,
         risk_lock_ts: row.risk_lock_ts,
-        report_open_ts: close_ts,
+        report_open_ts,
         extensions: res.as_ref().map(|r| r.extensions).unwrap_or(0),
         abnormal: abnormal_of(&row, res.as_ref()),
         final_result: final_result_of(res.as_ref()),
@@ -1271,6 +1418,7 @@ async fn info_one(
         c_p_pool: st.store.pool_available(),
         peak_risk: peak_risk(&row),
         cells,
+        platform: row.platform.clone(),
     }))
 }
 
@@ -1351,10 +1499,7 @@ async fn list_auctions(State(st): State<AppState>, Query(q): Query<ListQ>, heade
         .collect();
     rows.sort_by(|a, b| b.c_r.cmp(&a.c_r).then_with(|| a.market.cmp(&b.market)));
     let total = rows.len() as u64;
-    let limit = q.limit.clamp(1, 100);
-    let page = q.page.max(1);
-    let pages = if total == 0 { 1 } else { ((total + u64::from(limit) - 1) / u64::from(limit)) as u32 };
-    let start = (u64::from(page.saturating_sub(1)).saturating_mul(u64::from(limit))) as usize;
+    let (page, limit, pages, start) = page_window(total, q.page, q.limit);
     let items: Vec<_> = rows
         .into_iter()
         .skip(start)
@@ -1372,8 +1517,10 @@ async fn list_auctions(State(st): State<AppState>, Query(q): Query<ListQ>, heade
                 "tag": listing.tag,
                 "description": listing.description,
                 "event": listing.event,
+                "image_url": crate::media::image_url(&listing.image_id),
                 "close_ts": m.close_ts,
                 "c_r": m.c_r,
+                "stake_usdc": m.stake_usdc,
                 "l_max_usdc": m.book().l_max_usdc(),
                 "coverage_bps": quote::q_bps(m.book().coverage()),
                 "peak_risk": peak_risk(&m),
@@ -1409,10 +1556,10 @@ async fn layers_one(State(st): State<AppState>, Path(market): Path<String>) -> R
             "attachment": 0,
             "remaining": row.c_r.max(10),
             "unit_premium": 1,
-            "gamma_bps": 1000,
+            "gamma_bps": 0,
             "quotes": standing.iter().filter(|q| q.layer_id == 1).count(),
             "filled": 0,
-            "thickness": row.c_r.max(10),
+            "thickness": 0,
         })]
     } else {
         indexed
@@ -1427,9 +1574,9 @@ async fn layers_one(State(st): State<AppState>, Path(market): Path<String>) -> R
                 serde_json::json!({
                     "id": l.layer_id,
                     "attachment": l.attachment,
-                    "remaining": l.thickness.saturating_sub(l.filled),
+                    "remaining": l.filled,
                     "unit_premium": best,
-                    "gamma_bps": 1000,
+                    "gamma_bps": 0,
                     "quotes": l.quote_count,
                     "filled": l.filled,
                     "thickness": l.thickness,
@@ -1494,6 +1641,12 @@ struct ListingBody {
     event: String,
     #[serde(default)]
     blocked_regions: Vec<String>,
+    #[serde(default)]
+    source_locale: String,
+    #[serde(default)]
+    i18n: Option<serde_json::Value>,
+    #[serde(default)]
+    image_id: String,
 }
 
 fn tags_from_body(body: &ListingBody) -> Result<Vec<String>, StatusCode> {
@@ -1506,6 +1659,18 @@ fn tags_from_body(body: &ListingBody) -> Result<Vec<String>, StatusCode> {
     normalize_tags(raw).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
+fn normalize_image_id(raw: &str) -> Result<String, StatusCode> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(String::new());
+    }
+    if crate::media::valid_media_id(t) {
+        Ok(t.to_string())
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
 async fn put_listing(State(st): State<AppState>, Json(body): Json<ListingBody>) -> Result<impl IntoResponse, StatusCode> {
     let market = body.market.trim();
     let title = body.title.trim();
@@ -1515,17 +1680,82 @@ async fn put_listing(State(st): State<AppState>, Json(body): Json<ListingBody>) 
     if !listing_write_allowed(&st, market, body.topic.trim(), body.tag.trim()) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let tags = tags_from_body(&body)?;
-    let listing = Listing::new(
-        market,
-        title,
-        tags,
-        body.topic.trim(),
-        body.tag.trim(),
-        body.description.trim(),
-        body.event.trim(),
-    )
-    .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let existing = st.store.listing_of(market);
+    // First write after OPEN may seed English; later writes freeze it (FR-UI-48).
+    let locked = listing_canonical_locked(&st, market) && existing.is_some();
+    let (title, event, description, tags, topic, tag, blocked_regions, source_locale, i18n) = if locked {
+        let prev = existing.as_ref().expect("locked implies listing");
+        if !same_text(title, &prev.title)
+            || !same_text(body.event.trim(), &prev.event)
+            || !same_text(body.description.trim(), &prev.description)
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        let tags = if body.tags.is_empty() && body.category.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()).is_none()
+        {
+            prev.resolved_tags()
+        } else {
+            tags_from_body(&body)?
+        };
+        let topic = if body.topic.trim().is_empty() {
+            prev.topic.clone()
+        } else {
+            body.topic.trim().to_string()
+        };
+        let tag = if body.tag.trim().is_empty() {
+            prev.tag.clone()
+        } else {
+            body.tag.trim().to_string()
+        };
+        let blocked_regions = if body.blocked_regions.is_empty() {
+            prev.blocked_regions.clone()
+        } else {
+            body.blocked_regions.clone()
+        };
+        let source_locale = if body.source_locale.trim().is_empty() {
+            normalize_source_locale(&prev.source_locale).map_err(|_| StatusCode::BAD_REQUEST)?
+        } else {
+            normalize_source_locale(&body.source_locale).map_err(|_| StatusCode::BAD_REQUEST)?
+        };
+        let i18n = match body.i18n.clone() {
+            None => listing_i18n(prev),
+            Some(v) => parse_i18n_body(Some(v))?,
+        };
+        (
+            prev.title.clone(),
+            prev.event.clone(),
+            prev.description.clone(),
+            tags,
+            topic,
+            tag,
+            blocked_regions,
+            source_locale,
+            i18n,
+        )
+    } else {
+        (
+            title.to_string(),
+            body.event.trim().to_string(),
+            body.description.trim().to_string(),
+            tags_from_body(&body)?,
+            body.topic.trim().to_string(),
+            body.tag.trim().to_string(),
+            body.blocked_regions.clone(),
+            normalize_source_locale(&body.source_locale).map_err(|_| StatusCode::BAD_REQUEST)?,
+            parse_i18n_body(body.i18n.clone())?,
+        )
+    };
+    let listing = Listing::new(market, title.clone(), tags, topic, tag, description.clone(), event.clone())
+        .and_then(|l| l.with_locale(source_locale.clone(), i18n.clone()))
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .with_image({
+            let from_body = normalize_image_id(&body.image_id)?;
+            if from_body.is_empty() {
+                existing.as_ref().map(|p| p.image_id.clone()).unwrap_or_default()
+            } else {
+                from_body
+            }
+        });
     st.catalog
         .put_listing(&listing)
         .await
@@ -1540,15 +1770,23 @@ async fn put_listing(State(st): State<AppState>, Json(body): Json<ListingBody>) 
             tag: listing.tag,
             description: listing.description,
             event: listing.event,
-            blocked_regions: body.blocked_regions.clone(),
+            blocked_regions,
+            source_locale: listing.source_locale.clone(),
+            i18n_json: i18n_to_json(&listing.i18n),
+            image_id: listing.image_id.clone(),
         },
     );
     Ok(Json(serde_json::json!({
         "ok": true,
         "market": market,
-        "title": title,
+        "title": listing.title,
         "tags": listing.tags,
         "category": listing.category,
+        "source_locale": listing.source_locale,
+        "i18n": listing.i18n,
+        "image_id": listing.image_id,
+        "image_url": crate::media::image_url(&listing.image_id),
+        "canonical_locked": locked,
     })))
 }
 
@@ -1650,14 +1888,8 @@ async fn list_comments(
     if st.store.get(&market).is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let limit = q.limit.clamp(1, 100);
-    let page = q.page.max(1);
-    let (total, items) = st.store.comments_of(&market, page, limit);
-    let pages = if total == 0 {
-        1
-    } else {
-        ((total + u64::from(limit) - 1) / u64::from(limit)) as u32
-    };
+    let (total, items) = st.store.comments_of(&market, q.page, q.limit);
+    let (page, limit, pages, _) = page_window(total, q.page, q.limit);
     Ok(Json(serde_json::json!({
         "market": market,
         "page": page,
@@ -1745,6 +1977,21 @@ fn is_create_op(op: &str) -> bool {
 
 /// Lobby / auctions: reviewed OPEN boards, or a named listing with no application (grandfather).
 fn catalog_listed(st: &AppState, market: &str) -> bool {
+    let want = st
+        .store
+        .protocol()
+        .map(|p| p.platform)
+        .or_else(|| std::env::var("PLATFORM_PUBKEY").ok());
+    if let Some(want) = want {
+        let want = want.trim().to_string();
+        if !want.is_empty() {
+            if let Some(row) = st.store.get(market) {
+                if !row.platform.is_empty() && row.platform != want {
+                    return false;
+                }
+            }
+        }
+    }
     if let Some(app) = st.store.application_by_market(market) {
         return app.status == APP_APPROVED && !app.market.trim().is_empty();
     }
@@ -1763,11 +2010,70 @@ fn listing_write_allowed(st: &AppState, market: &str, topic: &str, tag: &str) ->
     (0u8..=4).any(|f| st.store.approved_create_spec(f, topic, tag).is_some())
 }
 
+/// FR-UI-48: after review opens the market, canonical English identity is frozen.
+fn listing_canonical_locked(st: &AppState, market: &str) -> bool {
+    matches!(
+        st.store.application_by_market(market),
+        Some(app) if app.status == APP_APPROVED && !app.market.trim().is_empty()
+    )
+}
+
+fn same_text(a: &str, b: &str) -> bool {
+    a.trim() == b.trim()
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn is_platform_signer_op(op: &str) -> bool {
+    matches!(op, "claim_fees" | "sweep_fees" | "cover_lp_loss" | "set_tap")
+}
+
+fn indexed_market_row(st: &AppState, market: &str) -> Result<crate::store::MarketProj, StatusCode> {
+    st.store
+        .get(market)
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+/// Bind claim_fees / cover_lp_loss to indexed `Market.platform` (must sign).
+/// Missing projection → 503 until the indexer writes the row.
+fn hydrate_platform_claim(st: &AppState, body: &mut ComposeBody) -> Result<(), StatusCode> {
+    if !is_platform_signer_op(&body.op) {
+        return Ok(());
+    }
+    let Some(market) = body.market.as_deref() else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let row = indexed_market_row(st, market)?;
+    if row.platform.is_empty() {
+        return Err(StatusCode::CONFLICT);
+    }
+    if body.owner != row.platform {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    body.platform = Some(row.platform);
+    Ok(())
+}
+
+/// `pay_surplus_platform` credits `Market.platform`'s vault. Any payer MAY submit.
+/// Missing projection → 503 until the indexer writes the row.
+fn hydrate_platform_credit(st: &AppState, body: &mut ComposeBody) -> Result<(), StatusCode> {
+    if body.op != "pay_surplus_platform" {
+        return Ok(());
+    }
+    let Some(market) = body.market.as_deref() else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let row = indexed_market_row(st, market)?;
+    if row.platform.is_empty() {
+        return Err(StatusCode::CONFLICT);
+    }
+    body.platform = Some(row.platform);
+    Ok(())
 }
 
 fn is_prediction_fill_op(op: &str) -> bool {
@@ -1794,6 +2100,9 @@ fn require_trading_open(st: &AppState, body: &ComposeBody) -> Result<(), StatusC
     };
     let now = unix_now();
     if is_prediction_fill_op(&body.op) && row.close_ts > 0 && now >= row.close_ts {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if matches!(row.status, 2 | 3 | 4) {
         return Err(StatusCode::FORBIDDEN);
     }
     if is_auction_write_op(&body.op) {
@@ -1897,6 +2206,7 @@ fn app_status_name(row: &ApplicationRow) -> &'static str {
 }
 
 fn application_json(row: &ApplicationRow, logs: &[ReviewLogRow]) -> serde_json::Value {
+    let i18n = i18n_from_json(&row.i18n_json);
     serde_json::json!({
         "id": row.id,
         "applicant": row.applicant,
@@ -1908,6 +2218,10 @@ fn application_json(row: &ApplicationRow, logs: &[ReviewLogRow]) -> serde_json::
         "topic": row.topic,
         "tag": row.tag,
         "blocked_regions": row.blocked_regions,
+        "source_locale": if row.source_locale.trim().is_empty() { "en" } else { &row.source_locale },
+        "i18n": i18n,
+        "image_id": row.image_id,
+        "image_url": crate::media::image_url(&row.image_id),
         "dup_key": row.dup_key,
         "status": row.status,
         "status_name": app_status_name(row),
@@ -1948,6 +2262,9 @@ fn row_from_app(app: ListingApplication) -> ApplicationRow {
         reviewed_at: app.reviewed_at,
         compose_json: app.compose_json,
         market: app.market,
+        source_locale: app.source_locale,
+        i18n_json: i18n_to_json(&app.i18n),
+        image_id: app.image_id,
     }
 }
 
@@ -1971,6 +2288,13 @@ fn app_from_row(row: &ApplicationRow) -> ListingApplication {
         reviewed_at: row.reviewed_at,
         compose_json: row.compose_json.clone(),
         market: row.market.clone(),
+        source_locale: if row.source_locale.trim().is_empty() {
+            "en".into()
+        } else {
+            row.source_locale.clone()
+        },
+        i18n: i18n_from_json(&row.i18n_json),
+        image_id: row.image_id.clone(),
     }
 }
 
@@ -2005,7 +2329,13 @@ struct ApplicationBody {
     #[serde(default)]
     blocked_regions: Vec<String>,
     #[serde(default)]
+    source_locale: String,
+    #[serde(default)]
+    i18n: Option<serde_json::Value>,
+    #[serde(default)]
     compose: serde_json::Value,
+    #[serde(default)]
+    image_id: String,
 }
 
 #[derive(Deserialize)]
@@ -2058,6 +2388,8 @@ async fn put_application(State(st): State<AppState>, Json(body): Json<Applicatio
     } else {
         body.compose.to_string()
     };
+    let i18n = parse_i18n_body(body.i18n.clone())?;
+    let source_locale = normalize_source_locale(&body.source_locale).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut app = ListingApplication::submit(
         body.applicant,
         body.family,
@@ -2070,7 +2402,9 @@ async fn put_application(State(st): State<AppState>, Json(body): Json<Applicatio
         body.blocked_regions,
         compose_json,
     )
-    .map_err(|_| StatusCode::BAD_REQUEST)?;
+    .and_then(|a| a.with_locale(source_locale, i18n))
+    .map_err(|_| StatusCode::BAD_REQUEST)?
+    .with_image(normalize_image_id(&body.image_id)?);
     if let Some(hit) = st.store.application_by_dup(&app.dup_key) {
         app.status = APP_DUPLICATE;
         app.reason = format!("duplicate of application {}", hit.id);
@@ -2089,13 +2423,7 @@ async fn put_application(State(st): State<AppState>, Json(body): Json<Applicatio
 
 async fn list_applications(State(st): State<AppState>, Query(q): Query<ApplicationPageQ>) -> impl IntoResponse {
     let (total, items) = st.store.list_applications(q.status, q.applicant.as_deref(), q.page, q.limit);
-    let limit = q.limit.clamp(1, 100);
-    let page = q.page.max(1);
-    let pages = if total == 0 {
-        1
-    } else {
-        ((total + u64::from(limit) - 1) / u64::from(limit)) as u32
-    };
+    let (page, limit, pages, _) = page_window(total, q.page, q.limit);
     Json(serde_json::json!({
         "page": page,
         "limit": limit,
@@ -2154,17 +2482,35 @@ async fn review_application(State(st): State<AppState>, Json(body): Json<ReviewB
     Ok(Json(application_json(&stored, &st.store.review_logs_of(stored.id))))
 }
 
-async fn listing_one(State(st): State<AppState>, Path(market): Path<String>) -> Result<impl IntoResponse, StatusCode> {
+async fn listing_one(
+    State(st): State<AppState>,
+    Path(market): Path<String>,
+    Query(q): Query<ListQ>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
     let listing = st.store.listing_of(&market).ok_or(StatusCode::NOT_FOUND)?;
+    let preferred = preferred_locales(&headers, q.locale.as_deref());
+    let i18n = listing_i18n(&listing);
+    let disp = pick_display(&listing.title, &listing.event, &listing.description, &i18n, &preferred);
     Ok(Json(serde_json::json!({
         "market": market,
-        "title": listing.title,
+        "title": disp.title,
+        "title_en": listing.title,
         "tags": listing.resolved_tags(),
         "category": listing.resolved_tags().first().cloned().unwrap_or_default(),
         "topic": listing.topic,
         "tag": listing.tag,
-        "description": listing.description,
-        "event": listing.event,
+        "description": disp.description,
+        "description_en": listing.description,
+        "event": disp.event,
+        "event_en": listing.event,
+        "locale": disp.locale,
+        "is_translation": disp.is_translation,
+        "source_locale": if listing.source_locale.trim().is_empty() { "en" } else { &listing.source_locale },
+        "i18n": i18n,
+        "image_id": listing.image_id,
+        "image_url": crate::media::image_url(&listing.image_id),
+        "blocked_regions": listing.blocked_regions,
     })))
 }
 
@@ -2198,10 +2544,13 @@ async fn owner_risk(State(st): State<AppState>, Path(owner): Path<String>) -> im
                 None => (0, 0, 0),
             };
             let listing = st.store.listing_of(&q.market).unwrap_or_default();
-            let family = st.store.get(&q.market).map(|m| m.family).unwrap_or(0);
+            let mkt = st.store.get(&q.market);
+            let family = mkt.as_ref().map(|m| m.family).unwrap_or(0);
+            let platform = mkt.as_ref().map(|m| m.platform.clone()).unwrap_or_default();
             serde_json::json!({
                 "quote": q.quote,
                 "market": q.market,
+                "platform": platform,
                 "title": display_title(&listing, family),
                 "category": listing.category,
                 "layer": q.layer_id,
@@ -2216,6 +2565,7 @@ async fn owner_risk(State(st): State<AppState>, Path(owner): Path<String>) -> im
                 "attachment": attachment,
                 "weight_sum": weight_sum,
                 "board_phase": board_phase,
+                "pnl": (q.premium_owed as i64) - (expected_h as i64),
             })
         })
         .collect();
@@ -2236,6 +2586,8 @@ fn empty_vault(owner: &str, wallet_usdc: u64) -> serde_json::Value {
         "available": 0,
         "reserved": 0,
         "free": 0,
+        "risk_pnl": 0,
+        "cover_paid": 0,
         "wallet_usdc": wallet_usdc,
         "mint": "Circle SPL USDC",
         "source": "l1",
@@ -2273,6 +2625,8 @@ async fn load_owner_vault(owner: &str) -> Result<serde_json::Value, ()> {
         "available": u.available,
         "reserved": u.reserved,
         "free": free,
+        "risk_pnl": u.risk_pnl,
+        "cover_paid": u.cover_paid,
         "wallet_usdc": wallet_usdc,
         "mint": "Circle SPL USDC",
         "source": "l1",
@@ -2314,23 +2668,75 @@ async fn ops_status(State(st): State<AppState>) -> impl IntoResponse {
         "boards_with_coverage": covered,
         "c_r_total": c_r,
         "c_p_pool": st.store.pool_available(),
+        "cover_pool": st.store.cover_available(),
         "vault_mint": "Circle SPL USDC",
         "keeper_heartbeat_slot": hb.as_ref().map(|h| h.slot).unwrap_or(0),
         "keeper_ok": hb.as_ref().map(|h| h.ok).unwrap_or(false),
         "keeper_ts": hb.as_ref().map(|h| h.ts).unwrap_or(0),
         "keeper_last": hb.as_ref().map(|h| h.last.clone()).unwrap_or_default(),
-        "index_lag_slots": index_lag_slots(&st, hb.as_ref().map(|h| h.slot).unwrap_or(0)),
+        "index_lag_slots": index_lag_slots(&st, hb.as_ref()),
         "index_lag_shed_slots": index_lag_shed_threshold(),
         "pg": st.catalog.has_pg(),
         "read_only": true,
         "withdraw_disabled": true,
+        "create_platform": std::env::var("PLATFORM_PUBKEY").unwrap_or_default(),
     }))
 }
 
-fn index_lag_slots(st: &AppState, keeper_slot: u64) -> u64 {
+async fn protocol_one(State(st): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let source = if st.store.protocol().is_some() {
+        "protocol_pda"
+    } else {
+        "operator_env"
+    };
+    let p = crate::compose::live_policy(&st.store)?;
+    Ok(Json(serde_json::json!({
+        "platform": p.platform.to_string(),
+        "fee_bps": p.fee_bps,
+        "fee_timing": p.fee_timing,
+        "report_window_secs": p.report_window_secs,
+        "challenge_secs": p.challenge_secs,
+        "committee_bond": p.committee_bond,
+        "tap_cap_max": p.tap_cap_max,
+        "alpha_r_bps": p.alpha_r_bps,
+        "vault_mint": "Circle SPL USDC",
+        "source": source,
+    })))
+}
+
+fn hydrate_official_protocol(body: &ComposeBody) -> Result<(), StatusCode> {
+    if !matches!(body.op.as_str(), "init_protocol" | "set_protocol") {
+        return Ok(());
+    }
+    let pol = crate::compose::official_policy()?;
+    if body.owner.trim() != pol.platform.to_string() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
+fn index_lag_slots(st: &AppState, hb: Option<&notify::Heartbeat>) -> u64 {
     let indexed = st.store.slot();
-    let tip = keeper_slot.max(indexed);
-    tip.saturating_sub(indexed)
+    let Some(h) = hb else {
+        return 0;
+    };
+    if !h.ok || heartbeat_stale(h) || heartbeat_wrong_ledger(indexed, h.slot) {
+        return 0;
+    }
+    h.slot.saturating_sub(indexed)
+}
+
+fn heartbeat_stale(h: &notify::Heartbeat) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    now.saturating_sub(h.ts) > 120
+}
+
+/// Heartbeat from a previous ledger looks like a huge lag after `--reset`.
+fn heartbeat_wrong_ledger(indexed: u64, keeper_slot: u64) -> bool {
+    keeper_slot > indexed.saturating_add(10_000)
 }
 
 /// FR-IDX-01: shed hot reads when indexer lag exceeds `INDEX_LAG_SHED_SLOTS` (0 = off).
@@ -2347,7 +2753,7 @@ fn require_index_fresh(st: &AppState) -> Result<(), StatusCode> {
         return Ok(());
     }
     let hb = keeper_heartbeat();
-    let lag = index_lag_slots(st, hb.as_ref().map(|h| h.slot).unwrap_or(0));
+    let lag = index_lag_slots(st, hb.as_ref());
     if lag > thresh {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -2381,6 +2787,7 @@ async fn pool_one(State(st): State<AppState>) -> impl IntoResponse {
         .collect();
     Json(serde_json::json!({
         "c_p_pool": st.store.pool_available(),
+        "cover_pool": st.store.cover_available(),
         "boards": boards,
     }))
 }
@@ -2683,6 +3090,9 @@ async fn committee_one(State(st): State<AppState>) -> Result<impl IntoResponse, 
 }
 
 async fn compose_tracked(State(st): State<AppState>, Json(mut body): Json<ComposeBody>) -> Result<impl IntoResponse, StatusCode> {
+    if crate::compose::is_sell_op(&body.op) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     require_approved_create(&st, &body)?;
     require_trading_open(&st, &body)?;
     if is_prediction_fill_op(&body.op) {
@@ -2693,7 +3103,24 @@ async fn compose_tracked(State(st): State<AppState>, Json(mut body): Json<Compos
         }
     }
     hydrate_payout_fill(&st, &mut body);
-    let out = compose_out(&body)?;
+    hydrate_platform_claim(&st, &mut body)?;
+    hydrate_platform_credit(&st, &mut body)?;
+    hydrate_official_protocol(&body)?;
+    let out = if matches!(
+        body.op.as_str(),
+        "set_tap"
+            | "lock_committee_bond"
+            | "create_skellam"
+            | "create_gaussian"
+            | "create_lognormal"
+            | "create_dirichlet"
+            | "create_bernoulli"
+    ) {
+        let pol = crate::compose::live_policy(&st.store)?;
+        crate::compose::with_live_policy(pol, || compose_out(&body))?
+    } else {
+        compose_out(&body)?
+    };
     if let Some(fill) = remember_compose_fill(&st, &body) {
         st.catalog
             .put_fill(&fill)
@@ -2727,6 +3154,8 @@ pub fn router_with_pool(store: Arc<MemoryStore>, pool: Option<sqlx::PgPool>) -> 
         .route("/v1/owners/{owner}/risk", get(owner_risk))
         .route("/v1/auctions", get(list_auctions))
         .route("/v1/listings", post(put_listing))
+        .route("/v1/listings/media", post(crate::media::put_listing_media))
+        .route("/v1/media/{id}", get(crate::media::get_media))
         .route("/v1/listings/applications", get(list_applications).post(put_application))
         .route("/v1/listings/applications/{id}", get(application_one))
         .route("/v1/review", post(review_application))
@@ -2735,6 +3164,7 @@ pub fn router_with_pool(store: Arc<MemoryStore>, pool: Option<sqlx::PgPool>) -> 
         .route("/v1/tags/{name}", delete(delete_tag))
         .route("/v1/tickets", post(put_ticket))
         .route("/v1/ops/status", get(ops_status))
+        .route("/v1/protocol", get(protocol_one))
         .route("/v1/roles", get(roles_one))
         .route("/v1/notify", get(notify_feed))
         .route("/v1/pool", get(pool_one))
@@ -2747,3 +3177,28 @@ pub fn router_with_pool(store: Arc<MemoryStore>, pool: Option<sqlx::PgPool>) -> 
             catalog: CatalogService::new(pool),
         })
 }
+
+#[cfg(test)]
+mod lag_tests {
+    use super::{heartbeat_stale, heartbeat_wrong_ledger};
+    use notify::Heartbeat;
+
+    #[test]
+    fn previous_ledger_heartbeat_is_ignored() {
+        assert!(heartbeat_wrong_ledger(157, 65_446));
+        assert!(!heartbeat_wrong_ledger(65_400, 65_446));
+    }
+
+    #[test]
+    fn heartbeat_older_than_two_minutes_is_stale() {
+        let hb = Heartbeat {
+            slot: 200,
+            ts: 1_790_000_000,
+            last: "scan".into(),
+            market: String::new(),
+            ok: true,
+        };
+        assert!(heartbeat_stale(&hb));
+    }
+}
+

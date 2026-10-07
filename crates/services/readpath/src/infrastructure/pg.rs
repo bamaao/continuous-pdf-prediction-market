@@ -1,7 +1,7 @@
 use crate::domain::{
-    decode_tags, encode_tags, CatalogTag, CatalogTagRepository, Comment, CommentRepository, DomainError, Fill,
-    FillJournalRepository, Listing, ListingApplication, ListingApplicationRepository, ListingRepository, ReviewLog,
-    DEFAULT_CATALOG_TAGS,
+    decode_tags, encode_tags, i18n_from_json, i18n_to_json, CatalogTag, CatalogTagRepository, Comment, CommentRepository,
+    DomainError, Fill, FillJournalRepository, Listing, ListingApplication, ListingApplicationRepository,
+    ListingRepository, ReviewLog, DEFAULT_CATALOG_TAGS,
 };
 use crate::store::{ApplicationRow, CommentRow, FillMeta, ListingMeta, MemoryStore, ReviewLogRow};
 use anyhow::Result;
@@ -35,10 +35,11 @@ impl ListingRepository for ListingRepositoryImpl {
     type Context<'c> = sqlx::Transaction<'c, sqlx::Postgres>;
 
     async fn save(&self, ctx: &mut Self::Context<'_>, listing: &Listing) -> Result<(), DomainError> {
+        let i18n_json = i18n_to_json(&listing.i18n);
         sqlx::query(
             r#"
-            INSERT INTO listing (market, title, category, tags, topic, tag, description, event)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO listing (market, title, category, tags, topic, tag, description, event, source_locale, i18n_json, image_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (market) DO UPDATE SET
                 title = EXCLUDED.title,
                 category = EXCLUDED.category,
@@ -47,6 +48,9 @@ impl ListingRepository for ListingRepositoryImpl {
                 tag = EXCLUDED.tag,
                 description = EXCLUDED.description,
                 event = EXCLUDED.event,
+                source_locale = EXCLUDED.source_locale,
+                i18n_json = EXCLUDED.i18n_json,
+                image_id = EXCLUDED.image_id,
                 updated_at = now()
             "#,
         )
@@ -58,6 +62,9 @@ impl ListingRepository for ListingRepositoryImpl {
         .bind(&listing.tag)
         .bind(&listing.description)
         .bind(&listing.event)
+        .bind(&listing.source_locale)
+        .bind(&i18n_json)
+        .bind(&listing.image_id)
         .execute(&mut **ctx)
         .await
         .map_err(|_| DomainError::Storage)?;
@@ -66,24 +73,31 @@ impl ListingRepository for ListingRepositoryImpl {
     }
 
     async fn get(&self, ctx: &mut Self::Context<'_>, market: &str) -> Result<Option<Listing>, DomainError> {
-        let row: Option<(String, String, String, String, String, String, String, String)> = sqlx::query_as(
-            "SELECT market, title, category, tags, topic, tag, description, event FROM listing WHERE market = $1",
+        let row = sqlx::query(
+            "SELECT market, title, category, tags, topic, tag, description, event, source_locale, i18n_json, image_id FROM listing WHERE market = $1",
         )
         .bind(market)
         .fetch_optional(&mut **ctx)
         .await
         .map_err(|_| DomainError::Storage)?;
-        Ok(row.map(|(market, title, category, tags, topic, tag, description, event)| {
-            let tags = decode_tags(&tags, &category);
+        Ok(row.map(|r| {
+            let category: String = r.get("category");
+            let tags_raw: String = r.get("tags");
+            let tags = decode_tags(&tags_raw, &category);
+            let i18n_json: String = r.try_get("i18n_json").unwrap_or_default();
+            let source_locale: String = r.try_get("source_locale").unwrap_or_else(|_| "en".into());
             Listing {
-                market,
-                title,
+                market: r.get("market"),
+                title: r.get("title"),
                 category: tags.first().cloned().unwrap_or(category),
                 tags,
-                topic,
-                tag,
-                description,
-                event,
+                topic: r.get("topic"),
+                tag: r.get("tag"),
+                description: r.get("description"),
+                event: r.get("event"),
+                source_locale,
+                i18n: i18n_from_json(&i18n_json),
+                image_id: r.try_get("image_id").unwrap_or_default(),
             }
         }))
     }
@@ -144,7 +158,7 @@ impl CommentRepository for CommentRepositoryImpl {
             SELECT id, market, author, body, (EXTRACT(EPOCH FROM created_at))::bigint
             FROM market_comment
             WHERE market = $1
-            ORDER BY created_at ASC, id ASC
+            ORDER BY created_at DESC, id DESC
             OFFSET $2 LIMIT $3
             "#,
         )
@@ -173,6 +187,7 @@ impl ListingApplicationRepository for ListingApplicationRepositoryImpl {
     async fn save(&self, ctx: &mut Self::Context<'_>, row: &ListingApplication) -> Result<ListingApplication, DomainError> {
         let tags = encode_tags(&row.tags);
         let regions = encode_tags(&row.blocked_regions);
+        let i18n_json = i18n_to_json(&row.i18n);
         if row.id > 0 {
             sqlx::query(
                 r#"
@@ -180,6 +195,7 @@ impl ListingApplicationRepository for ListingApplicationRepositoryImpl {
                     applicant=$2, family=$3, title=$4, tags=$5, event=$6, description=$7,
                     topic=$8, tag=$9, blocked_regions=$10, dup_key=$11, status=$12,
                     reviewer=$13, reason=$14, compose_json=$15, market=$16,
+                    source_locale=$17, i18n_json=$18, image_id=$19,
                     reviewed_at=CASE WHEN $12=0 THEN reviewed_at ELSE now() END
                 WHERE id=$1
                 "#,
@@ -200,6 +216,9 @@ impl ListingApplicationRepository for ListingApplicationRepositoryImpl {
             .bind(&row.reason)
             .bind(&row.compose_json)
             .bind(&row.market)
+            .bind(&row.source_locale)
+            .bind(&i18n_json)
+            .bind(&row.image_id)
             .execute(&mut **ctx)
             .await
             .map_err(|_| DomainError::Storage)?;
@@ -209,8 +228,9 @@ impl ListingApplicationRepository for ListingApplicationRepositoryImpl {
             r#"
             INSERT INTO listing_application (
                 applicant, family, title, tags, event, description, topic, tag,
-                blocked_regions, dup_key, status, reviewer, reason, compose_json, market
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                blocked_regions, dup_key, status, reviewer, reason, compose_json, market,
+                source_locale, i18n_json, image_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             RETURNING id, (EXTRACT(EPOCH FROM created_at))::bigint
             "#,
         )
@@ -229,6 +249,9 @@ impl ListingApplicationRepository for ListingApplicationRepositoryImpl {
         .bind(&row.reason)
         .bind(&row.compose_json)
         .bind(&row.market)
+        .bind(&row.source_locale)
+        .bind(&i18n_json)
+        .bind(&row.image_id)
         .fetch_one(&mut **ctx)
         .await
         .map_err(|_| DomainError::Storage)?;
@@ -374,6 +397,15 @@ pub async fn migrate_journals(pool: &PgPool) -> Result<()> {
     sqlx::query("ALTER TABLE listing ADD COLUMN IF NOT EXISTS blocked_regions TEXT NOT NULL DEFAULT ''")
         .execute(pool)
         .await?;
+    sqlx::query("ALTER TABLE listing ADD COLUMN IF NOT EXISTS source_locale TEXT NOT NULL DEFAULT 'en'")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE listing ADD COLUMN IF NOT EXISTS i18n_json TEXT NOT NULL DEFAULT '{}'")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE listing ADD COLUMN IF NOT EXISTS image_id TEXT NOT NULL DEFAULT ''")
+        .execute(pool)
+        .await?;
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS listing_application (
@@ -407,6 +439,15 @@ pub async fn migrate_journals(pool: &PgPool) -> Result<()> {
     sqlx::query("ALTER TABLE listing_application ADD COLUMN IF NOT EXISTS market TEXT NOT NULL DEFAULT ''")
         .execute(pool)
         .await?;
+    sqlx::query("ALTER TABLE listing_application ADD COLUMN IF NOT EXISTS source_locale TEXT NOT NULL DEFAULT 'en'")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE listing_application ADD COLUMN IF NOT EXISTS i18n_json TEXT NOT NULL DEFAULT '{}'")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE listing_application ADD COLUMN IF NOT EXISTS image_id TEXT NOT NULL DEFAULT ''")
+        .execute(pool)
+        .await?;
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS review_log (
@@ -425,27 +466,34 @@ pub async fn migrate_journals(pool: &PgPool) -> Result<()> {
 }
 
 pub async fn load_journals(pool: &PgPool, mem: &MemoryStore) -> Result<()> {
-    let listings: Vec<(String, String, String, String, String, String, String, String)> = sqlx::query_as(
-        "SELECT market, title, category, tags, topic, tag, description, event FROM listing",
+    let listings = sqlx::query(
+        "SELECT market, title, category, tags, topic, tag, description, event, source_locale, i18n_json, image_id FROM listing",
     )
     .fetch_all(pool)
     .await?;
-    for (market, title, category, tags, topic, tag, description, event) in listings {
+    for r in listings {
+        let title: String = r.get("title");
         if title.trim().is_empty() {
             continue;
         }
-        let tags = decode_tags(&tags, &category);
+        let category: String = r.get("category");
+        let tags_raw: String = r.get("tags");
+        let tags = decode_tags(&tags_raw, &category);
+        let market: String = r.get("market");
         mem.set_listing(
             &market,
             ListingMeta {
                 title,
                 category: tags.first().cloned().unwrap_or(category),
                 tags,
-                topic,
-                tag,
-                description,
-                event,
+                topic: r.get("topic"),
+                tag: r.get("tag"),
+                description: r.get("description"),
+                event: r.get("event"),
                 blocked_regions: Vec::new(),
+                source_locale: r.try_get("source_locale").unwrap_or_else(|_| "en".into()),
+                i18n_json: r.try_get("i18n_json").unwrap_or_default(),
+                image_id: r.try_get("image_id").unwrap_or_default(),
             },
         );
     }
@@ -499,7 +547,8 @@ pub async fn load_journals(pool: &PgPool, mem: &MemoryStore) -> Result<()> {
         r#"
         SELECT id, applicant, family, title, tags, event, description, topic, tag, blocked_regions, dup_key, status,
                reviewer, reason, (EXTRACT(EPOCH FROM created_at))::bigint AS created_epoch,
-               (EXTRACT(EPOCH FROM reviewed_at))::bigint AS reviewed_epoch, compose_json, market
+               (EXTRACT(EPOCH FROM reviewed_at))::bigint AS reviewed_epoch, compose_json, market,
+               source_locale, i18n_json, image_id
         FROM listing_application
         ORDER BY id ASC
         "#,
@@ -531,6 +580,9 @@ pub async fn load_journals(pool: &PgPool, mem: &MemoryStore) -> Result<()> {
             reviewed_at: reviewed_at.unwrap_or(0),
             compose_json: r.try_get("compose_json")?,
             market: r.try_get("market")?,
+            source_locale: r.try_get("source_locale").unwrap_or_else(|_| "en".into()),
+            i18n_json: r.try_get("i18n_json").unwrap_or_default(),
+            image_id: r.try_get("image_id").unwrap_or_default(),
         });
     }
     let logs: Vec<(i64, i64, String, String, String, i64)> = sqlx::query_as(
@@ -578,7 +630,9 @@ pub async fn seed_journals_from_memory(pool: &PgPool, mem: &MemoryStore) -> Resu
             meta.tag,
             meta.description,
             meta.event,
-        ) else {
+        )
+        .and_then(|l| l.with_locale(meta.source_locale, i18n_from_json(&meta.i18n_json)))
+        .map(|l| l.with_image(meta.image_id)) else {
             continue;
         };
         let mut tx = pool.begin().await?;

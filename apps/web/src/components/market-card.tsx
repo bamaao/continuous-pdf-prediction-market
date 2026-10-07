@@ -1,4 +1,5 @@
-import { abnormalLabel, familyName, formatTags, formatUnix, listingHeadline, statusName, type PeakRisk } from "@cpm/sdk";
+import { abnormalLabel, familyName, formatTags, formatUnix, listingHeadline, listingImageSrc, statusName, type PeakRisk } from "@cpm/sdk";
+import { MARKET_API } from "@/lib/env";
 
 export type MarketCardData = {
   market: string;
@@ -21,6 +22,7 @@ export type MarketCardData = {
   payable_usdc?: number;
   peak_risk?: PeakRisk;
   resolution_phase?: number;
+  image_url?: string;
 };
 
 export function MarketCard({ row, compact = false }: { row: MarketCardData; compact?: boolean }) {
@@ -28,7 +30,10 @@ export function MarketCard({ row, compact = false }: { row: MarketCardData; comp
   const report = formatUnix(row.report_open_ts || row.close_ts);
   const lock = formatUnix(row.risk_lock_ts);
   const payout = row.liability && row.liability > 0 ? row.liability : row.l_max_usdc;
+  const cover = listingImageSrc(MARKET_API, row.image_url);
   return (
+    <div>
+      {cover ? <img src={cover} alt="" className="mb-3 max-h-48 w-full object-cover" /> : null}
     <dl className={`grid gap-3 font-mono text-[11px] ${compact ? "grid-cols-2 sm:grid-cols-3" : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4"}`}>
       <Item k="Name" v={listingHeadline({ title: row.title, family: row.family, market: row.market })} />
       <Item k="Tags" v={formatTags(row.tags, row.category)} />
@@ -36,7 +41,7 @@ export function MarketCard({ row, compact = false }: { row: MarketCardData; comp
       <Item k="Family" v={row.family != null ? familyName(row.family) : "—"} />
       <Item k="Trading event" v={row.event?.trim() || "—"} />
       <Item k="Trading close" v={close} />
-      <Item k="Committee may report" v={report} hint="starts at close_ts" />
+      <Item k="Committee may report" v={report} hint="required report_open_ts ≥ close_ts" />
       <Item
         k="Close extension"
         v={row.extensions && row.extensions > 0 ? `report/challenge +${row.extensions}` : "close_ts locked"}
@@ -58,6 +63,7 @@ export function MarketCard({ row, compact = false }: { row: MarketCardData; comp
         <dd className="mt-1 whitespace-pre-wrap text-paper/80">{row.description?.trim() || "—"}</dd>
       </div>
     </dl>
+    </div>
   );
 }
 

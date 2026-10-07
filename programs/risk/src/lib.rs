@@ -1,16 +1,15 @@
-//! L1 risk auction (FR-RSK-01–08). Published layers only. Session is not authority.
-//! Never Delegates. One lock underwrites one board.
+//! L1 risk auction (FR-RSK-01–08). Single pool. Session is not authority.
+//! Never Delegates. One lock underwrites one prediction market.
 
 use anchor_lang::prelude::*;
 use market::state::{Market, Status};
-use math::{sort_bids, Bid};
 use vault::cpi::accounts::MutUser;
 use vault::cpi::{release, reserve};
 
 pub mod matching;
 
 use matching::{
-    d_required, layer_attachment, premium_due, take_from_head, QuoteView, MAX_LAYERS, MAX_QUOTES,
+    layer_attachment, premium_due, take_from_head, QuoteView, POOL_LAYER, MAX_QUOTES,
 };
 
 declare_id!("Rsk1111111111111111111111111111111111111111");
@@ -26,7 +25,6 @@ pub mod risk {
 
     pub fn open_book(ctx: Context<OpenBook>) -> Result<()> {
         let market = &ctx.accounts.market;
-        require!(market.n_layers >= 1 && market.n_layers <= MAX_LAYERS, RiskError::BadLayer);
         require!(market.d_unit > 0, RiskError::BadSize);
         require!(market.risk_lock_ts <= market.close_ts, RiskError::BadClock);
 
@@ -34,10 +32,14 @@ pub mod risk {
         book.market = market.key();
         book.c_m = 0;
         book.d_unit = market.d_unit;
-        book.n_layers = market.n_layers;
-        book.gamma_bps = market.gamma_bps;
+        book.n_layers = 1;
+        book.gamma_bps = 0;
         book.c_r = 0;
         book.premium_payable = 0;
+        book.head_quote = Pubkey::default();
+        book.head_premium = 0;
+        book.head_unit = 0;
+        book.head_ts = 0;
         book.bump = ctx.bumps.book;
         Ok(())
     }
@@ -52,8 +54,8 @@ pub mod risk {
         let market = &ctx.accounts.market;
         let book = &mut ctx.accounts.book;
         require!(book.market == market.key(), RiskError::WrongBook);
-        require!(layer_id >= 1 && layer_id <= book.n_layers, RiskError::BadLayer);
-        require!(capacity > 0 && premium > 0, RiskError::BadSize);
+        require!(layer_id == POOL_LAYER, RiskError::BadLayer);
+        require!(capacity >= book.d_unit && premium > 0, RiskError::BadSize);
         require!(profit_share_bps <= 10_000, RiskError::BadSize);
         require!(
             market.status != Status::Settled as u8 && market.status != Status::Void as u8,
@@ -63,17 +65,21 @@ pub mod risk {
         require!(now < market.close_ts && now < market.risk_lock_ts, RiskError::Locked);
         let attach = layer_attachment(book.d_unit, layer_id).ok_or(RiskError::BadLayer)?;
 
-        let layer = &mut ctx.accounts.layer;
+        let mut layer = ctx
+            .accounts
+            .layer
+            .load_mut()
+            .or_else(|_| ctx.accounts.layer.load_init())?;
         if layer.market == Pubkey::default() {
             layer.market = market.key();
             layer.layer_id = layer_id;
             layer.attachment = attach;
-            layer.thickness = book.d_unit;
+            layer.thickness = 0;
             layer.filled = 0;
             layer.quote_count = 0;
             layer.bump = ctx.bumps.layer;
         }
-        require!(layer.attachment == attach && layer.thickness == book.d_unit, RiskError::BadLayer);
+        require!(layer.attachment == 0 && layer.layer_id == POOL_LAYER, RiskError::BadLayer);
         require!((layer.quote_count as usize) < MAX_QUOTES, RiskError::BookFull);
 
         reserve(
@@ -87,6 +93,7 @@ pub mod risk {
             capacity,
         )?;
 
+        let qk = ctx.accounts.quote.key();
         let q = &mut ctx.accounts.quote;
         q.market = market.key();
         q.layer_id = layer_id;
@@ -107,24 +114,23 @@ pub mod risk {
 
         let unit = math::unit_premium(premium, capacity).ok_or(RiskError::BadSize)?;
         let idx = layer.quote_count as usize;
-        layer.quote_keys[idx] = q.key();
+        layer.quote_keys[idx] = qk;
         layer.quote_cap[idx] = capacity;
         layer.quote_filled[idx] = 0;
-        layer.unit_premia[idx] = unit;
+        layer.set_unit(idx, unit);
         layer.quote_ts[idx] = now;
         layer.quote_live[idx] = 1;
         layer.quote_count += 1;
 
-        if cheapest_key(layer)? == q.key() {
-            try_fill(book, layer, q, seat, idx, market.l_max_usdc())?;
-        }
+        try_fill(book, &mut layer, q, seat, idx, qk)?;
         Ok(())
     }
 
     pub fn fill_next(ctx: Context<FillNext>) -> Result<()> {
         let market = &ctx.accounts.market;
+        let qk = ctx.accounts.quote.key();
         let book = &mut ctx.accounts.book;
-        let layer = &mut ctx.accounts.layer;
+        let mut layer = ctx.accounts.layer.load_mut()?;
         let quote = &mut ctx.accounts.quote;
         let seat = &mut ctx.accounts.seat;
         require!(book.market == market.key(), RiskError::WrongBook);
@@ -141,21 +147,20 @@ pub mod risk {
         );
         let now = Clock::get()?.unix_timestamp;
         require!(now < market.close_ts && now < market.risk_lock_ts, RiskError::Locked);
-        let (head, idx) = cheapest_entry(layer)?;
-        require!(head == quote.key(), RiskError::NotCheapest);
-        try_fill(book, layer, quote, seat, idx, market.l_max_usdc())?;
+        let idx = quote_index(&layer, qk)?;
+        try_fill(book, &mut layer, quote, seat, idx, qk)?;
         Ok(())
     }
 
     pub fn cancel_unfilled(ctx: Context<CancelUnfilled>) -> Result<()> {
         let quote = &mut ctx.accounts.quote;
-        let layer = &mut ctx.accounts.layer;
+        let mut layer = ctx.accounts.layer.load_mut()?;
         require!(quote.lp == ctx.accounts.lp.key(), RiskError::NotOwner);
         require!(!quote.cancelled, RiskError::Cancelled);
         let leftover = quote.capacity.saturating_sub(quote.filled);
         require!(leftover > 0, RiskError::AlreadyFilled);
         quote.cancelled = true;
-        drop_quote(layer, quote.key());
+        drop_quote(&mut layer, quote.key());
         release(
             CpiContext::new(
                 ctx.accounts.vault_program.to_account_info(),
@@ -170,31 +175,13 @@ pub mod risk {
     }
 }
 
-fn cheapest_entry(layer: &Layer) -> Result<(Pubkey, usize)> {
-    let mut live = Vec::new();
-    let mut eligible = Vec::new();
+fn quote_index(layer: &Layer, key: Pubkey) -> Result<usize> {
     for i in 0..layer.quote_count as usize {
-        if layer.quote_live[i] == 0 || layer.quote_filled[i] >= layer.quote_cap[i] {
-            continue;
-        }
-        let bid = Bid {
-            unit_premium: layer.unit_premia[i],
-            ts: layer.quote_ts[i],
-            idx: i,
-        };
-        live.push(bid);
-        if layer.quote_skip[i] == 0 {
-            eligible.push(bid);
+        if layer.quote_keys[i] == key && layer.quote_live[i] != 0 {
+            return Ok(i);
         }
     }
-    let pool = if eligible.is_empty() { live } else { eligible };
-    require!(!pool.is_empty(), RiskError::EmptyLayer);
-    let i = sort_bids(pool)[0].idx;
-    Ok((layer.quote_keys[i], i))
-}
-
-fn cheapest_key(layer: &Layer) -> Result<Pubkey> {
-    Ok(cheapest_entry(layer)?.0)
+    err!(RiskError::EmptyLayer)
 }
 
 fn drop_quote(layer: &mut Layer, key: Pubkey) {
@@ -211,12 +198,12 @@ fn try_fill(
     quote: &mut Quote,
     seat: &mut LpSeat,
     idx: usize,
-    l_max: u64,
+    quote_key: Pubkey,
 ) -> Result<()> {
     if quote.cancelled {
         return Ok(());
     }
-    let remain = layer.thickness.saturating_sub(layer.filled);
+    let leftover = quote.capacity.saturating_sub(quote.filled);
     let view = QuoteView {
         capacity: quote.capacity,
         filled: quote.filled,
@@ -224,25 +211,9 @@ fn try_fill(
         ts: quote.ts,
         lp_filled_on_board: seat.filled_d,
     };
-    let take = match take_from_head(
-        remain,
-        &view,
-        book.gamma_bps,
-        book.c_r,
-        d_required(l_max),
-        book.d_unit,
-    ) {
-        Ok(v) => v,
-        Err(_) => {
-            layer.quote_skip[idx] = 1;
-            return Ok(());
-        }
-    };
+    let take = take_from_head(leftover, &view).unwrap_or(0);
     if take == 0 {
         return Ok(());
-    }
-    for skip in layer.quote_skip.iter_mut() {
-        *skip = 0;
     }
     quote.filled = quote.filled.saturating_add(take);
     let due = premium_due(quote.premium, quote.capacity, take);
@@ -252,7 +223,23 @@ fn try_fill(
     book.c_r = book.c_r.saturating_add(take);
     book.premium_payable = book.premium_payable.saturating_add(due);
     seat.filled_d = seat.filled_d.saturating_add(take);
+    let unit = math::unit_premium(quote.premium, quote.capacity).unwrap_or(u128::MAX);
+    touch_head(book, quote_key, unit, quote.ts, quote.premium_owed);
     Ok(())
+}
+
+fn touch_head(book: &mut RiskBook, quote_key: Pubkey, unit: u128, ts: i64, premium_owed: u64) {
+    let better = book.head_quote == Pubkey::default()
+        || unit < book.head_unit
+        || (unit == book.head_unit && ts < book.head_ts);
+    if better {
+        book.head_quote = quote_key;
+        book.head_unit = unit;
+        book.head_ts = ts;
+        book.head_premium = premium_owed;
+    } else if book.head_quote == quote_key {
+        book.head_premium = premium_owed;
+    }
 }
 
 trait LMaxUsdc {
@@ -280,13 +267,18 @@ pub struct RiskBook {
     pub n_layers: u8,
     pub gamma_bps: u16,
     pub bump: u8,
+    pub head_quote: Pubkey,
+    pub head_premium: u64,
+    pub head_unit: u128,
+    pub head_ts: i64,
 }
 
 impl RiskBook {
-    pub const SIZE: usize = 8 + 32 + 8 + 8 + 8 + 8 + 1 + 2 + 1;
+    pub const SIZE: usize = 8 + 32 + 8 + 8 + 8 + 8 + 1 + 2 + 1 + 32 + 8 + 16 + 8;
 }
 
-#[account]
+#[account(zero_copy)]
+#[repr(C)]
 pub struct Layer {
     pub market: Pubkey,
     pub attachment: u64,
@@ -295,17 +287,41 @@ pub struct Layer {
     pub layer_id: u8,
     pub quote_count: u8,
     pub bump: u8,
+    pub _pad: [u8; 5],
     pub quote_live: [u8; MAX_QUOTES],
     pub quote_skip: [u8; MAX_QUOTES],
     pub quote_keys: [Pubkey; MAX_QUOTES],
     pub quote_cap: [u64; MAX_QUOTES],
     pub quote_filled: [u64; MAX_QUOTES],
-    pub unit_premia: [u128; MAX_QUOTES],
+    /// Packed `u128` unit premia as `[lo, hi]` so the account stays 8-byte aligned
+    /// after the 8-byte discriminator (a real `u128` field would be 16-aligned and
+    /// fail `bytemuck` / `AccountLoader` at offset 8).
+    pub unit_premia: [[u64; 2]; MAX_QUOTES],
     pub quote_ts: [i64; MAX_QUOTES],
 }
 
 impl Layer {
-    pub const SIZE: usize = 8 + 32 + 8 + 8 + 8 + 3 + MAX_QUOTES * (1 + 1 + 32 + 8 + 8 + 16 + 8);
+    pub const SIZE: usize = 8 + core::mem::size_of::<Self>();
+
+    pub fn unit_at(&self, i: usize) -> u128 {
+        let [lo, hi] = self.unit_premia[i];
+        (lo as u128) | ((hi as u128) << 64)
+    }
+
+    pub fn set_unit(&mut self, i: usize, v: u128) {
+        self.unit_premia[i] = [v as u64, (v >> 64) as u64];
+    }
+
+    pub fn from_account_data(data: &[u8]) -> std::result::Result<Self, &'static str> {
+        if data.len() < Self::SIZE {
+            return Err("layer account too small");
+        }
+        let body = &data[8..Self::SIZE];
+        if body.len() != core::mem::size_of::<Self>() {
+            return Err("layer layout");
+        }
+        Ok(bytemuck::pod_read_unaligned(body))
+    }
 }
 
 #[account]
@@ -372,7 +388,7 @@ pub struct QuoteLayer<'info> {
         seeds = [LAYER_SEED, market.key().as_ref(), &[layer_id]],
         bump
     )]
-    pub layer: Box<Account<'info, Layer>>,
+    pub layer: AccountLoader<'info, Layer>,
     #[account(
         init,
         payer = lp,
@@ -407,8 +423,8 @@ pub struct FillNext<'info> {
     pub market: Box<Account<'info, Market>>,
     #[account(mut, seeds = [BOOK_SEED, market.key().as_ref()], bump = book.bump)]
     pub book: Box<Account<'info, RiskBook>>,
-    #[account(mut, seeds = [LAYER_SEED, market.key().as_ref(), &[layer.layer_id]], bump = layer.bump)]
-    pub layer: Box<Account<'info, Layer>>,
+    #[account(mut, seeds = [LAYER_SEED, market.key().as_ref(), &[POOL_LAYER]], bump)]
+    pub layer: AccountLoader<'info, Layer>,
     #[account(mut)]
     pub quote: Box<Account<'info, Quote>>,
     #[account(mut, seeds = [SEAT_SEED, market.key().as_ref(), quote.lp.as_ref()], bump = seat.bump)]
@@ -427,9 +443,9 @@ pub struct CancelUnfilled<'info> {
     #[account(
         mut,
         seeds = [LAYER_SEED, quote.market.as_ref(), &[quote.layer_id]],
-        bump = layer.bump
+        bump
     )]
-    pub layer: Box<Account<'info, Layer>>,
+    pub layer: AccountLoader<'info, Layer>,
     #[account(
         mut,
         seeds = [vault::USER_SEED, lp.key().as_ref()],
@@ -447,7 +463,7 @@ pub enum RiskError {
     NotResolver,
     #[msg("layer id is not a published layer")]
     BadLayer,
-    #[msg("capacity, premium, or gamma is illegal")]
+    #[msg("capacity below min D, or premium is illegal")]
     BadSize,
     #[msg("risk_lock_ts is after close_ts")]
     BadClock,
@@ -457,7 +473,7 @@ pub enum RiskError {
     WrongBook,
     #[msg("layer quote list is full")]
     BookFull,
-    #[msg("same LP exceeds concentration γ")]
+    #[msg("same LP exceeds concentration (unused)")]
     Concentration,
     #[msg("quote is not the cheapest live bid")]
     NotCheapest,
@@ -476,8 +492,20 @@ mod tests {
     use super::matching::*;
 
     #[test]
-    fn one_lock_one_board_seat_is_per_market() {
-        assert_ne!(super::SEAT_SEED, super::BOOK_SEED);
+    fn standing_quotes_cap_fits_one_create() {
+        assert_eq!(MAX_QUOTES, 64);
+        assert_eq!(core::mem::align_of::<super::Layer>(), 8);
+        assert_eq!(core::mem::size_of::<super::Layer>() % 8, 0);
+        assert!(
+            super::Layer::SIZE > 4_000 && super::Layer::SIZE <= 10_240,
+            "Layer::SIZE {}",
+            super::Layer::SIZE
+        );
+        let mut raw = vec![0u8; super::Layer::SIZE];
+        raw[64] = 7;
+        let layer = super::Layer::from_account_data(&raw).expect("zero_copy layout");
+        assert_eq!(layer.layer_id, 7);
+        assert_eq!(layer.quote_count, 0);
     }
 
     #[test]
@@ -489,7 +517,7 @@ mod tests {
             ts: 1,
             lp_filled_on_board: 0,
         };
-        let take = take_from_head(50, &q, 10_000, 0, 0, 80).unwrap();
+        let take = take_from_head(50, &q).unwrap();
         assert_eq!(take, 50);
         assert!(take < q.capacity);
     }

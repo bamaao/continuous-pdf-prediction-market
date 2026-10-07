@@ -15,7 +15,8 @@ pub mod settle;
 pub mod views;
 
 pub use mint::{CIRCLE_USDC_DEVNET, CIRCLE_USDC_MAINNET, USDC_MINT};
-pub use settle::{AdjustPool, Board, BoardTap, Claim};
+pub use settle::{AdjustPool, Board, BoardTap, Claim, LossPool};
+pub use views::{PHASE_FAILED, PHASE_FINALIZED, PHASE_VOIDED};
 
 declare_id!("VaULt11111111111111111111111111111111111111");
 
@@ -25,6 +26,8 @@ pub const BOARD_SEED: &[u8] = b"board";
 pub const CLAIM_SEED: &[u8] = b"claim";
 pub const CPOOL_SEED: &[u8] = b"cpool";
 pub const CPTAP_SEED: &[u8] = b"cptap";
+pub const RLOSS_SEED: &[u8] = b"rloss";
+pub const CBOND_SEED: &[u8] = b"cbond";
 
 #[program]
 pub mod vault {
@@ -109,6 +112,67 @@ pub mod vault {
         Ok(())
     }
 
+    /// Lock unused margin as this market's committee report bond. One lock per market.
+    pub fn lock_committee_bond(ctx: Context<LockBond>, amount: u64) -> Result<()> {
+        require!(amount > 0, VaultError::ZeroAmount);
+        require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
+        require!(ctx.accounts.bond.amount == 0, VaultError::BondLocked);
+        let rec = &ctx.accounts.resolution;
+        let who = ctx.accounts.owner.key();
+        let member = rec.members.iter().take(rec.n as usize).any(|m| *m == who);
+        let market_data = ctx.accounts.market.try_borrow_data()?;
+        require!(market_data.len() >= 48, VaultError::BadSettle);
+        let creator = Pubkey::try_from(&market_data[16..48]).map_err(|_| error!(VaultError::BadSettle))?;
+        drop(market_data);
+        require!(member || who == creator, VaultError::NotOwner);
+        let user = &mut ctx.accounts.user;
+        user.available = accounting::debit_available(user.available, user.reserved, amount)?;
+        user.bond = accounting::credit(user.bond, amount)?;
+        let bond = &mut ctx.accounts.bond;
+        bond.market = ctx.accounts.market.key();
+        bond.holder = who;
+        bond.amount = amount;
+        bond.slashed = false;
+        bond.bump = ctx.bumps.bond;
+        Ok(())
+    }
+
+    /// Platform takes the locked bond after `admin_submit_result` (`slash_due`). Holder is `CommitteeBond.holder`.
+    pub fn slash_committee_bond(ctx: Context<SlashBond>) -> Result<()> {
+        require!(
+            ctx.accounts.authority.key() == ctx.accounts.market.platform,
+            VaultError::NotOwner
+        );
+        require!(ctx.accounts.resolution.slash_due, VaultError::NotFinalized);
+        require!(ctx.accounts.resolution.phase == PHASE_FINALIZED, VaultError::NotFinalized);
+        let bond = &mut ctx.accounts.bond;
+        require!(!bond.slashed && bond.amount > 0, VaultError::ZeroAmount);
+        require_keys_eq!(ctx.accounts.holder.owner, bond.holder, VaultError::NotOwner);
+        let amount = bond.amount;
+        ctx.accounts.holder.bond = accounting::debit_bond(ctx.accounts.holder.bond, amount)?;
+        ctx.accounts.platform.available = accounting::credit(ctx.accounts.platform.available, amount)?;
+        bond.slashed = true;
+        Ok(())
+    }
+
+    /// Return this market's bond after VOID / committee finalize (not slashed).
+    pub fn release_committee_bond(ctx: Context<ReleaseBond>) -> Result<()> {
+        require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
+        let slash = ctx.accounts.resolution.slash_due;
+        let phase = ctx.accounts.resolution.phase;
+        let ok = !slash
+            && (phase == PHASE_VOIDED || phase == PHASE_FAILED || phase == PHASE_FINALIZED);
+        require!(ok, VaultError::NotFinalized);
+        let bond = &mut ctx.accounts.bond;
+        require!(!bond.slashed && bond.amount > 0, VaultError::ZeroAmount);
+        require_keys_eq!(bond.holder, ctx.accounts.owner.key(), VaultError::NotOwner);
+        let amount = bond.amount;
+        ctx.accounts.user.bond = accounting::debit_bond(ctx.accounts.user.bond, amount)?;
+        ctx.accounts.user.available = accounting::credit(ctx.accounts.user.available, amount)?;
+        bond.amount = 0;
+        Ok(())
+    }
+
     /// Open this board's Vault account. Amount MUST be 0 — there is no seed reserve.
     pub fn fund_cm(ctx: Context<FundCm>, amount: u64) -> Result<()> {
         let board = &mut ctx.accounts.board;
@@ -159,8 +223,8 @@ pub mod vault {
     }
 
     pub fn init_pool(ctx: Context<InitPool>) -> Result<()> {
-        let pool = &mut ctx.accounts.pool;
-        pool.bump = ctx.bumps.pool;
+        ctx.accounts.pool.bump = ctx.bumps.pool;
+        ctx.accounts.loss_pool.bump = ctx.bumps.loss_pool;
         Ok(())
     }
 
@@ -170,10 +234,7 @@ pub mod vault {
 
     pub fn set_tap(ctx: Context<SetTap>, cap: u64) -> Result<()> {
         let m = &ctx.accounts.market;
-        require!(
-            ctx.accounts.authority.key() == m.creator || ctx.accounts.authority.key() == m.platform,
-            VaultError::NotOwner
-        );
+        require!(ctx.accounts.authority.key() == m.platform, VaultError::NotOwner);
         let tap = &mut ctx.accounts.tap;
         tap.market = m.key();
         tap.cap = cap;
@@ -247,9 +308,12 @@ pub mod vault {
     }
 
     pub fn draw_lp(ctx: Context<DrawLp>) -> Result<()> {
+        let layer_ai = ctx.accounts.layer.to_account_info();
+        let data = layer_ai.try_borrow_data()?;
+        let layer = views::Layer::from_account(&data)?;
         settle::draw_quote(
             &mut ctx.accounts.board,
-            &ctx.accounts.layer,
+            layer,
             &ctx.accounts.quote,
             &mut ctx.accounts.user,
         )?;
@@ -257,22 +321,44 @@ pub mod vault {
     }
 
     pub fn pay_premium(ctx: Context<QuotePay>) -> Result<()> {
-        settle::pay_premium_inner(&mut ctx.accounts.board, &ctx.accounts.quote, &mut ctx.accounts.user)?;
+        settle::pay_premium_inner(
+            &mut ctx.accounts.board,
+            ctx.accounts.quote.key(),
+            &ctx.accounts.quote,
+            &mut ctx.accounts.user,
+        )?;
         Ok(())
     }
 
     pub fn pay_surplus_lp(ctx: Context<QuotePay>, weight_sum: u64) -> Result<()> {
+        let layer_ai = ctx.accounts.layer.to_account_info();
+        let data = layer_ai.try_borrow_data()?;
+        let layer = views::Layer::from_account(&data)?;
         settle::pay_surplus_lp_inner(
             &mut ctx.accounts.board,
+            ctx.accounts.quote.key(),
             &ctx.accounts.quote,
+            Some(layer),
             &mut ctx.accounts.user,
             weight_sum,
         )?;
         Ok(())
     }
 
+    /// Permissionless credit of \(S_P\) into `market.platform`'s UserVault. No platform signer.
+    /// Withdraw from that vault still requires the platform owner (`withdraw`).
     pub fn pay_surplus_platform(ctx: Context<PlatformPay>) -> Result<()> {
         settle::pay_surplus_platform_inner(&mut ctx.accounts.board, &mut ctx.accounts.user)?;
+        Ok(())
+    }
+
+    pub fn pay_surplus_cover(ctx: Context<CoverPoolPay>) -> Result<()> {
+        settle::pay_surplus_cover_inner(&mut ctx.accounts.board, &mut ctx.accounts.loss_pool)?;
+        Ok(())
+    }
+
+    pub fn cover_lp_loss(ctx: Context<CoverLp>) -> Result<()> {
+        settle::cover_lp_loss_inner(&mut ctx.accounts.loss_pool, &mut ctx.accounts.user)?;
         Ok(())
     }
 
@@ -327,6 +413,12 @@ pub mod accounting {
     pub fn release(reserved: u64, amount: u64) -> Result<u64> {
         reserved
             .checked_sub(amount)
+            .ok_or(error!(VaultError::InsufficientAvailable))
+    }
+
+    pub fn debit_bond(bond: u64, amount: u64) -> Result<u64> {
+        require!(bond >= amount, VaultError::InsufficientAvailable);
+        bond.checked_sub(amount)
             .ok_or(error!(VaultError::InsufficientAvailable))
     }
 }
@@ -430,6 +522,82 @@ pub struct MutUser<'info> {
 }
 
 #[derive(Accounts)]
+pub struct LockBond<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    /// CHECK: owned by market; creator pubkey is at byte offset 16 (disc + header).
+    #[account(owner = views::MARKET_ID)]
+    pub market: UncheckedAccount<'info>,
+    #[account(owner = views::RESOLUTION_ID, constraint = resolution.market == market.key() @ VaultError::WrongBoard)]
+    pub resolution: Box<Account<'info, views::Resolution>>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, owner.key().as_ref()],
+        bump = user.bump,
+        has_one = owner @ VaultError::NotOwner
+    )]
+    pub user: Account<'info, UserVault>,
+    #[account(
+        init_if_needed,
+        payer = owner,
+        space = 8 + CommitteeBond::SIZE,
+        seeds = [CBOND_SEED, market.key().as_ref()],
+        bump
+    )]
+    pub bond: Account<'info, CommitteeBond>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SlashBond<'info> {
+    pub authority: Signer<'info>,
+    #[account(owner = views::MARKET_ID)]
+    pub market: Account<'info, views::Market>,
+    #[account(owner = views::RESOLUTION_ID, constraint = resolution.market == market.key() @ VaultError::WrongBoard)]
+    pub resolution: Box<Account<'info, views::Resolution>>,
+    #[account(
+        mut,
+        seeds = [CBOND_SEED, market.key().as_ref()],
+        bump = bond.bump
+    )]
+    pub bond: Account<'info, CommitteeBond>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, holder.owner.as_ref()],
+        bump = holder.bump,
+        constraint = holder.owner == bond.holder @ VaultError::NotOwner
+    )]
+    pub holder: Account<'info, UserVault>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, platform.owner.as_ref()],
+        bump = platform.bump,
+        constraint = platform.owner == market.platform @ VaultError::NotOwner
+    )]
+    pub platform: Account<'info, UserVault>,
+}
+
+#[derive(Accounts)]
+pub struct ReleaseBond<'info> {
+    pub owner: Signer<'info>,
+    #[account(owner = views::RESOLUTION_ID)]
+    pub resolution: Box<Account<'info, views::Resolution>>,
+    #[account(
+        mut,
+        seeds = [CBOND_SEED, resolution.market.as_ref()],
+        bump = bond.bump
+    )]
+    pub bond: Account<'info, CommitteeBond>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, owner.key().as_ref()],
+        bump = user.bump,
+        has_one = owner @ VaultError::NotOwner
+    )]
+    pub user: Account<'info, UserVault>,
+}
+
+#[derive(Accounts)]
 pub struct FundCm<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -500,6 +668,8 @@ pub struct InitPool<'info> {
     pub payer: Signer<'info>,
     #[account(init_if_needed, payer = payer, space = AdjustPool::SIZE, seeds = [CPOOL_SEED], bump)]
     pub pool: Account<'info, AdjustPool>,
+    #[account(init_if_needed, payer = payer, space = LossPool::SIZE, seeds = [RLOSS_SEED], bump)]
+    pub loss_pool: Account<'info, LossPool>,
     pub system_program: Program<'info, System>,
 }
 
@@ -592,7 +762,9 @@ pub struct Payout<'info> {
 pub struct DrawLp<'info> {
     #[account(mut, seeds = [BOARD_SEED, board.market.as_ref()], bump = board.bump)]
     pub board: Account<'info, Board>,
-    pub layer: Account<'info, views::Layer>,
+    /// CHECK: risk `Layer` zero_copy account; owner + layout checked in the handler.
+    #[account(owner = views::RISK_ID)]
+    pub layer: UncheckedAccount<'info>,
     pub quote: Account<'info, views::Quote>,
     #[account(
         mut,
@@ -607,6 +779,9 @@ pub struct DrawLp<'info> {
 pub struct QuotePay<'info> {
     #[account(mut, seeds = [BOARD_SEED, board.market.as_ref()], bump = board.bump)]
     pub board: Account<'info, Board>,
+    /// CHECK: risk `Layer` zero_copy account; owner + layout checked in the handler.
+    #[account(owner = views::RISK_ID)]
+    pub layer: UncheckedAccount<'info>,
     pub quote: Account<'info, views::Quote>,
     #[account(
         mut,
@@ -623,11 +798,36 @@ pub struct PlatformPay<'info> {
     pub board: Account<'info, Board>,
     #[account(constraint = market.key() == board.market @ VaultError::WrongBoard)]
     pub market: Box<Account<'info, views::Market>>,
+    /// Destination is always `Market.platform`. No signer on this ix.
     #[account(
         mut,
         seeds = [USER_SEED, market.platform.as_ref()],
         bump = user.bump,
         constraint = user.owner == market.platform @ VaultError::NotOwner
+    )]
+    pub user: Account<'info, UserVault>,
+}
+
+#[derive(Accounts)]
+pub struct CoverPoolPay<'info> {
+    #[account(mut, seeds = [BOARD_SEED, board.market.as_ref()], bump = board.bump)]
+    pub board: Account<'info, Board>,
+    #[account(mut, seeds = [RLOSS_SEED], bump = loss_pool.bump)]
+    pub loss_pool: Account<'info, LossPool>,
+}
+
+#[derive(Accounts)]
+pub struct CoverLp<'info> {
+    /// Protocol platform. Timing is operational; the chain only books Π and cover paid.
+    pub authority: Signer<'info>,
+    #[account(constraint = authority.key() == market.platform @ VaultError::NotOwner)]
+    pub market: Box<Account<'info, views::Market>>,
+    #[account(mut, seeds = [RLOSS_SEED], bump = loss_pool.bump)]
+    pub loss_pool: Account<'info, LossPool>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, user.owner.as_ref()],
+        bump = user.bump
     )]
     pub user: Account<'info, UserVault>,
 }
@@ -675,10 +875,29 @@ pub struct UserVault {
     pub available: u64,
     pub reserved: u64,
     pub bump: u8,
+    /// Lifetime operating risk P&L: −H, +premium, +S_R. Cover does not rewrite this.
+    pub risk_pnl: i64,
+    /// Committee report bond. Not trading margin. Slashed to the platform after a missed report.
+    pub bond: u64,
+    /// Cumulative cover reimbursed from LossPool. Never exceeds (−Π)⁺.
+    pub cover_paid: u64,
 }
 
 impl UserVault {
-    pub const SIZE: usize = 32 + 8 + 8 + 1;
+    pub const SIZE: usize = 32 + 8 + 8 + 1 + 8 + 8 + 8;
+}
+
+#[account]
+pub struct CommitteeBond {
+    pub market: Pubkey,
+    pub holder: Pubkey,
+    pub amount: u64,
+    pub slashed: bool,
+    pub bump: u8,
+}
+
+impl CommitteeBond {
+    pub const SIZE: usize = 32 + 32 + 8 + 1 + 1;
 }
 
 #[error_code]
@@ -703,6 +922,8 @@ pub enum VaultError {
     WrongBoard,
     #[msg("resolution is not in the required terminal phase")]
     NotFinalized,
+    #[msg("committee bond already locked for this market")]
+    BondLocked,
     #[msg("refunds_due does not match this path")]
     RefundsDue,
     #[msg("x* does not map onto the grid")]

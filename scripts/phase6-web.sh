@@ -58,7 +58,7 @@ need_session_keys_so() {
 echo "== build host bins + ensure programs =="
 cargo build -p cli -p gateway -p readpath
 "$CPM" write-local-mint --authority "$AUTH" --account "$MINT_ACC"
-need_so vault
+need_so vault 1
 need_so market
 need_so resolution
 need_so risk

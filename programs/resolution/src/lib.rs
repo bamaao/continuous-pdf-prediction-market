@@ -12,6 +12,8 @@ declare_id!("Rso1111111111111111111111111111111111111111");
 
 pub const RES_SEED: &[u8] = b"res";
 pub const VOTE_SEED: &[u8] = b"vote";
+pub const VAULT_ID: Pubkey = pubkey!("VaULt11111111111111111111111111111111111111");
+pub const CBOND_SEED: &[u8] = b"cbond";
 
 pub const FAMILY_SKELLAM: u8 = 0;
 pub const FAMILY_GAUSSIAN: u8 = 1;
@@ -61,8 +63,11 @@ pub mod resolution {
         rec.layout = market.extra.u0;
         rec.n_atoms = market.n;
         rec.close_ts = market.close_ts;
+        rec.report_open_ts = market.report_opens_at();
         rec.report_window_secs = market.report_window_secs;
-        rec.report_deadline = market.close_ts.saturating_add(market.report_window_secs);
+        rec.report_deadline = rec
+            .report_open_ts
+            .saturating_add(market.report_window_secs);
         rec.challenge_secs = market.challenge_secs;
         rec.challenge_end = 0;
         rec.vote_end = 0;
@@ -72,12 +77,13 @@ pub mod resolution {
         rec.challenged = Outcome::default();
         rec.final_outcome = Outcome::default();
         rec.evidence_hash = [0u8; 32];
+        rec.slash_due = false;
         rec.bump = ctx.bumps.record;
         Ok(())
     }
 
     pub fn submit_result(
-        ctx: Context<MutRecord>,
+        ctx: Context<SubmitRecord>,
         outcome: Outcome,
         evidence_hash: [u8; 32],
     ) -> Result<()> {
@@ -85,6 +91,7 @@ pub mod resolution {
         let now = Clock::get()?.unix_timestamp;
         let reporter = ctx.accounts.reporter.key();
         require!(can_propose(rec, &reporter), ResError::NotReporter);
+        require!(bond_is_locked(&ctx.accounts.bond.to_account_info(), rec.market), ResError::BondNotLocked);
         validate_outcome(rec.family, rec.n_atoms, &outcome)?;
 
         let effect = apply(&snapshot(rec, now), Event::Submit).map_err(|_| error!(ResError::BadPhase))?;
@@ -200,6 +207,47 @@ pub mod resolution {
         ctx.accounts.market.status = Status::Void as u8;
         Ok(())
     }
+
+    pub fn admin_submit_result(
+        ctx: Context<Finalize>,
+        outcome: Outcome,
+        evidence_hash: [u8; 32],
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.reporter.key() == ctx.accounts.market.platform,
+            ResError::NotAdmin
+        );
+        require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
+        let rec = &mut ctx.accounts.record;
+        let now = Clock::get()?.unix_timestamp;
+        validate_outcome(rec.family, rec.n_atoms, &outcome)?;
+        apply(&snapshot(rec, now), Event::AdminSubmit).map_err(|_| error!(ResError::AwaitingAdmin))?;
+        rec.phase = Phase::Finalized as u8;
+        rec.proposer = ctx.accounts.reporter.key();
+        rec.proposed = outcome;
+        rec.final_outcome = outcome;
+        rec.evidence_hash = evidence_hash;
+        rec.slash_due = true;
+        rec.refunds_due = false;
+        ctx.accounts.market.status = Status::Settled as u8;
+        Ok(())
+    }
+
+    pub fn admin_void_resolution(ctx: Context<Finalize>) -> Result<()> {
+        require!(
+            ctx.accounts.reporter.key() == ctx.accounts.market.platform,
+            ResError::NotAdmin
+        );
+        require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
+        let rec = &mut ctx.accounts.record;
+        let now = Clock::get()?.unix_timestamp;
+        apply(&snapshot(rec, now), Event::AdminVoid).map_err(|_| error!(ResError::AwaitingAdmin))?;
+        rec.phase = Phase::Voided as u8;
+        rec.slash_due = false;
+        rec.refunds_due = true;
+        ctx.accounts.market.status = Status::Void as u8;
+        Ok(())
+    }
 }
 
 fn snapshot(rec: &Resolution, now: i64) -> Case {
@@ -207,6 +255,11 @@ fn snapshot(rec: &Resolution, now: i64) -> Case {
         phase: Phase::from_u8(rec.phase).unwrap_or(Phase::Open),
         now,
         close_ts: rec.close_ts,
+        report_open_ts: if rec.report_open_ts > 0 {
+            rec.report_open_ts
+        } else {
+            rec.close_ts
+        },
         report_deadline: rec.report_deadline,
         challenge_end: rec.challenge_end,
         vote_end: rec.vote_end,
@@ -229,6 +282,27 @@ fn is_member(rec: &Resolution, who: &Pubkey) -> bool {
 fn can_propose(rec: &Resolution, who: &Pubkey) -> bool {
     is_member(rec, who)
         || (rec.authorized_reporter != Pubkey::default() && rec.authorized_reporter == *who)
+}
+
+fn bond_is_locked(bond: &AccountInfo, market: Pubkey) -> bool {
+    if *bond.owner != VAULT_ID {
+        return false;
+    }
+    let data = match bond.try_borrow_data() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    if data.len() < 81 {
+        return false;
+    }
+    let mut m = [0u8; 32];
+    m.copy_from_slice(&data[8..40]);
+    if Pubkey::new_from_array(m) != market {
+        return false;
+    }
+    let amount = u64::from_le_bytes(data[72..80].try_into().unwrap_or([0; 8]));
+    let slashed = data[80] != 0;
+    amount > 0 && !slashed
 }
 
 fn validate_outcome(family: u8, n_atoms: u16, o: &Outcome) -> Result<()> {
@@ -314,6 +388,9 @@ pub struct Resolution {
     pub challenged: Outcome,
     pub final_outcome: Outcome,
     pub evidence_hash: [u8; 32],
+    pub report_open_ts: i64,
+    /// Set when the platform writes $x^*$ after a missed report window.
+    pub slash_due: bool,
 }
 
 impl Resolution {
@@ -363,6 +440,15 @@ pub struct MutRecord<'info> {
 }
 
 #[derive(Accounts)]
+pub struct SubmitRecord<'info> {
+    pub reporter: Signer<'info>,
+    #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
+    pub record: Box<Account<'info, Resolution>>,
+    /// CHECK: vault `CommitteeBond` PDA for this market.
+    pub bond: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
 pub struct Finalize<'info> {
     pub reporter: Signer<'info>,
     #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
@@ -403,6 +489,10 @@ pub enum ResError {
     BadFamily,
     #[msg("signer is not committee or authorized reporter")]
     NotReporter,
+    #[msg("signer is not the protocol platform (super-admin)")]
+    NotAdmin,
+    #[msg("report window closed; platform must submit or VOID")]
+    AwaitingAdmin,
     #[msg("phase does not allow this instruction")]
     BadPhase,
     #[msg("outcome does not match the locked family")]
@@ -417,6 +507,8 @@ pub enum ResError {
     AlreadyVoted,
     #[msg("roster does not include the market committee")]
     CommitteeMismatch,
+    #[msg("committee bond is not locked")]
+    BondNotLocked,
 }
 
 #[cfg(test)]

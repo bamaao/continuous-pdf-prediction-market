@@ -9,10 +9,10 @@ use anchor_lang::prelude::*;
 use math::football;
 use math::outcome::outcome_cell;
 use math::settle::{
-    c_max, c_p_alloc, layer_loss, payout_floor, r_net, recovery_rate, surplus, surplus_parts, ticket_face,
+    c_max, c_p_alloc, payout_floor, r_net, recovery_rate, surplus, surplus_parts, surplus_split, ticket_face,
     usdc,
 };
-use math::Q64;
+use math::{sort_bids, waterfall_pay, Bid, Q64};
 
 pub const BOARD_IDLE: u8 = 0;
 pub const BOARD_SETTLED: u8 = 1;
@@ -32,9 +32,11 @@ pub struct Board {
     pub surplus: u64,
     pub surplus_r: u64,
     pub surplus_p: u64,
+    pub surplus_c: u64,
     pub paid_users: u64,
     pub paid_premium: u64,
     pub paid_surplus: u64,
+    pub paid_cover: u64,
     pub drawn_h: u64,
     pub dust: u64,
     pub cell: u16,
@@ -42,10 +44,12 @@ pub struct Board {
     pub bump: u8,
     pub fee_bps: u16,
     pub fee_timing: u8,
+    pub champion: Pubkey,
+    pub reward_bits: u64,
 }
 
 impl Board {
-    pub const SIZE: usize = 8 + 32 + 8 * 16 + 16 + 2 + 1 + 1 + 2 + 1;
+    pub const SIZE: usize = 8 + 32 + 8 * 18 + 16 + 2 + 1 + 1 + 2 + 1 + 32 + 8;
 }
 
 #[account]
@@ -69,6 +73,19 @@ pub struct AdjustPool {
 
 impl AdjustPool {
     pub const SIZE: usize = 8 + 8 + 8 + 1;
+}
+
+/// Protocol-wide cover for Risk LPs with cumulative $\Pi<0$. Ledger only; USDC stays in the vault ATA.
+/// Outflows are platform-signed (`CoverLp.authority == Market.platform`). No calendar gate.
+
+#[account]
+pub struct LossPool {
+    pub available: u64,
+    pub bump: u8,
+}
+
+impl LossPool {
+    pub const SIZE: usize = 8 + 8 + 1;
 }
 
 /// Per-board $C_P$ cap. `allocated` is written at `begin_settle`.
@@ -219,8 +236,10 @@ pub fn compute_begin(
     let c_r = book.map(|b| b.c_r).unwrap_or(0);
     if let Some(b) = book {
         require!(b.market == board.market, VaultError::WrongBoard);
+        board.champion = b.head_quote;
     }
-    let r = r_net(board.trading_revenue, premium);
+    // Premium is a reward after users are whole. Do not haircut winners to prepay LP quotes.
+    let r = r_net(board.trading_revenue, 0);
     let alloc = draw_c_p(liability, r, 0, c_r, pool, tap, board.market)?;
     let cmax = usdc(c_max(
         Q64::from_int(r as i64),
@@ -235,12 +254,8 @@ pub fn compute_begin(
         Q64::from_int(liability as i64),
         rho,
     ));
-    // No filled risk capital → residual stays with the platform (fees are a separate pot).
-    let (sr, sp) = if c_r == 0 {
-        (0, s)
-    } else {
-        surplus_parts(s, market.alpha_r_bps)
-    };
+    // No filled risk capital → remainder after $S_C$ stays with the platform.
+    let (sc, sr, sp) = surplus_split(s, market.alpha_r_bps, c_r > 0);
 
     board.premium_payable = premium;
     board.c_r_final = c_r;
@@ -250,10 +265,12 @@ pub fn compute_begin(
     board.surplus = s;
     board.surplus_r = sr;
     board.surplus_p = sp;
+    board.surplus_c = sc;
     board.cell = cell as u16;
     board.phase = BOARD_SETTLED;
     board.fee_bps = market.fee_bps;
     board.fee_timing = market.fee_timing;
+    board.reward_bits = 0;
     Ok(())
 }
 
@@ -367,15 +384,10 @@ pub fn draw_quote(
     require!(board.phase == BOARD_SETTLED, VaultError::NotFinalized);
     require!(layer.market == board.market && quote.market == board.market, VaultError::WrongBoard);
     require!(quote.layer_id == layer.layer_id, VaultError::WrongBoard);
-    // Own funds first: R_net. Draw C_R only for the leftover shortfall.
-    let own = r_net(board.trading_revenue, board.premium_payable);
+    // Own funds first: trading revenue. Every filled quote may cover the leftover shortfall.
+    let own = board.trading_revenue;
     let need = board.liability.saturating_sub(own).saturating_sub(board.drawn_h);
-    let h_raw = usdc(layer_loss(
-        Q64::from_int(board.liability as i64),
-        Q64::from_int(layer.attachment as i64),
-        Q64::from_int(quote.filled as i64),
-    ));
-    let h = h_raw.min(need);
+    let h = quote.filled.min(need);
     require!(h <= quote.capacity, VaultError::Overflow);
     let locked = reserved_for_quote(quote);
     if locked > 0 {
@@ -384,6 +396,7 @@ pub fn draw_quote(
     if h > 0 {
         lp.available = accounting::debit_available(lp.available, lp.reserved, h)?;
         board.drawn_h = board.drawn_h.saturating_add(h);
+        pnl_add(lp, -(h as i64));
     }
     Ok(h)
 }
@@ -398,41 +411,128 @@ pub fn release_quote(board: &Board, quote: &Quote, lp: &mut crate::UserVault) ->
     Ok(())
 }
 
-pub fn pay_premium_inner(board: &mut Board, quote: &Quote, lp: &mut crate::UserVault) -> Result<u64> {
+pub fn pay_premium_inner(
+    board: &mut Board,
+    _quote_key: Pubkey,
+    quote: &Quote,
+    lp: &mut crate::UserVault,
+) -> Result<u64> {
     require!(board.phase == BOARD_SETTLED, VaultError::NotFinalized);
     require!(quote.market == board.market, VaultError::WrongBoard);
+    if board.rho_raw < Q64::ONE.raw() {
+        return Ok(0);
+    }
+    // No draw: rewards come from S_R waterfall (pay_surplus_lp), not a second premium mint.
+    if board.liability <= board.trading_revenue {
+        return Ok(0);
+    }
     let due = quote.premium_owed;
     if due == 0 {
         return Ok(0);
     }
     lp.available = accounting::credit(lp.available, due)?;
     board.paid_premium = board.paid_premium.saturating_add(due);
+    pnl_add(lp, due as i64);
     Ok(due)
 }
 
 pub fn pay_surplus_lp_inner(
     board: &mut Board,
+    quote_key: Pubkey,
     quote: &Quote,
+    layer: Option<&Layer>,
     lp: &mut crate::UserVault,
     weight_sum: u64,
 ) -> Result<u64> {
     require!(board.phase == BOARD_SETTLED, VaultError::NotFinalized);
     require!(board.rho_raw >= Q64::ONE.raw(), VaultError::NoSurplus);
     require!(quote.market == board.market, VaultError::WrongBoard);
-    if board.surplus_r == 0 || weight_sum == 0 || quote.filled == 0 {
+    if board.surplus_r == 0 || quote.filled == 0 {
         return Ok(0);
     }
-    let w = (quote.profit_share_bps as u64).saturating_mul(quote.filled);
-    let raw = (board.surplus_r as u128 * w as u128 / weight_sum as u128) as u64;
     let left = board.surplus_r.saturating_sub(board.paid_surplus);
-    let share = raw.min(left);
+    if left == 0 {
+        return Ok(0);
+    }
+    let share = if board.liability <= board.trading_revenue {
+        let layer = layer.ok_or(error!(VaultError::WrongBoard))?;
+        no_draw_waterfall_share(board, layer, quote_key, quote)?
+    } else {
+        if weight_sum == 0 {
+            return Ok(0);
+        }
+        let w = (quote.profit_share_bps as u64).saturating_mul(quote.filled);
+        ((board.surplus_r as u128 * w as u128 / weight_sum as u128) as u64).min(left)
+    };
+    let share = share.min(left);
     if share > 0 {
         lp.available = accounting::credit(lp.available, share)?;
         board.paid_surplus = board.paid_surplus.saturating_add(share);
+        pnl_add(lp, share as i64);
     }
     Ok(share)
 }
 
+fn reconstructed_owed(unit: u128, filled: u64) -> u64 {
+    (unit.saturating_mul(filled as u128) / 1_000_000) as u64
+}
+
+fn no_draw_waterfall_share(
+    board: &mut Board,
+    layer: &Layer,
+    quote_key: Pubkey,
+    quote: &Quote,
+) -> Result<u64> {
+    require!(layer.market == board.market, VaultError::WrongBoard);
+    require!(quote.layer_id == layer.layer_id, VaultError::WrongBoard);
+    let mut slot = None;
+    let mut mine = None;
+    let mut bids = Vec::new();
+    let mut caps = Vec::new();
+    for i in 0..layer.quote_count as usize {
+        if layer.quote_live[i] == 0 || layer.quote_filled[i] == 0 {
+            continue;
+        }
+        let live = caps.len();
+        if layer.quote_keys[i] == quote_key {
+            slot = Some(i);
+            mine = Some(live);
+        }
+        bids.push(Bid {
+            unit_premium: layer.unit_at(i),
+            ts: layer.quote_ts[i],
+            idx: live,
+        });
+        let cap = if layer.quote_keys[i] == quote_key {
+            quote.premium_owed
+        } else {
+            reconstructed_owed(layer.unit_at(i), layer.quote_filled[i])
+        };
+        caps.push(cap);
+    }
+    let slot = slot.ok_or(error!(VaultError::WrongBoard))?;
+    let mine = mine.ok_or(error!(VaultError::WrongBoard))?;
+    require!(slot < 64, VaultError::Overflow);
+    let bit = 1u64 << slot;
+    if board.reward_bits & bit != 0 {
+        return Ok(0);
+    }
+    let order = sort_bids(bids);
+    let ranked: Vec<u64> = order.iter().map(|b| caps[b.idx]).collect();
+    let pays = waterfall_pay(board.surplus_r, &ranked);
+    let mut due = 0u64;
+    for (rank_pos, b) in order.iter().enumerate() {
+        if b.idx == mine {
+            due = pays[rank_pos];
+            break;
+        }
+    }
+    board.reward_bits |= bit;
+    Ok(due)
+}
+
+/// Credit this board's \(S_P\) into the platform UserVault. Any payer MAY submit.
+/// USDC stays in the vault ATA; only the platform owner can `withdraw`.
 pub fn pay_surplus_platform_inner(
     board: &mut Board,
     platform: &mut crate::UserVault,
@@ -443,11 +543,49 @@ pub fn pay_surplus_platform_inner(
     if share == 0 {
         return Ok(0);
     }
-    require!(board.paid_surplus.saturating_add(share) <= board.surplus, VaultError::Overflow);
+    require!(board.paid_surplus.saturating_add(share) <= board.surplus.saturating_sub(board.surplus_c), VaultError::Overflow);
     platform.available = accounting::credit(platform.available, share)?;
     board.paid_surplus = board.paid_surplus.saturating_add(share);
     board.surplus_p = 0;
     Ok(share)
+}
+
+pub fn pay_surplus_cover_inner(board: &mut Board, pool: &mut LossPool) -> Result<u64> {
+    require!(board.phase == BOARD_SETTLED, VaultError::NotFinalized);
+    require!(board.rho_raw >= Q64::ONE.raw(), VaultError::NoSurplus);
+    let due = board.surplus_c.saturating_sub(board.paid_cover);
+    if due == 0 {
+        return Ok(0);
+    }
+    pool.available = accounting::credit(pool.available, due)?;
+    board.paid_cover = board.paid_cover.saturating_add(due);
+    Ok(due)
+}
+
+/// Uncovered operating loss: $(-\Pi)^+ - \texttt{cover\_paid}$.
+pub fn uncovered_loss(lp: &crate::UserVault) -> u64 {
+    if lp.risk_pnl >= 0 {
+        return 0;
+    }
+    lp.risk_pnl.unsigned_abs().saturating_sub(lp.cover_paid)
+}
+
+/// Credit a losing LP from the protocol cover pool up to uncovered $(-\Pi)^+$.
+/// Does not rewrite `risk_pnl`. Inflows (`pay_surplus_cover`) are not gated.
+pub fn cover_lp_loss_inner(pool: &mut LossPool, lp: &mut crate::UserVault) -> Result<u64> {
+    let need = uncovered_loss(lp);
+    if need == 0 || pool.available == 0 {
+        return Ok(0);
+    }
+    let take = need.min(pool.available);
+    pool.available = pool.available.saturating_sub(take);
+    lp.available = accounting::credit(lp.available, take)?;
+    lp.cover_paid = lp.cover_paid.saturating_add(take);
+    Ok(take)
+}
+
+fn pnl_add(user: &mut crate::UserVault, delta: i64) {
+    user.risk_pnl = user.risk_pnl.saturating_add(delta);
 }
 
 pub fn refund_position_inner(
@@ -531,6 +669,9 @@ mod tests {
             available,
             reserved,
             bump: 0,
+            risk_pnl: 0,
+            bond: 0,
+            cover_paid: 0,
         }
     }
 
@@ -548,9 +689,11 @@ mod tests {
             surplus: 0,
             surplus_r: 0,
             surplus_p: 0,
+            surplus_c: 0,
             paid_users: 0,
             paid_premium: 0,
             paid_surplus: 0,
+            paid_cover: 0,
             drawn_h: 0,
             dust: 0,
             cell: 0,
@@ -558,6 +701,8 @@ mod tests {
             bump: 0,
             fee_bps: 0,
             fee_timing: 0,
+            champion: Pubkey::default(),
+            reward_bits: 0,
         }
     }
 
@@ -737,6 +882,7 @@ mod tests {
             layer_id: 1,
             quote_count: 1,
             bump: 0,
+            ..Layer::default()
         };
         let quote = Quote {
             market: b.market,
@@ -752,10 +898,10 @@ mod tests {
             bump: 0,
         };
         let mut lp = user(100, 40);
-        assert_eq!(draw_quote(&mut b, &layer, &quote, &mut lp).unwrap(), 30);
+        assert_eq!(draw_quote(&mut b, &layer, &quote, &mut lp).unwrap(), 40);
         assert_eq!(lp.reserved, 0);
-        assert_eq!(lp.available, 70);
-        assert_eq!(b.drawn_h, 30);
+        assert_eq!(lp.available, 60);
+        assert_eq!(b.drawn_h, 40);
     }
 
     #[test]
@@ -783,6 +929,7 @@ mod tests {
             layer_id: 1,
             quote_count: 1,
             bump: 0,
+            ..Layer::default()
         };
         let quote = Quote {
             market: b.market,
@@ -819,6 +966,7 @@ mod tests {
             layer_id: 1,
             quote_count: 1,
             bump: 0,
+            ..Layer::default()
         };
         let quote = Quote {
             market: b.market,
@@ -852,6 +1000,7 @@ mod tests {
             layer_id: 1,
             quote_count: 1,
             bump: 0,
+            ..Layer::default()
         };
         let quote = Quote {
             market: b.market,
@@ -870,6 +1019,80 @@ mod tests {
         assert_eq!(draw_quote(&mut b, &layer, &quote, &mut lp).unwrap(), 10);
         assert_eq!(lp.reserved, 0);
         assert_eq!(lp.available, 190);
+    }
+
+    #[test]
+    fn no_draw_surplus_waterfall_by_rank() {
+        let mut b = board();
+        b.phase = BOARD_SETTLED;
+        b.trading_revenue = 100;
+        b.liability = 40;
+        b.rho_raw = Q64::ONE.raw();
+        b.surplus_r = 100;
+        let cheap = Pubkey::new_from_array([1; 32]);
+        let rich = Pubkey::new_from_array([2; 32]);
+        let mut layer = Layer {
+            market: b.market,
+            attachment: 0,
+            thickness: 0,
+            filled: 200,
+            layer_id: 1,
+            quote_count: 2,
+            bump: 0,
+            ..Layer::default()
+        };
+        layer.quote_live[0] = 1;
+        layer.quote_live[1] = 1;
+        layer.quote_keys[0] = cheap;
+        layer.quote_keys[1] = rich;
+        layer.quote_filled[0] = 80;
+        layer.quote_filled[1] = 80;
+        layer.set_unit(0, 80 * 1_000_000 / 80);
+        layer.set_unit(1, 50 * 1_000_000 / 80);
+        layer.quote_ts[0] = 1;
+        layer.quote_ts[1] = 2;
+        let q0 = Quote {
+            market: b.market,
+            lp: cheap,
+            capacity: 80,
+            filled: 80,
+            premium: 80,
+            premium_owed: 80,
+            ts: 1,
+            profit_share_bps: 0,
+            layer_id: 1,
+            cancelled: false,
+            bump: 0,
+        };
+        let q1 = Quote {
+            market: b.market,
+            lp: rich,
+            capacity: 80,
+            filled: 80,
+            premium: 50,
+            premium_owed: 50,
+            ts: 2,
+            profit_share_bps: 0,
+            layer_id: 1,
+            cancelled: false,
+            bump: 0,
+        };
+        let mut lp1 = user(0, 0);
+        assert_eq!(
+            pay_surplus_lp_inner(&mut b, rich, &q1, Some(&layer), &mut lp1, 0).unwrap(),
+            50
+        );
+        let mut lp0 = user(0, 0);
+        assert_eq!(
+            pay_surplus_lp_inner(&mut b, cheap, &q0, Some(&layer), &mut lp0, 0).unwrap(),
+            50
+        );
+        assert_eq!(lp1.available, 50);
+        assert_eq!(lp0.available, 50);
+        assert_eq!(
+            pay_surplus_lp_inner(&mut b, rich, &q1, Some(&layer), &mut lp1, 0).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -895,5 +1118,39 @@ mod tests {
         assert_eq!(tap.allocated, 20);
         assert_eq!(draw_c_p(30, 40, 0, 0, Some(&mut pool), Some(&mut tap), market).unwrap(), 0);
         assert_eq!(draw_c_p(100, 40, 0, 0, None, None, market).unwrap(), 0);
+    }
+
+    #[test]
+    fn surplus_cover_funds_loss_pool_and_tops_up_negative_pnl() {
+        let mut b = board();
+        b.phase = BOARD_SETTLED;
+        b.rho_raw = Q64::ONE.raw();
+        b.surplus = 100;
+        b.surplus_c = 20;
+        b.surplus_r = 56;
+        b.surplus_p = 24;
+        let mut pool = LossPool {
+            available: 0,
+            bump: 1,
+        };
+        assert_eq!(pay_surplus_cover_inner(&mut b, &mut pool).unwrap(), 20);
+        assert_eq!(pool.available, 20);
+        assert_eq!(b.paid_cover, 20);
+        let mut lp = user(0, 0);
+        lp.risk_pnl = -50;
+        assert_eq!(uncovered_loss(&lp), 50);
+        assert_eq!(cover_lp_loss_inner(&mut pool, &mut lp).unwrap(), 20);
+        assert_eq!(lp.available, 20);
+        assert_eq!(lp.risk_pnl, -50);
+        assert_eq!(lp.cover_paid, 20);
+        assert_eq!(uncovered_loss(&lp), 30);
+        assert_eq!(pool.available, 0);
+        assert_eq!(cover_lp_loss_inner(&mut pool, &mut lp).unwrap(), 0);
+        pool.available = 100;
+        assert_eq!(cover_lp_loss_inner(&mut pool, &mut lp).unwrap(), 30);
+        assert_eq!(lp.cover_paid, 50);
+        assert_eq!(lp.risk_pnl, -50);
+        assert_eq!(uncovered_loss(&lp), 0);
+        assert_eq!(cover_lp_loss_inner(&mut pool, &mut lp).unwrap(), 0);
     }
 }

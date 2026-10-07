@@ -18,5 +18,6 @@ cpi = ["no-entrypoint"]
 
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+bytemuck = { version = "1", features = ["derive"] }
 anchor-spl = "0.32.1"
 math = { path = "../../crates/math" }

@@ -50,6 +50,8 @@ pub struct MarketProj {
     pub risk_lock_ts: i64,
     #[serde(default)]
     pub report_window_secs: i64,
+    #[serde(default)]
+    pub report_open_ts: i64,
     /// FamilyExtra.a — Gaussian/lognormal $x_{\min}$ (Q64 raw).
     #[serde(default)]
     pub extra_a: i128,
@@ -62,6 +64,9 @@ pub struct MarketProj {
     /// True while MagicBlock owns the market PDA (FR-TRD-01 fills go to ER).
     #[serde(default)]
     pub delegated: bool,
+    /// On-chain `Market.platform` — signs `claim_fees` / `cover_lp_loss`; receives \(S_P\).
+    #[serde(default)]
+    pub platform: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -123,7 +128,16 @@ pub struct ResolutionRow {
     pub votes_challenge: u8,
     pub refunds_due: bool,
     pub early_resolve: bool,
+    #[serde(default)]
+    pub slash_due: bool,
+    #[serde(default)]
+    pub bond_holder: String,
+    #[serde(default)]
+    pub bond_locked: u64,
+    #[serde(default)]
+    pub bond_slashed: bool,
     pub close_ts: i64,
+    pub report_open_ts: i64,
     pub report_deadline: i64,
     pub challenge_end: i64,
     pub vote_end: i64,
@@ -146,6 +160,18 @@ pub struct CommitteeSnap {
     pub m: u8,
     pub n: u8,
     pub epoch: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProtocolSnap {
+    pub platform: String,
+    pub fee_bps: u16,
+    pub fee_timing: u8,
+    pub report_window_secs: i64,
+    pub challenge_secs: i64,
+    pub committee_bond: u64,
+    pub tap_cap_max: u64,
+    pub alpha_r_bps: u16,
 }
 
 impl MarketProj {
@@ -205,6 +231,16 @@ pub struct ListingMeta {
     pub event: String,
     #[serde(default)]
     pub blocked_regions: Vec<String>,
+    #[serde(default = "default_source_locale")]
+    pub source_locale: String,
+    #[serde(default)]
+    pub i18n_json: String,
+    #[serde(default)]
+    pub image_id: String,
+}
+
+fn default_source_locale() -> String {
+    "en".into()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -227,6 +263,12 @@ pub struct ApplicationRow {
     pub reviewed_at: i64,
     pub compose_json: String,
     pub market: String,
+    #[serde(default = "default_source_locale")]
+    pub source_locale: String,
+    #[serde(default)]
+    pub i18n_json: String,
+    #[serde(default)]
+    pub image_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -285,7 +327,9 @@ struct Inner {
     layers: Vec<LayerRow>,
     resolutions: Vec<ResolutionRow>,
     committee: Option<CommitteeSnap>,
+    protocol: Option<ProtocolSnap>,
     pool_available: u64,
+    cover_available: u64,
     slot: u64,
     ledger_genesis: Option<String>,
 }
@@ -620,7 +664,12 @@ impl MemoryStore {
         rows.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
         let total = rows.len() as u64;
         let limit = limit.clamp(1, 100);
-        let page = page.max(1);
+        let pages = if total == 0 {
+            1
+        } else {
+            ((total + u64::from(limit) - 1) / u64::from(limit)) as u32
+        };
+        let page = page.max(1).min(pages);
         let start = (u64::from(page.saturating_sub(1)).saturating_mul(u64::from(limit))) as usize;
         let items = rows.into_iter().skip(start).take(limit as usize).collect();
         (total, items)
@@ -668,10 +717,15 @@ impl MemoryStore {
             .filter(|c| c.market == market)
             .cloned()
             .collect();
-        rows.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        rows.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
         let total = rows.len() as u64;
         let limit = limit.clamp(1, 100);
-        let page = page.max(1);
+        let pages = if total == 0 {
+            1
+        } else {
+            ((total + u64::from(limit) - 1) / u64::from(limit)) as u32
+        };
+        let page = page.max(1).min(pages);
         let start = (u64::from(page.saturating_sub(1)).saturating_mul(u64::from(limit))) as usize;
         let items = rows.into_iter().skip(start).take(limit as usize).collect();
         (total, items)
@@ -778,6 +832,18 @@ impl MemoryStore {
         self.inner.read().expect("store").committee.clone()
     }
 
+    pub fn set_protocol(&self, row: ProtocolSnap) {
+        self.inner.write().expect("store").protocol = Some(row);
+    }
+
+    pub fn clear_protocol(&self) {
+        self.inner.write().expect("store").protocol = None;
+    }
+
+    pub fn protocol(&self) -> Option<ProtocolSnap> {
+        self.inner.read().expect("store").protocol.clone()
+    }
+
     pub fn ledger_genesis(&self) -> Option<String> {
         self.inner.read().expect("store").ledger_genesis.clone()
     }
@@ -797,7 +863,9 @@ impl MemoryStore {
         g.layers.clear();
         g.resolutions.clear();
         g.committee = None;
+        g.protocol = None;
         g.pool_available = 0;
+        g.cover_available = 0;
         g.slot = 0;
         Self::flush_listings(&g);
         Self::flush_fills(&g);
@@ -835,6 +903,14 @@ impl MemoryStore {
 
     pub fn pool_available(&self) -> u64 {
         self.inner.read().expect("store").pool_available
+    }
+
+    pub fn set_cover(&self, available: u64) {
+        self.inner.write().expect("store").cover_available = available;
+    }
+
+    pub fn cover_available(&self) -> u64 {
+        self.inner.read().expect("store").cover_available
     }
 
     pub fn all_positions(&self) -> Vec<PositionRow> {
@@ -987,6 +1063,7 @@ async fn migrate_projections(pool: &sqlx::PgPool) -> Result<()> {
             close_ts BIGINT NOT NULL DEFAULT 0,
             risk_lock_ts BIGINT NOT NULL DEFAULT 0,
             report_window_secs BIGINT NOT NULL DEFAULT 0,
+            report_open_ts BIGINT NOT NULL DEFAULT 0,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )
         "#,
@@ -1008,10 +1085,12 @@ async fn migrate_projections(pool: &sqlx::PgPool) -> Result<()> {
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS close_ts BIGINT NOT NULL DEFAULT 0",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS risk_lock_ts BIGINT NOT NULL DEFAULT 0",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS report_window_secs BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS report_open_ts BIGINT NOT NULL DEFAULT 0",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS extra_a TEXT NOT NULL DEFAULT '0'",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS extra_b TEXT NOT NULL DEFAULT '0'",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS extra_u2 SMALLINT NOT NULL DEFAULT 0",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS delegated BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT ''",
     ] {
         sqlx::query(sql).execute(pool).await?;
     }
@@ -1083,6 +1162,7 @@ async fn migrate_projections(pool: &sqlx::PgPool) -> Result<()> {
             refunds_due BOOLEAN NOT NULL,
             early_resolve BOOLEAN NOT NULL,
             close_ts BIGINT NOT NULL,
+            report_open_ts BIGINT NOT NULL DEFAULT 0,
             report_deadline BIGINT NOT NULL,
             challenge_end BIGINT NOT NULL,
             vote_end BIGINT NOT NULL,
@@ -1096,12 +1176,19 @@ async fn migrate_projections(pool: &sqlx::PgPool) -> Result<()> {
             challenged JSONB NOT NULL,
             final_outcome JSONB NOT NULL,
             evidence_hash TEXT NOT NULL,
+            slash_due BOOLEAN NOT NULL DEFAULT FALSE,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )
         "#,
     )
     .execute(pool)
     .await?;
+    sqlx::query("ALTER TABLE resolution_proj ADD COLUMN IF NOT EXISTS slash_due BOOLEAN NOT NULL DEFAULT FALSE")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE resolution_proj ADD COLUMN IF NOT EXISTS report_open_ts BIGINT NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await?;
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS pool_proj (
@@ -1134,7 +1221,8 @@ async fn load_projections(pool: &sqlx::PgPool, mem: &MemoryStore) -> Result<()> 
         "SELECT market, slot, family, status, n, beta, p0, theta, exposure,
                 trading_revenue, premium_payable, c_m, c_r, fee_bps, fee_timing, traders, tickets,
                 stake_usdc, board_phase, rho_raw, settle_cell, liability, c_p_board,
-                c_p_alloc, close_ts, risk_lock_ts, report_window_secs, extra_a, extra_b, extra_u2
+                c_p_alloc, close_ts, risk_lock_ts, report_window_secs, extra_a, extra_b, extra_u2,
+                delegated, platform
          FROM market_proj",
     )
     .fetch_all(pool)
@@ -1173,10 +1261,12 @@ async fn load_projections(pool: &sqlx::PgPool, mem: &MemoryStore) -> Result<()> 
             close_ts: r.try_get("close_ts")?,
             risk_lock_ts: r.try_get("risk_lock_ts")?,
             report_window_secs: r.try_get("report_window_secs")?,
+            report_open_ts: r.try_get("report_open_ts").unwrap_or(0),
             extra_a: r.try_get::<String, _>("extra_a").ok().and_then(|s| s.parse().ok()).unwrap_or(0),
             extra_b: r.try_get::<String, _>("extra_b").ok().and_then(|s| s.parse().ok()).unwrap_or(0),
             extra_u2: r.try_get::<i16, _>("extra_u2").unwrap_or(0).clamp(0, 255) as u8,
             delegated: r.try_get::<bool, _>("delegated").unwrap_or(false),
+            platform: r.try_get::<String, _>("platform").unwrap_or_default(),
         });
     }
     let positions = sqlx::query(
@@ -1246,9 +1336,9 @@ async fn load_projections(pool: &sqlx::PgPool, mem: &MemoryStore) -> Result<()> 
     );
     let resolutions = sqlx::query(
         "SELECT market, record, phase, family, m, n, extensions, votes_proposal, votes_challenge,
-                refunds_due, early_resolve, close_ts, report_deadline, challenge_end, vote_end,
+                refunds_due, early_resolve, close_ts, report_open_ts, report_deadline, challenge_end, vote_end,
                 report_window_secs, challenge_secs, proposer, challenger, authorized_reporter,
-                members, proposed, challenged, final_outcome, evidence_hash
+                members, proposed, challenged, final_outcome, evidence_hash, slash_due
          FROM resolution_proj",
     )
     .fetch_all(pool)
@@ -1268,7 +1358,12 @@ async fn load_projections(pool: &sqlx::PgPool, mem: &MemoryStore) -> Result<()> 
                 votes_challenge: r.try_get::<i16, _>("votes_challenge").unwrap_or(0) as u8,
                 refunds_due: r.try_get("refunds_due").unwrap_or(false),
                 early_resolve: r.try_get("early_resolve").unwrap_or(false),
+                slash_due: r.try_get("slash_due").unwrap_or(false),
+                bond_holder: String::new(),
+                bond_locked: 0,
+                bond_slashed: false,
                 close_ts: r.try_get("close_ts").unwrap_or(0),
+                report_open_ts: r.try_get("report_open_ts").unwrap_or(0),
                 report_deadline: r.try_get("report_deadline").unwrap_or(0),
                 challenge_end: r.try_get("challenge_end").unwrap_or(0),
                 vote_end: r.try_get("vote_end").unwrap_or(0),
@@ -1292,6 +1387,12 @@ async fn load_projections(pool: &sqlx::PgPool, mem: &MemoryStore) -> Result<()> 
         mem.set_pool(row.try_get::<i64, _>("available").unwrap_or(0) as u64);
         mem.set_slot(row.try_get::<i64, _>("slot").unwrap_or(0) as u64);
     }
+    if let Ok(Some(row)) = sqlx::query("SELECT available FROM pool_proj WHERE id = 2")
+        .fetch_optional(pool)
+        .await
+    {
+        mem.set_cover(row.try_get::<i64, _>("available").unwrap_or(0) as u64);
+    }
     Ok(())
 }
 
@@ -1306,10 +1407,10 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
             market, slot, family, status, n, beta, p0, theta, exposure,
             trading_revenue, premium_payable, c_m, c_r, fee_bps, fee_timing, traders, tickets,
             stake_usdc, board_phase, rho_raw, settle_cell, liability, c_p_board,
-            c_p_alloc, close_ts, risk_lock_ts, report_window_secs, extra_a, extra_b, extra_u2, delegated
+            c_p_alloc, close_ts, risk_lock_ts, report_window_secs, report_open_ts, extra_a, extra_b, extra_u2, delegated, platform
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
+            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
         )
         ON CONFLICT (market) DO UPDATE SET
             slot = EXCLUDED.slot,
@@ -1338,10 +1439,12 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
             close_ts = EXCLUDED.close_ts,
             risk_lock_ts = EXCLUDED.risk_lock_ts,
             report_window_secs = EXCLUDED.report_window_secs,
+            report_open_ts = EXCLUDED.report_open_ts,
             extra_a = EXCLUDED.extra_a,
             extra_b = EXCLUDED.extra_b,
             extra_u2 = EXCLUDED.extra_u2,
             delegated = EXCLUDED.delegated,
+            platform = EXCLUDED.platform,
             updated_at = now()
         "#,
     )
@@ -1372,10 +1475,12 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
     .bind(row.close_ts)
     .bind(row.risk_lock_ts)
     .bind(row.report_window_secs)
+    .bind(row.report_open_ts)
     .bind(row.extra_a.to_string())
     .bind(row.extra_b.to_string())
     .bind(i16::from(row.extra_u2))
     .bind(row.delegated)
+    .bind(&row.platform)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -1459,10 +1564,10 @@ pub async fn persist_projections(pool: &sqlx::PgPool, store: &MemoryStore) -> Re
                 market, record, phase, family, m, n, extensions, votes_proposal, votes_challenge,
                 refunds_due, early_resolve, close_ts, report_deadline, challenge_end, vote_end,
                 report_window_secs, challenge_secs, proposer, challenger, authorized_reporter,
-                members, proposed, challenged, final_outcome, evidence_hash
+                members, proposed, challenged, final_outcome, evidence_hash, report_open_ts, slash_due
             ) VALUES (
                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-                $21,$22,$23,$24,$25
+                $21,$22,$23,$24,$25,$26,$27
             )
             "#,
         )
@@ -1491,6 +1596,8 @@ pub async fn persist_projections(pool: &sqlx::PgPool, store: &MemoryStore) -> Re
         .bind(serde_json::to_value(&r.challenged)?)
         .bind(serde_json::to_value(&r.final_outcome)?)
         .bind(&r.evidence_hash)
+        .bind(r.report_open_ts)
+        .bind(r.slash_due)
         .execute(&mut *tx)
         .await?;
     }
@@ -1505,6 +1612,20 @@ pub async fn persist_projections(pool: &sqlx::PgPool, store: &MemoryStore) -> Re
         "#,
     )
     .bind(store.pool_available() as i64)
+    .bind(store.slot() as i64)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO pool_proj (id, available, slot)
+        VALUES (2, $1, $2)
+        ON CONFLICT (id) DO UPDATE SET
+            available = EXCLUDED.available,
+            slot = EXCLUDED.slot,
+            updated_at = now()
+        "#,
+    )
+    .bind(store.cover_available() as i64)
     .bind(store.slot() as i64)
     .execute(&mut *tx)
     .await?;
@@ -1582,10 +1703,12 @@ mod tests {
             close_ts: 0,
             risk_lock_ts: 0,
             report_window_secs: 0,
+            report_open_ts: 0,
             extra_a: 0,
             extra_b: 0,
             extra_u2: 0,
             delegated: false,
+            platform: String::new(),
         }
     }
 
@@ -1615,6 +1738,9 @@ mod tests {
                 description: String::new(),
                 event: String::new(),
                 blocked_regions: Vec::new(),
+                source_locale: "en".into(),
+                i18n_json: String::new(),
+                image_id: String::new(),
             },
         );
         store.wipe_derived();

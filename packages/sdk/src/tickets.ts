@@ -1,6 +1,8 @@
 /** Last fill mask per market — claim/refund needs the frozen S (FR-SET). Not a secret. */
 
+import { formatTags, listingHeadline, localListing } from "./listing";
 import { hashHex, setHash, skellamTicketHash } from "./pda";
+import { fetchInfo, statusName } from "./preview";
 
 const key = (owner: string) => `cpm.tickets.${owner}`;
 
@@ -142,13 +144,134 @@ export function clearSessionMeta(owner: string): void {
   sessionStorage.removeItem(`cpm.session.meta.${owner}`);
 }
 
-export type InboxItem = { id: string; title: string; market?: string; market_title?: string; ts: number };
+export type InboxItem = {
+  id: string;
+  title: string;
+  /** Raw keeper / notify kind when this row came from `/v1/notify`. */
+  kind?: string;
+  market?: string;
+  market_title?: string;
+  /** Catalog tags label, e.g. `football · epl`. */
+  market_tags?: string;
+  /** Human status, e.g. Trading / Settled. */
+  market_status?: string;
+  ts: number;
+  /**
+   * Explicit unread flag. Missing `read` on legacy rows counts as already seen (history).
+   * New alerts set `read: false`.
+   */
+  read?: boolean;
+  read_at?: number;
+};
 
+const INBOX_CAP = 80;
+
+/** Only explicit `read === false` is unread — legacy rows without the field stay in History. */
+export function isInboxUnread(item: Pick<InboxItem, "read">): boolean {
+  return item.read === false;
+}
+
+export function unreadInboxCount(rows?: InboxItem[]): number {
+  return (rows ?? loadInbox()).filter(isInboxUnread).length;
+}
+
+export function markInboxRead(id: string): InboxItem[] {
+  const rows = loadInbox();
+  const i = rows.findIndex((r) => r.id === id);
+  if (i < 0) return rows;
+  if (rows[i]!.read === true) return rows;
+  rows[i] = { ...rows[i]!, read: true, read_at: Date.now() };
+  writeInbox(rows);
+  return rows;
+}
+
+export function markAllInboxRead(): InboxItem[] {
+  const now = Date.now();
+  // Fold legacy rows (missing `read`) into History so Unread stays clean.
+  const rows = loadInbox().map((r) => (r.read === true ? r : { ...r, read: true, read_at: r.read_at || now }));
+  writeInbox(rows);
+  return rows;
+}
+
+/** Short English line for keeper notify kinds (FR-UI-21). Unknown kinds stay readable. */
+export function notifyKindLabel(kind: string): string {
+  switch (kind.trim().toLowerCase()) {
+    case "close":
+      return "Trading closed — market halted at close time";
+    case "commit":
+      return "Book committed from the rollup to L1";
+    case "undelegate":
+      return "Market book returned to L1 after close";
+    case "challenge":
+      return "Challenge opened on this market’s result";
+    case "settle":
+    case "settled":
+      return "Market settled — claim payout if you won";
+    case "void":
+    case "refund":
+      return "Market voided — refund of cost paid is available";
+    case "session":
+    case "session_expiry":
+      return "Trading Session is about to expire — renew or revoke";
+    case "pending":
+    case "confirmed":
+      return "Fill moved from pending to confirmed";
+    default: {
+      const k = kind.trim();
+      if (!k) return "Market update";
+      return k.includes(" ") ? k : `Market update: ${k}`;
+    }
+  }
+}
+
+/** Prefer a human title; map legacy raw-kind titles stored in sessionStorage. */
+export function inboxTitle(item: Pick<InboxItem, "title" | "kind">): string {
+  if (item.kind) return notifyKindLabel(item.kind);
+  const t = (item.title ?? "").trim();
+  if (!t) return "Market update";
+  // Old ingest stored the raw kind as title.
+  if (/^[a-z][a-z0-9_]*$/i.test(t) && t.length <= 24) return notifyKindLabel(t);
+  return t;
+}
+
+export function shortMarketLabel(market: string, title?: string | null): string {
+  const name = (title ?? "").trim();
+  if (name) return name;
+  const m = market.trim();
+  if (m.length <= 12) return m;
+  return `${m.slice(0, 4)}…${m.slice(-4)}`;
+}
+
+function writeInbox(rows: InboxItem[]): void {
+  if (typeof sessionStorage === "undefined") return;
+  sessionStorage.setItem("cpm.inbox", JSON.stringify(rows.slice(0, INBOX_CAP)));
+}
+
+/** Insert or merge. Existing rows keep identity / read state; empty market fields are filled in. */
 export function pushInbox(item: InboxItem): void {
   if (typeof sessionStorage === "undefined") return;
   const rows = loadInbox();
-  if (rows.some((r) => r.id === item.id)) return;
-  sessionStorage.setItem("cpm.inbox", JSON.stringify([item, ...rows].slice(0, 40)));
+  const i = rows.findIndex((r) => r.id === item.id);
+  if (i >= 0) {
+    const cur = rows[i]!;
+    rows[i] = {
+      ...cur,
+      ...item,
+      title: item.title || cur.title,
+      kind: item.kind || cur.kind,
+      market: item.market || cur.market,
+      market_title: item.market_title?.trim() || cur.market_title,
+      market_tags: item.market_tags?.trim() || cur.market_tags,
+      market_status: item.market_status?.trim() || cur.market_status,
+      ts: item.ts || cur.ts,
+      // Never re-arm an alert the user already dismissed.
+      read: cur.read === true ? true : item.read !== undefined ? item.read : cur.read,
+      read_at: cur.read_at ?? item.read_at,
+    };
+  } else {
+    rows.unshift({ ...item, read: item.read ?? false });
+  }
+  writeInbox(rows);
 }
 
 export function loadInbox(): InboxItem[] {
@@ -159,6 +282,41 @@ export function loadInbox(): InboxItem[] {
   } catch {
     return [];
   }
+}
+
+/** Fill market name / tags / status from Market API for rows that still lack them. */
+export async function enrichInboxMarkets(api: string): Promise<InboxItem[]> {
+  const rows = loadInbox();
+  const markets = [
+    ...new Set(
+      rows
+        .filter((r) => r.market && (!r.market_title?.trim() || !r.market_status?.trim()))
+        .map((r) => r.market!.trim())
+        .filter(Boolean),
+    ),
+  ].slice(0, 16);
+  if (!markets.length) return rows;
+  await Promise.all(
+    markets.map(async (market) => {
+      try {
+        const info = await fetchInfo(api, market);
+        const market_title = listingHeadline({ title: info.title, family: info.family, market });
+        const market_tags = formatTags(info.tags, info.category);
+        const market_status = statusName(info.status ?? 1);
+        for (const row of loadInbox().filter((r) => r.market === market)) {
+          pushInbox({
+            ...row,
+            market_title,
+            market_tags,
+            market_status,
+          });
+        }
+      } catch {
+        /* market may be gone */
+      }
+    }),
+  );
+  return loadInbox();
 }
 
 export type NotifyEvent = { ts: number; kind: string; market: string };
@@ -188,10 +346,18 @@ export async function fetchNotify(api: string): Promise<NotifyEvent[]> {
 
 export function ingestNotifyEvents(events: NotifyEvent[]): InboxItem[] {
   for (const ev of events) {
+    const meta = localListing(ev.market);
+    const market_title = meta?.title?.trim()
+      ? listingHeadline({ title: meta.title, family: undefined, market: ev.market })
+      : undefined;
+    const market_tags = meta ? formatTags(meta.tags, meta.category) : undefined;
     pushInbox({
       id: `ntf-${ev.ts}-${ev.kind}-${ev.market}`,
-      title: ev.kind,
+      kind: ev.kind,
+      title: notifyKindLabel(ev.kind),
       market: ev.market,
+      market_title,
+      market_tags,
       ts: ev.ts < 1e12 ? ev.ts * 1000 : ev.ts,
     });
   }

@@ -157,6 +157,8 @@ pub struct Resolution {
     pub challenged: Outcome,
     pub final_outcome: Outcome,
     pub evidence_hash: [u8; 32],
+    pub report_open_ts: i64,
+    pub slash_due: bool,
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
@@ -169,9 +171,17 @@ pub struct RiskBook {
     pub n_layers: u8,
     pub gamma_bps: u16,
     pub bump: u8,
+    pub head_quote: Pubkey,
+    pub head_premium: u64,
+    pub head_unit: u128,
+    pub head_ts: i64,
 }
 
-#[derive(Clone, AnchorSerialize, AnchorDeserialize)]
+pub const MAX_QUOTES: usize = 64;
+
+/// Same layout as `risk::Layer` (`#[account(zero_copy)]`). Never Borsh-load this on-chain.
+#[derive(Copy, Clone)]
+#[repr(C)]
 pub struct Layer {
     pub market: Pubkey,
     pub attachment: u64,
@@ -180,6 +190,42 @@ pub struct Layer {
     pub layer_id: u8,
     pub quote_count: u8,
     pub bump: u8,
+    pub _pad: [u8; 5],
+    pub quote_live: [u8; MAX_QUOTES],
+    pub quote_skip: [u8; MAX_QUOTES],
+    pub quote_keys: [Pubkey; MAX_QUOTES],
+    pub quote_cap: [u64; MAX_QUOTES],
+    pub quote_filled: [u64; MAX_QUOTES],
+    pub unit_premia: [[u64; 2]; MAX_QUOTES],
+    pub quote_ts: [i64; MAX_QUOTES],
+}
+
+unsafe impl bytemuck::Pod for Layer {}
+unsafe impl bytemuck::Zeroable for Layer {}
+
+impl Default for Layer {
+    fn default() -> Self {
+        bytemuck::Zeroable::zeroed()
+    }
+}
+
+impl Layer {
+    pub const SIZE: usize = 8 + core::mem::size_of::<Self>();
+
+    pub fn from_account(data: &[u8]) -> Result<&Self> {
+        require!(data.len() >= Self::SIZE, ErrorCode::AccountDidNotDeserialize);
+        bytemuck::try_from_bytes(&data[8..Self::SIZE])
+            .map_err(|_| error!(ErrorCode::AccountDidNotDeserialize))
+    }
+
+    pub fn unit_at(&self, i: usize) -> u128 {
+        let [lo, hi] = self.unit_premia[i];
+        (lo as u128) | ((hi as u128) << 64)
+    }
+
+    pub fn set_unit(&mut self, i: usize, v: u128) {
+        self.unit_premia[i] = [v as u64, (v >> 64) as u64];
+    }
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
@@ -202,7 +248,6 @@ foreign_account!(Grid, MARKET_ID);
 foreign_account!(Position, MARKET_ID);
 foreign_account!(Resolution, RESOLUTION_ID);
 foreign_account!(RiskBook, RISK_ID);
-foreign_account!(Layer, RISK_ID);
 foreign_account!(Quote, RISK_ID);
 
 pub const PHASE_FINALIZED: u8 = 3;
