@@ -14,6 +14,9 @@ dist/
 .env
 .env.*
 !.env.example
+deploy/staging.env
+deploy/runtime.env
+!deploy/*.env.example
 .anchor/
 test-ledger/
 receipts/
