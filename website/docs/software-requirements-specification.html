@@ -1,0 +1,1823 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SRS — Continuous</title>
+    <meta name="theme-color" content="#0e0d0b" />
+    <link rel="icon" href="../assets/icon-192.png" type="image/png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../styles.css" />
+    <link rel="stylesheet" href="../docs.css" />
+  </head>
+  <body class="docs-body">
+    <div class="site docs-shell">
+      <header class="wrap nav">
+        <a class="brand" href="../index.html">
+          <img
+            class="brand-mark"
+            src="../assets/icon-192.png"
+            width="36"
+            height="36"
+            alt="Continuous"
+          />
+          <span class="brand-text">
+            Continuous
+            <small>docs</small>
+          </span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="../index.html#flow">Flow</a>
+          <a href="../index.html#rules">Rules</a>
+          <a href="../index.html">Landing</a>
+          <a href="https://github.com/bamaao/continuous-pdf-prediction-market">GitHub</a>
+        </nav>
+      </header>
+
+      <div class="docs-layout wrap">
+        <aside class="docs-side" aria-label="Document list">
+          <p class="kicker">Library</p>
+          <nav class="docs-nav">
+          <a href="./readme.html">README</a>
+          <a href="./product-specification.html">Product specification</a>
+          <a href="./software-requirements-specification.html" class="is-active">SRS</a>
+          <a href="./risk-capital-guide.html">Risk capital guide</a>
+          <a href="./system-architecture.html">System architecture</a>
+          <a href="./technical-architecture.html">Technical architecture</a>
+          </nav>
+        </aside>
+        <article class="docs-article">
+          <p class="docs-status">SRS</p>
+          <div class="markdown-body">
+<h1 id="software-requirements-specification">Software Requirements Specification</h1>
+<p><strong>Continuous PDF Prediction Market</strong></p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Document</td>
+<td>SRS</td>
+</tr>
+<tr>
+<td>Version</td>
+<td>1.63</td>
+</tr>
+<tr>
+<td>Status</td>
+<td>Baseline for implementation</td>
+</tr>
+<tr>
+<td>Audience</td>
+<td>Engineers, QA, reviewers</td>
+</tr>
+<tr>
+<td>Normative sources</td>
+<td><code>product-specification.md</code> (product rules), <code>system-architecture.md</code>, <code>technical-architecture.md</code>, <code>docs/architecture/ddd-sqlx.md</code> (read-path persistence)</td>
+</tr>
+<tr>
+<td>Language</td>
+<td>English</td>
+</tr>
+</tbody>
+</table>
+<p>This SRS states <strong>what the system shall do</strong> so work can be ticketed and accepted. Formulas, market-type construction, and algorithms stay in the product / technical specs. If this file conflicts with <code>product-specification.md</code> on a product rule, <strong>the product specification wins</strong>; then this SRS must be updated.</p>
+<p>Priority: every in-scope requirement is <strong>MUST</strong>. There is no MVP slice. Out-of-scope items are <strong>SHALL NOT</strong>.</p>
+<p>Keywords follow RFC 2119: SHALL, SHALL NOT, SHOULD, MAY.</p>
+<hr />
+<h2 id="1-purpose-and-scope">1. Purpose and scope</h2>
+<h3 id="11-purpose">1.1 Purpose</h3>
+<p>Specify verifiable requirements for a continuous-PDF prediction market: traders buy outcome sets on an LMSR curve; Risk LPs sell layered tail cover; a committee writes $x^*$ on-chain; payout uses one global recovery rate $\rho$.</p>
+<h3 id="12-in-scope">1.2 In scope</h3>
+<ul>
+<li>Five distribution families: Skellam (football scores), Gaussian, lognormal, Dirichlet, Bernoulli. Listing names are metadata, not create instructions.</li>
+<li>LMSR trading on MagicBlock ER; funds and settlement on Solana L1</li>
+<li>Risk-capital auction in parallel with trading</li>
+<li>Soft solvency and pro-rata settlement</li>
+<li>Next.js client (web, PWA, in-wallet browser, official-site Android TWA)</li>
+<li>Rust Axum services, Anchor programs, CLI for ops</li>
+</ul>
+<h3 id="13-out-of-scope">1.3 Out of scope</h3>
+<p>See §10. Those items SHALL NOT be implemented and SHALL NOT be ticketed as “later”.</p>
+<h3 id="14-document-map">1.4 Document map</h3>
+<table>
+<thead>
+<tr>
+<th>Need</th>
+<th>Read</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Why / economic rules / market construction</td>
+<td><code>product-specification.md</code></td>
+</tr>
+<tr>
+<td>Risk LP auction and payout (plain)</td>
+<td><code>risk-capital-guide.md</code></td>
+</tr>
+<tr>
+<td>Machines, paths, recovery, security</td>
+<td><code>system-architecture.md</code></td>
+</tr>
+<tr>
+<td>Stack, algorithms, wallets, TEE boundary</td>
+<td><code>technical-architecture.md</code></td>
+</tr>
+<tr>
+<td>Shall / shall-not for build and QA</td>
+<td>this file</td>
+</tr>
+<tr>
+<td>Pictures</td>
+<td><code>business-flow.png</code>, <code>system-arch.png</code>, <code>tech-arch.png</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="2-stakeholders-and-roles">2. Stakeholders and roles</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Role</th>
+<th>Capability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R-TRADER</td>
+<td>Trader</td>
+<td>Deposit USDC, buy/sell sets, view PDF / coverage / $\hat\rho$, withdraw unused margin, receive payout</td>
+</tr>
+<tr>
+<td>R-LP</td>
+<td>Risk LP</td>
+<td>Quote the single pool, lock collateral, collect premium / ranked $S_R$, take draw $H$, claim cover if $\Pi&lt;0$</td>
+</tr>
+<tr>
+<td>R-CREATOR</td>
+<td>Market applicant (any SIWS wallet)</td>
+<td>Submit a market application (identity + compose spec). SHALL NOT sign <code>create_*</code>. The reviewer is the on-chain owner</td>
+</tr>
+<tr>
+<td>R-REVIEW</td>
+<td>System reviewer</td>
+<td>Approve / reject / mark-duplicate; lock geo-IP blocks; write the review audit log; <strong>after approve, open trading</strong> (<code>create_*</code> + open the risk auction, optional <code>set_tap</code>) as board owner. SHALL NOT withdraw Vault</td>
+</tr>
+<tr>
+<td>R-CMTE</td>
+<td>Committee member / authorized reporter</td>
+<td>Lock <code>committee_bond</code>; <code>submit_result</code> inside the report window; challenge; vote; attach evidence. SHALL NOT <code>submit_result</code> after <code>report_deadline</code>.</td>
+</tr>
+<tr>
+<td>R-KEEP</td>
+<td>Keeper</td>
+<td><code>close</code> / Commit / Undelegate, alerts</td>
+</tr>
+<tr>
+<td>R-OPS</td>
+<td>Operator (read)</td>
+<td>Dashboards, never Vault withdraw</td>
+</tr>
+<tr>
+<td>R-PLAT</td>
+<td>Platform</td>
+<td>Receive $\phi$ fees (claim anytime) and $S_P$; hold the adjustment <strong>pool</strong> $C_P^{\mathrm{pool}}$ and debit $C_P^{\mathrm{alloc}}$ at settlement. After <code>report_deadline</code> with no committee report: <code>admin_submit_result</code> (slash bond) or <code>admin_void_resolution</code> (no slash).</td>
+</tr>
+</tbody>
+</table>
+<p>Identity is a Solana pubkey. There is no password account.</p>
+<p>The following are locked business rules (same as product §1.1): <strong>after <code>close_ts</code>, no prediction-market fills on any family</strong> (UI disables buy / sell; compose refuses; chain <code>Closed</code>); trading close also stops the risk auction (<code>risk_lock_ts \le close_ts</code>); fees accrue on the prediction market and <code>claim_fees</code> pays the protocol <code>platform</code>, never $C_P$; $C_P$ is a capped tap drawn only after $R_{\mathrm{net}}+C_R$ still leave a shortfall; any SIWS user MAY apply (off-chain); <code>close_ts</code> is absolute and locked at submit; a system reviewer MUST approve and <strong>open trading</strong> (rent); compose <code>create_*</code> and the lobby require that approved application; the risk auction opens with trading; duplicates are refused; geo blocks are IP/GeoIP; <strong>a missed committee report waits for <code>R-PLAT</code></strong> (FR-RES-07: no auto-extend, no auto-<code>RESOLUTION_FAILED</code>; slash only on <code>admin_submit_result</code>).</p>
+<hr />
+<h2 id="3-definitions-normative">3. Definitions (normative)</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>$f(x)$ / $P$ / $p_k$</td>
+<td>Implied PDF from $p0,\theta,\beta$; $\sum p_k=1$. <strong>Not</strong> $E$</td>
+</tr>
+<tr>
+<td>$\theta$</td>
+<td>LMSR state; each fill <strong>leg</strong> does $\theta_k\leftarrow\theta_k+q_\ell$ on $k\in S_\ell$</td>
+</tr>
+<tr>
+<td>$S$</td>
+<td>Frozen atom set at fill (mask or <code>skellam_masks</code>). Settlement SHALL NOT re-integrate a UI interval</td>
+</tr>
+<tr>
+<td>$i^*(x)$</td>
+<td>Nearest listing node (<code>crates/math::outcome::interval_index</code>). Gaussian / lognormal $[a,b]$ SHALL expand to the inclusive node range ${i^<em>(a),\ldots,i^</em>(b)}$ (product §8.1.2.1). Outside $\Omega$ clamps to $0$ or $n-1$. No partial node</td>
+</tr>
+<tr>
+<td>$q$ / shares</td>
+<td>Ticket size minted at fill. One share’s <strong>face</strong> is $1$ USDC if it hits ($\rho=1$), not the USDC paid to buy it</td>
+</tr>
+<tr>
+<td>$p_S$</td>
+<td>Current LMSR probability of $S$. Marginal price of an infinitesimal share. <strong>Not</strong> the payout. Cash multiple $\approx 1/p_S$ is display only (product §1.2.2)</td>
+</tr>
+<tr>
+<td>$P_S(q)$</td>
+<td>$\partial C_S/\partial q\in(0,1)$. Fill price after size $q$. SHALL NOT be used as settlement face</td>
+</tr>
+<tr>
+<td>face</td>
+<td>$q\cdot n_{\mathrm{hit}}/n_{\mathrm{parts}}$ at atom $c=\mathrm{cell}(x^*)$</td>
+</tr>
+<tr>
+<td>$C_S(q)$</td>
+<td>USDC cost to <strong>buy</strong> $q$ shares of $S$. For small $q$, $\approx p_S q$. Not the share count</td>
+</tr>
+<tr>
+<td>$\phi$</td>
+<td>Platform fee rate; fee $=\phi\cdot C_S(q)$</td>
+</tr>
+<tr>
+<td>$E(x)$</td>
+<td>Running sum of faces on atom $x$; <code>grid.exposure</code></td>
+</tr>
+<tr>
+<td>$L_{\max}$</td>
+<td>$\sup_x E(x)$ (display / auction signal only)</td>
+</tr>
+<tr>
+<td>$L$</td>
+<td>$E(c)$ at $c=\mathrm{cell}(x^*)$ only — not $\sum_k E_k$</td>
+</tr>
+<tr>
+<td>$C_M$</td>
+<td><strong>Removed.</strong> Not a product object. On-chain leftover field is always $0$</td>
+</tr>
+<tr>
+<td>Prediction market</td>
+<td>The object created after review. Product copy SHALL say <strong>prediction market</strong>. SHALL NOT use “board”, “book”, “open the book”, or “close the book” as the product noun. On-chain leftover names (<code>Board</code>, <code>board_phase</code>) are implementation only</td>
+</tr>
+<tr>
+<td>Open the prediction market</td>
+<td>Reviewer-signed <code>create_*</code> succeeded, the lobby shows the prediction market, traders MAY fill. Not “listing” / “hang the catalog”</td>
+</tr>
+<tr>
+<td>Open the risk auction</td>
+<td>Risk LPs MAY quote published layers for payout coverage (<code>risk_open_book</code>). Not “open the risk book”</td>
+</tr>
+<tr>
+<td>$C_R^{\mathrm{final}}$</td>
+<td>Locked, drawable Risk LP capacity at settlement; may be $0$</td>
+</tr>
+<tr>
+<td>$C_P^{\mathrm{pool}}$</td>
+<td>Single protocol USDC vault for the platform adjustment fund</td>
+</tr>
+<tr>
+<td>$C_P^{\mathrm{board}}$</td>
+<td>Per-board cap on draws from the pool, locked at listing</td>
+</tr>
+<tr>
+<td>$C_P^{\mathrm{alloc}}$</td>
+<td>Debit from $C_P^{\mathrm{pool}}$ onto one board at settlement</td>
+</tr>
+<tr>
+<td>$R_{\mathrm{net}}$</td>
+<td>Trading proceeds; fees never entered; premia deducted</td>
+</tr>
+<tr>
+<td>$C_{\max}$</td>
+<td>$R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$</td>
+</tr>
+<tr>
+<td>$\rho$</td>
+<td>$\min(1,C_{\max}/L)$; one value for every winner</td>
+</tr>
+<tr>
+<td><code>close_ts</code></td>
+<td><strong>Every</strong> prediction market. Prediction fills <strong>and</strong> new risk-auction quotes / fills stop when <code>now ≥ close_ts</code>. Kickoff / report / early VOID SHALL NOT reopen trading</td>
+</tr>
+<tr>
+<td><code>risk_lock_ts</code></td>
+<td>Auction MAY lock earlier; SHALL NOT be after <code>close_ts</code>. Default equals <code>close_ts</code></td>
+</tr>
+<tr>
+<td><code>report_open_ts</code></td>
+<td>Earliest committee <code>submit_result</code>. Required at create; SHALL be $\ge$ <code>close_ts</code>. No omitted / <code>0</code> default</td>
+</tr>
+<tr>
+<td><code>report_window_secs</code></td>
+<td>Report window length. Product default <code>86400</code>. <code>report_deadline = report_open_ts + report_window_secs</code></td>
+</tr>
+<tr>
+<td><code>committee_bond</code></td>
+<td>USDC locked in <code>UserVault.bond</code> at create (<code>&gt; 0</code>). Slashed only on platform <code>admin_submit_result</code> after a missed report</td>
+</tr>
+<tr>
+<td>Receipted fill</td>
+<td>ER (or L1) executed the ix, returned a signed receipt, and the receipt reached a replicated journal quorum</td>
+</tr>
+<tr>
+<td>Pending fill</td>
+<td>Gateway accepted a signed tx, persisted a receipt, and has not yet confirmed it. Not a fill.</td>
+</tr>
+<tr>
+<td>Session</td>
+<td>Time-limited, amount-limited delegated signer for <code>buy_set</code> / <code>buy_skellam_set</code> only. Product sells are closed (FR-TRD-14)</td>
+</tr>
+<tr>
+<td>USDC</td>
+<td>Circle official SPL USDC mint on the target cluster</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="4-functional-requirements">4. Functional requirements</h2>
+<h3 id="41-markets-and-priors">4.1 Markets and priors</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+<th>Verify</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-MKT-01</td>
+<td>The system SHALL create a market only with a locked distribution family, that family&rsquo;s <strong>prior parameters</strong> (FR-MKT-13–22, §4.1.1), $\beta$, grid or atoms, committee (or public committee id), <code>close_ts</code>, <code>risk_lock_ts</code>, <code>report_open_ts</code> (required, $\ge$ <code>close_ts</code>), <code>committee_bond &gt; 0</code>, and a resolution rule.</td>
+<td>Create ix rejects missing fields</td>
+</tr>
+<tr>
+<td>FR-MKT-02</td>
+<td>The system SHALL NOT change the distribution family after creation.</td>
+<td>Trade / admin ix cannot rewrite family</td>
+</tr>
+<tr>
+<td>FR-MKT-03</td>
+<td>At creation $\theta=0$. Displayed prices SHALL equal the prior $f_0$ / $P_0$.</td>
+<td>Quote vs stored <code>p0_mass</code></td>
+</tr>
+<tr>
+<td>FR-MKT-04</td>
+<td>$f_0$ / $P_0$ SHALL be written once and SHALL NOT be rewritten by oracles or operators.</td>
+<td>No ix mutates <code>p0_mass</code> after create</td>
+</tr>
+<tr>
+<td>FR-MKT-05</td>
+<td>Football: one match <code>score_scope</code> SHALL be one Skellam board sharing a 2D score PDF. Derived books (1X2, totals, spreads, exact score) SHALL be set projections, not separate $\theta$ stores.</td>
+<td>Shared <code>theta[i][j]</code>; <code>buy_skellam_set</code></td>
+</tr>
+<tr>
+<td>FR-MKT-06</td>
+<td>Football SHALL trade pre-match and in-play until <code>close_ts</code> (default: that scope’s full-time whistle). Kickoff SHALL NOT stop trading. After <code>close_ts</code> there are no fills.</td>
+<td>Clock vs <code>close_ts</code> only</td>
+</tr>
+<tr>
+<td>FR-MKT-07</td>
+<td>CPI / macro listings SHALL call <code>create_gaussian_market</code>. $x^*$ is the first official print (<code>FIRST_PRINT</code>; later revisions SHALL NOT settle). Prior parameters SHALL follow FR-MKT-15–17 and §4.1.1 — not integer cell indices.</td>
+<td>Create + resolve + <code>p0_mass</code> vs $\mathcal{N}(\mu,\sigma^2)$ on $\Omega$</td>
+</tr>
+<tr>
+<td>FR-MKT-08</td>
+<td>Election winner, <code>TOP_N</code>, and vote-share SHALL all use <code>create_dirichlet_market</code> with <code>layout</code> atoms / top-$n$ / simplex. There SHALL NOT be a separate vote-share family.</td>
+<td>Three layouts + resolve</td>
+</tr>
+<tr>
+<td>FR-MKT-09</td>
+<td>Daily price listings SHALL call <code>create_lognormal_market</code> and lock <code>price_rule</code>. Prior SHALL be $\log X\sim\mathcal{N}(\mu,\sigma^2)$ on $\Omega&gt;0$ (FR-MKT-18).</td>
+<td>Create + <code>price_rule</code> + resolve</td>
+</tr>
+<tr>
+<td>FR-MKT-10</td>
+<td>Binary events SHALL use <code>create_bernoulli_market</code> (YES/NO). YES MAY finalize early only when the defined event has occurred, not because it “looks likely”.</td>
+<td>Early-YES guard</td>
+</tr>
+<tr>
+<td>FR-MKT-11</td>
+<td>Listing SHALL open that board’s risk-auction book immediately.</td>
+<td>Auction book exists after create</td>
+</tr>
+<tr>
+<td>FR-MKT-12</td>
+<td>On-chain create SHALL be the five family instructions only: <code>create_skellam_market</code>, <code>create_gaussian_market</code>, <code>create_lognormal_market</code>, <code>create_dirichlet_market</code>, <code>create_bernoulli_market</code>. Listing names are metadata.</td>
+<td>IDL whitelist</td>
+</tr>
+<tr>
+<td>FR-MKT-13</td>
+<td>Prior parameters SHALL be specified in the <strong>outcome unit</strong> of the series (CPI / macro: percentage points or index points; football: expected goals; price: the <code>price_rule</code> unit). They SHALL NOT be cell indices $i\in{0,\ldots,n-1}$. $\Omega$, $\mu$, $\sigma$, $\lambda$ written as integers-on-the-grid is a defect.</td>
+<td>Compose + <code>IntervalArgs</code> / <code>SkellamArgs</code> vs unit values</td>
+</tr>
+<tr>
+<td>FR-MKT-14</td>
+<td>Create / compose SHALL encode unit scalars as Q64 thousandths (<code>milli</code>): value $v$ is stored as $\mathrm{Q64}(\lfloor 1000v\rceil/1000)$. Example: $\mu=2.4\Rightarrow 2400$, $\sigma=0.35\Rightarrow 350$, $x_{\min}=-2\Rightarrow -2000$, $x_{\max}=12\Rightarrow 12000$, $\lambda_H=1.4\Rightarrow 1400$. Integer-cell mode (<code>milli=false</code>) is allowed only for tests that deliberately use $\Omega=[0,n]$.</td>
+<td>Byte compare: milli $\mu=2400$ $\neq$ <code>q_int(2)</code></td>
+</tr>
+<tr>
+<td>FR-MKT-15</td>
+<td>A Gaussian board SHALL write truncated $\mathcal{N}(\mu,\sigma^2)$ on $\Omega=[x_{\min},x_{\max}]$, then renormalize so $\sum_k p_{0,k}=1$. Require $x_{\max}&gt;x_{\min}$ and $\sigma&gt;0$. CPI / macro $n_{\mathrm{grid}}$ SHALL default to $256$ (product §4.8 / §5.1.1). $n=512$ / $1024$ MAY be used only when user intervals are comparable to the default step or $\Omega$ is wide vs $\sigma$. $n&lt;32$ SHALL be rejected or hard-warned because $\sigma$ then collapses onto $1$–$2$ cells. The protocol floor $n=8$ is not a product Gaussian default. Grid $x_i=x_{\min}+i(x_{\max}-x_{\min})/(n-1)$.</td>
+<td><code>truncated_normal</code> vs stored <code>p0_mass</code></td>
+</tr>
+<tr>
+<td>FR-MKT-16</td>
+<td>CPI / macro $\mu$ SHALL be the survey (or model) <strong>median in percentage points</strong>; $\sigma$ SHALL be that survey&rsquo;s <strong>dispersion in percentage points</strong>, not a made-up cell width. The protocol SHALL ship a reference listing: <code>US_CPI_YOY</code> / <code>FIRST_PRINT</code> / $\Omega=[-2,12]$ / $\mathcal{N}(2.4,0.35)$ / $n=256$. A MoM series SHALL use a tighter $\Omega$ (reference: $[-1,2]$, $\mathcal{N}(0.2,0.15)$). Wide $\sigma$ vs $\Omega$ MAY be used only when there is no survey (approaches uniform after truncation).</td>
+<td>Reference preset + <code>p0_mass</code> peak near $2.4$</td>
+</tr>
+<tr>
+<td>FR-MKT-17</td>
+<td>Mass outside $\Omega$ SHALL be dropped and the remainder renormalized. If $\mu\notin\Omega$, or $\sigma$ is smaller than one grid step, or $\sigma&gt;(x_{\max}-x_{\min})/2$, or $\Omega$ cuts the $\sim 3\sigma$ tails, create MAY still accept, but <code>GET /v1/prior</code> and the create desk SHALL emit the matching warning. Trading SHALL NOT rewrite $P_0$ to “fix” a bad prior.</td>
+<td>Preview warnings + no <code>p0</code> mutate ix</td>
+</tr>
+<tr>
+<td>FR-MKT-18</td>
+<td>A lognormal board SHALL require $\Omega\subset(0,\infty)$ and interpret $\mu,\sigma$ on $\log x$ ($\log X\sim\mathcal{N}(\mu,\sigma^2)$), then project onto the log grid and renormalize. Reference: $\Omega=[10\,000,250\,000]$, $\mu=\log(\mathrm{spot})$, $\sigma=0.25$ (widen $\sigma$ with time to expiry). $x_{\min}\le 0$ SHALL be rejected.</td>
+<td><code>truncated_lognormal</code> + reject $x_{\min}\le 0$</td>
+</tr>
+<tr>
+<td>FR-MKT-19</td>
+<td>A Skellam board SHALL write $P_0(i,j)$ from $\lambda_H,\lambda_A&gt;0$ in <strong>goals</strong> (independent Poisson default; Dixon–Coles optional), $k_{\max}=10$, $121$ cells, overflow labeled <code>10+</code>. $\lambda$ uses the same milli encoding ($1.4\to 1400$). After truncation the $121$ cells SHALL sum to $1$.</td>
+<td><code>independent_poisson_2d</code> + 1X2 projection</td>
+</tr>
+<tr>
+<td>FR-MKT-20</td>
+<td>Dirichlet SHALL write $\alpha_i&gt;0$; the uninformative default is $\alpha_i=1$ (uniform on the atoms). Bernoulli is the $K=2$ case (default $50/50$).</td>
+<td><code>dirichlet</code> / <code>binary</code></td>
+</tr>
+<tr>
+<td>FR-MKT-21</td>
+<td>Create / compose SHALL reject: $\sigma\le 0$; $x_{\max}\le x_{\min}$; lognormal $x_{\min}\le 0$; $\lambda_H\le 0$ or $\lambda_A\le 0$; $\alpha_i\le 0$; $n$ outside the family bound (Gaussian / lognormal: $8..1024$; Skellam fixed $121$).</td>
+<td>Negative compose / ix tests</td>
+</tr>
+<tr>
+<td>FR-MKT-22</td>
+<td>On-chain <code>p0_mass[]</code> SHALL equal <code>crates/math</code> <code>prior::*</code> on the same Q64 arguments. <code>GET /v1/prior</code> SHALL use that same function (no second TypeScript LMSR / PDF). At $\theta=0$, every quote $p_S$ SHALL equal $\sum_{k\in S}p_{0,k}$ (FR-MKT-03).</td>
+<td>math crate = API = first quote</td>
+</tr>
+</tbody>
+</table>
+<h3 id="411-prior-parameterization-normative">4.1.1 Prior parameterization (normative)</h3>
+<p>Listing a board <strong>is</strong> writing $P_0$. Family, $\Omega$, and $(\mu,\sigma)$ or $(\lambda_H,\lambda_A)$ or $\alpha$ are not decorative form fields: they are the opening book. Product construction stays in product §§4.6–4.10; this section is the acceptance rule.</p>
+<p><strong>Encoding.</strong> All continuous / intensity scalars travel as Q64 thousandths (FR-MKT-14). The web create desk and CLI SHALL collect floats in the series unit and send <code>milli=true</code>. Reviewers SHALL treat a Gaussian create with $\mu=4,\sigma=2,n=8,\Omega=[0,8]$ as a test stub, not a CPI listing.</p>
+<p><strong>Gaussian / CPI (product §4.8).</strong></p>
+<table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Meaning</th>
+<th>CPI YoY reference</th>
+<th>CPI MoM reference</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>series_id</code> / <code>release_id</code></td>
+<td>Metadata identity</td>
+<td><code>US_CPI_YOY</code> / vintage</td>
+<td><code>US_CPI_MOM</code> / vintage</td>
+</tr>
+<tr>
+<td><code>unit</code></td>
+<td>Official series unit</td>
+<td>percentage points</td>
+<td>percentage points</td>
+</tr>
+<tr>
+<td><code>print_rule</code></td>
+<td>What $x^*$ is</td>
+<td><code>FIRST_PRINT</code></td>
+<td><code>FIRST_PRINT</code></td>
+</tr>
+<tr>
+<td>$\Omega=[x_{\min},x_{\max}]$</td>
+<td>Support; tails cut then renormalized</td>
+<td>$[-2,12]$</td>
+<td>$[-1,2]$</td>
+</tr>
+<tr>
+<td>$n_{\mathrm{grid}}$</td>
+<td>Linear grid on $\Omega$</td>
+<td>$256$</td>
+<td>$256$</td>
+</tr>
+<tr>
+<td>$\mu$</td>
+<td>Prior mean</td>
+<td>survey median, e.g. $2.4$</td>
+<td>e.g. $0.2$</td>
+</tr>
+<tr>
+<td>$\sigma$</td>
+<td>Prior std</td>
+<td>survey dispersion, e.g. $0.35$</td>
+<td>e.g. $0.15$</td>
+</tr>
+<tr>
+<td>$f_0$</td>
+<td>Written once</td>
+<td>truncated $\mathcal{N}(\mu,\sigma^2)$ on $\Omega$</td>
+<td>same</td>
+</tr>
+</tbody>
+</table>
+<p>Worked YoY check (acceptance): <code>milli</code> $(-2000,12000,2400,350)$, $n=256$. Peak $x$ SHALL lie near $2.4$. Interval masses on the product templates SHALL be computed from that $P_0$, not from a second model — e.g. $P(X&lt;2)$, $P(2\le X&lt;2.5)$, $P(2.5\le X&lt;3)$, $P(X\ge 3)$. A $32$-cell grid on $[-2,12]$ has step $\approx 0.45&gt;\sigma=0.35$ and SHALL warn (FR-MKT-17); it SHALL NOT be the CPI default.</p>
+<p>Do not list “will CPI print above $2.5\%$” as a second market. That is one interval $S$ on this board (product §4.8.2).</p>
+<p><strong>Skellam (product §4.6).</strong> $\lambda_H,\lambda_A$ are pre-match expected goals from a model or the creator, not cell numbers. Default preview projects 1X2 and totals from the same $P_0(i,j)$.</p>
+<p><strong>Lognormal (product §4.10).</strong> $\mu$ is $\log(\mathrm{spot})$ at list (or a stated model), $\sigma$ is log-vol to expiry, $\Omega$ must cover a reasonable tail and stay strictly positive.</p>
+<p><strong>Dirichlet / Bernoulli.</strong> Uninformative $\alpha=1$. A “50/50 binary CPI” SHALL NOT replace a Gaussian CPI board.</p>
+<p><strong>After list.</strong> $\theta=0$ (FR-MKT-03). No oracle, keeper, or committee instruction may rewrite <code>p0_mass</code> (FR-MKT-04). A bad prior is a listing error; the fix is a new board, not a silent $P_0$ patch.</p>
+<h3 id="42-wallet-deposit-session">4.2 Wallet, deposit, session</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+<th>Verify</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-WAL-01</td>
+<td>The client SHALL connect via Wallet Standard (web) or the equivalent in-wallet / TWA path (mobile). Required wallets: Phantom, Solflare, Backpack.</td>
+<td>Manual + adapter tests</td>
+</tr>
+<tr>
+<td>FR-WAL-02</td>
+<td>After connect, the client SHALL run SIWS; the BFF MAY issue a JWT for query / push only. JWT SHALL NOT authorize on-chain spends.</td>
+<td>JWT cannot <code>buy_set</code></td>
+</tr>
+<tr>
+<td>FR-WAL-03</td>
+<td>The user SHALL <code>vault.deposit</code> USDC on L1 with the <strong>main wallet</strong> before trading. Unconfirmed deposits SHALL NOT increase ER spendable balance.</td>
+<td>Balance after finalized deposit only</td>
+</tr>
+<tr>
+<td>FR-WAL-04</td>
+<td>Opening, renewing, or revoking a Session SHALL require the main wallet.</td>
+<td>Session ix signer</td>
+</tr>
+<tr>
+<td>FR-WAL-05</td>
+<td>A Session SHALL encode expiry, remaining USDC, allowed instructions (<code>buy_set</code> / <code>buy_skellam_set</code>; sell bits do not execute — FR-TRD-14), and an optional market whitelist.</td>
+<td>On-chain session account</td>
+</tr>
+<tr>
+<td>FR-WAL-06</td>
+<td>In-board set <strong>buys</strong> SHALL be signed by the Session. Product sells are closed (FR-TRD-14). Withdraw, create, risk <code>bid</code>, and resolution SHALL require the main wallet (or KMS for keepers / reporters).</td>
+<td>Negative tests</td>
+</tr>
+<tr>
+<td>FR-WAL-07</td>
+<td>The UI SHALL expose revoke-session separately from disconnect-wallet. Disconnecting SHALL NOT be treated as on-chain revoke.</td>
+<td>UX + chain state</td>
+</tr>
+<tr>
+<td>FR-WAL-08</td>
+<td>The system SHALL NOT store mnemonic phrases. Session secrets SHALL NOT be stored in plaintext <code>localStorage</code>.</td>
+<td>Review + scanner</td>
+</tr>
+<tr>
+<td>FR-WAL-09</td>
+<td>Trading Gateway SHALL forward client-signed txs and SHALL NOT accept, log, or persist Session private keys, mnemonics, or keypair JSON.</td>
+<td>Scanner + code review</td>
+</tr>
+</tbody>
+</table>
+<h3 id="43-trading-lmsr">4.3 Trading (LMSR)</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+<th>Verify</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-TRD-01</td>
+<td><code>buy_set</code> / <code>buy_skellam_set</code> SHALL execute only on ER while the market is delegated and <code>now &lt; close_ts</code>. This is <strong>every family</strong>. After <code>close_ts</code> there are no prediction-market fills. Compose SHALL refuse buy ops (<code>403</code>) when the indexed <code>close_ts</code> has elapsed. The chain SHALL reject with <code>Closed</code>. <code>sell_set</code> / <code>sell_skellam_set</code> / wide <code>is_buy=false</code> SHALL fail with <code>SellsClosed</code> even while trading is open (FR-TRD-14). L1 is allowed only before Delegate (tests).</td>
+<td>Status + clock + compose</td>
+</tr>
+<tr>
+<td>FR-TRD-02</td>
+<td>On <strong>every</strong> family and line, fill price SHALL be LMSR $p_S$ / $C_S(q)$. A fill of $q$ SHALL mint $q$ shares (ordinary face $1$ USDC each if $c\in S$ and $\rho=1$). $p_S$ SHALL NOT be the payout and SHALL NOT rescale the share count. Quarter AH is the only split-face case (FR-SET-09). Coverage / $\hat\rho$ SHALL be displayed and SHALL NOT be baked into the quote.</td>
+<td>CPI / 1X2 / YES: $p_S=0.7$, $q=1$ costs $\approx 0.7$, hit pays $1$ if $\rho=1$</td>
+</tr>
+<tr>
+<td>FR-TRD-13</td>
+<td>The product sells interval <strong>probability</strong>. Quote SHALL be $p_S=\sum_{k\in S}p_k$ (continuum: $\int_I f$). $\partial C_S/\partial q$ SHALL be treated as <strong>price</strong>, never as hit payoff. Ordinary hit payoff SHALL be $\lfloor\rho\cdot q\rfloor$, not $q/p_S$. Share size SHALL NOT be defined as $1/p_S$. Linear $q\cdot p_S$ is an approximation; the ledger SHALL charge $C_S(q)$. UI MAY show an implied multiple $\approx 1/p_S$ labeled as return on cash, not as face. Product §1.2.2.</td>
+<td>$p_S=0.7$, $q=10$ → pay $\approx 7$, hit $10$ not $10/0.7$; $C&rsquo;(q)\in(0,1)$</td>
+</tr>
+<tr>
+<td>FR-TRD-03</td>
+<td>Buying the same $S$ again SHALL raise $p_S$ and $C_S$ (LMSR). Later wall-clock time SHALL NOT by itself raise $C_S$. Overlapping hot intervals SHALL get more expensive; disjoint / cold intervals MAY get cheaper. Selling SHALL lower subsequent $C_S$ on that $S$. Product §1.2.4.</td>
+<td>Monotonicity test</td>
+</tr>
+<tr>
+<td>FR-TRD-04</td>
+<td>Listing SHALL lock <code>fee_bps</code> and <code>fee_timing</code>. <strong>At fill</strong> (<code>fee_timing=0</code>): each buy charges $\phi\cdot C_S(q)$ onto the platform fee ledger. <strong>At claim</strong> (<code>fee_timing=1</code>): the buy charges only $C_S(q)$; when a winner claims, $\phi$ of that payout is taken onto the fee ledger (miss / VOID: $0$). Fees SHALL NOT enter $T$, $C_{\max}$, $S$, $S_P$, $S_C$, or $C_P^{\mathrm{pool}}$. <strong>Only</strong> <code>Market.platform</code> MAY <code>claim_fees</code> into the platform UserVault, at any time including VOID / haircut. $\phi$ SHALL NOT be mixed with $S_P$ (product §1.2.7).</td>
+<td>Vault ledgers</td>
+</tr>
+<tr>
+<td>FR-TRD-05</td>
+<td>The system SHALL NOT reject a valid order because $L&rsquo;_{\max}$ exceeds locked $C_R$.</td>
+<td>Case $L_{\max}$ huge, balance OK</td>
+</tr>
+<tr>
+<td>FR-TRD-06</td>
+<td>The system SHALL reject: insufficient USDC available, illegal set / $q$, market not TRADING, Session unauthorized, nonce replay, or a product sell (<code>sell_set</code> / <code>sell_skellam_set</code>, FR-TRD-14).</td>
+<td>Negative tests</td>
+</tr>
+<tr>
+<td>FR-TRD-07</td>
+<td>After a fill the system SHALL update $\theta$, $E$, $L_{\max}$, and broadcast the new <strong>implied PDF</strong> $p_k=\mathrm{implied_probs}(p0,\theta,\beta)$, not $E$.</td>
+<td>Event + indexer</td>
+</tr>
+<tr>
+<td>FR-TRD-08</td>
+<td>Low coverage SHALL trigger a strong UI warning and SHALL still allow the order.</td>
+<td>UI + chain accept</td>
+</tr>
+<tr>
+<td>FR-TRD-09</td>
+<td>A fill is complete only when the receipt is durable (L1: gateway receipt store ACK’d then confirmed; ER: FR-DUR-01 journal quorum). Until then the client SHALL show <code>pending</code> and retry the same <code>nonce</code>. Gateway SHALL persist the receipt <strong>before</strong> returning <code>pending</code> and SHALL NOT wait for RPC confirm before that ACK.</td>
+<td>Submit returns <code>pending</code>; same nonce is idempotent; store survives process restart</td>
+</tr>
+<tr>
+<td>FR-TRD-10</td>
+<td>Quote Engine preview SHALL be read-only and SHALL NOT be the ledger.</td>
+<td>Preview ≠ settle</td>
+</tr>
+<tr>
+<td>FR-TRD-11</td>
+<td>Skellam fills SHALL use one shared $\theta_{ij}$. Typed lines SHALL go through <code>buy_skellam_set</code> (expand $S$, then <code>crates/math::lmsr_update</code>). Custom unions MAY use <code>buy_set</code>. $L_{\max}$ SHALL be $\max_{ij}E_{ij}$. Quarter lines SHALL be two half-fills of $q/2$ on the same book. Programs SHALL NOT implement a second LMSR.</td>
+<td>Home buy raises exact 2-1; over + AH stack on intersection; $p_{1}+p_{X}+p_{2}=1$</td>
+</tr>
+<tr>
+<td>FR-TRD-12</td>
+<td>Gaussian / lognormal custom intervals and preset bins SHALL map $[a,b]$ (or a one-sided cut) with <code>interval_index</code> on <strong>both</strong> ends, then $S={i_a,\ldots,i_b}$ inclusive (log axis for lognormal). Quote, fill, and <code>outcome_cell</code> SHALL use that same function. $a,b$ inside one Voronoi band SHALL buy the whole node (singleton $S$). Values outside $\Omega$ SHALL clamp. Fills SHALL NOT integrate $\int_a^b f$ and SHALL NOT mint a fractional share of a node. Empty $S$ SHALL reject. Product §8.1.2.1.</td>
+<td>Nodes $6.0{+}0.1k$ to $10$: $[5.5,7.8]\to{6.0,\ldots,7.8}$; $[6.12,6.18]\to{6.1}$; $x^*=7.85\notin S$</td>
+</tr>
+<tr>
+<td>FR-TRD-14</td>
+<td>Product sells are <strong>closed</strong>. The market program SHALL reject <code>sell_set</code>, <code>sell_skellam_set</code>, and wide fills with <code>is_buy=false</code> (<code>SellsClosed</code>). Compose SHALL refuse those ops (<code>403</code>). <code>/m/[id]</code> SHALL NOT submit a sell. CLI <code>sell-set</code> / <code>sell-skellam</code> SHALL bail. A fill stays until settlement claim ($\rho\cdot\mathrm{face}$ if $c\in S$) or VOID / failed-resolution refund of <code>cost_paid</code>. Unwind at the live LMSR price is not a refund of <code>cost_paid</code>.</td>
+<td>Chain SellsClosed + compose 403 + disabled ticket</td>
+</tr>
+</tbody>
+</table>
+<h3 id="44-risk-auction">4.4 Risk auction</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+<th>Verify</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-RSK-01</td>
+<td>The auction SHALL be one pool. LPs SHALL NOT invent attachments or extra layers. On-chain <code>layer_id</code> is the pool seed <code>1</code> only.</td>
+<td>Bid ix checks pool id</td>
+</tr>
+<tr>
+<td>FR-RSK-02</td>
+<td>Rank SHALL be lowest unit premium first, then earlier timestamp. Rank SHALL NOT cap how much $D$ may lock. A pool SHALL hold at most 64 standing quotes (<code>MAX_QUOTES</code>). Dust $D$ below listing min SHALL be rejected. There SHALL be no $\gamma$ concentration cap.</td>
+<td>Matching test + <code>BookFull</code></td>
+</tr>
+<tr>
+<td>FR-RSK-03</td>
+<td>An LP’s locked collateral SHALL be $\ge D_i$. Unlocked promises SHALL NOT count in $C_R$.</td>
+<td>Vault vs book</td>
+</tr>
+<tr>
+<td>FR-RSK-04</td>
+<td>After fill, that LP’s $D_i$ SHALL NOT increase because later traders raise $L_{\max}$.</td>
+<td>Immutable $D_i$</td>
+</tr>
+<tr>
+<td>FR-RSK-05</td>
+<td><code>risk_lock_ts</code> SHALL be required and SHALL satisfy <code>risk_lock_ts \le close_ts</code>. New auction quotes and fills SHALL stop when <code>now ≥ close_ts</code> <strong>or</strong> <code>now ≥ risk_lock_ts</code>. After trading close the auction SHALL NOT continue.</td>
+<td>Clock</td>
+</tr>
+<tr>
+<td>FR-RSK-06</td>
+<td>Auction SHALL NOT block prediction trading.</td>
+<td>Parallel books</td>
+</tr>
+<tr>
+<td>FR-RSK-07</td>
+<td>If $L\le T$, draw $H=0$. After $S_C=20\%S$ (FR-SET-04), $S_R=\alpha_R\tilde S$ SHALL be paid down rank (lowest unit premium, then earlier timestamp), each quote at most its premium, until $S_R$ is exhausted. If $L&gt;T$, filled quotes SHALL cover the leftover shortfall, each at most filled $D_i$; $S=0$.</td>
+<td>Settlement vector</td>
+</tr>
+<tr>
+<td>FR-RSK-08</td>
+<td>One collateral lock SHALL underwrite one prediction market only.</td>
+<td>PDA / accounting</td>
+</tr>
+</tbody>
+</table>
+<h3 id="45-halt-resolution-settlement">4.5 Halt, resolution, settlement</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+<th>Verify</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-HAL-01</td>
+<td>At <code>close_ts</code> Keeper SHALL stop prediction fills and the risk auction, then Commit / Undelegate $\theta$, $E$, <code>trades_root</code> to L1.</td>
+<td>Clock + accounts</td>
+</tr>
+<tr>
+<td>FR-RES-01</td>
+<td>$x^<em>$ SHALL be written only by committee (or authorized reporter) <code>submit_result</code>. No oracle or feed SHALL write $x^</em>$.</td>
+<td>No auto-oracle ix</td>
+</tr>
+<tr>
+<td>FR-RES-02</td>
+<td>After a proposal, a challenge window SHALL run. No challenge → finalize. Challenge → $M/N$ vote.</td>
+<td>State machine</td>
+</tr>
+<tr>
+<td>FR-RES-03</td>
+<td>After a <strong>proposal</strong>, a failed vote SHALL extend the <strong>vote</strong> clock once or <code>RESOLUTION_FAILED</code>. That path SHALL NOT apply to a missed <code>submit_result</code> (FR-RES-07). Failed finalization SHALL refund users, return LP collateral, and return unused premium.</td>
+<td>Refund balances</td>
+</tr>
+<tr>
+<td>FR-RES-04</td>
+<td>Football SHALL report a score pair; CPI the first official print; election the defined winner / TOP_N set / shares; price the <code>price_rule</code> scalar; binary YES or NO.</td>
+<td>Type-specific accounts</td>
+</tr>
+<tr>
+<td>FR-RES-05</td>
+<td><code>evidence_hash</code> SHALL be an opaque digest. The program SHALL NOT parse oracles, price feeds, or sports APIs.</td>
+<td>No feed accounts on ixs</td>
+</tr>
+<tr>
+<td>FR-RES-06</td>
+<td>Create SHALL require <code>report_open_ts ≥ close_ts</code> (no omitted/<code>0</code> default). <code>submit_result</code> SHALL require <code>now ≥ report_open_ts</code> (no early-YES bypass). Trading and the risk auction still stop at <code>close_ts</code>. The report window is <code>[report_open_ts, report_open_ts + report_window_secs)</code> with product default <code>report_window_secs = 86400</code>. VOID is allowed after <code>close_ts</code> <strong>until</strong> <code>report_deadline</code>. Bernoulli <code>early_resolve</code> MAY VOID <strong>before</strong> <code>close_ts</code> (refund <code>cost_paid</code>, do not settle YES).</td>
+<td>Resolution clocks</td>
+</tr>
+<tr>
+<td>FR-RES-07</td>
+<td>After <code>report_deadline</code> with no committee <code>submit_result</code>, the window SHALL NOT auto-extend and SHALL NOT auto-<code>RESOLUTION_FAILED</code>. Only the protocol platform (<code>Market.platform</code> / <code>PLATFORM_PUBKEY</code>) MAY choose: <code>admin_submit_result</code> (finalize $x^<em>$, </em><em>slash</em><em> committee bond) or <code>admin_void_resolution</code> (VOID refund <code>cost_paid</code>, </em><em>do not slash</em>*, bond MAY be released). Create SHALL require <code>committee_bond &gt; 0</code> (<code>UserVault.bond</code>).</td>
+<td>Admin timeout</td>
+</tr>
+<tr>
+<td>FR-SET-01</td>
+<td>Settlement SHALL use $L=E(c)$ with $c=\mathrm{cell}(x^*)$, not $L_{\max}$ and not $\sum_k E_k$.</td>
+<td>Fixture $E\neq L_{\max}$; one-cell read</td>
+</tr>
+<tr>
+<td>FR-SET-02</td>
+<td>$C_{\max}$ SHALL equal $R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. $C_R$ and $C_P^{\mathrm{alloc}}$ MAY each be $0$.</td>
+<td>Ledger identity</td>
+</tr>
+<tr>
+<td>FR-SET-03</td>
+<td>After $x^<em>$ is final the board SHALL compute </em><em>one</em><em> recovery rate </em><em>before any user payout</em>*: $\rho=\min(1,C_{\max}/L)$ (or $\rho=1$ if $L=0$). If $C_{\max}\ge L$ then $\rho=1$ (full face). If $C_{\max}&lt;L$ then $\rho=C_{\max}/L$ (actual ratio). Every winning ticket SHALL receive $\lfloor\rho\cdot\mathrm{face}\rfloor$. FIFO or entry-order haircuts SHALL NOT be used. VOID / <code>RESOLUTION_FAILED</code> SHALL refund <code>cost_paid</code> and SHALL NOT write a payout $\rho$. Sequence: FR-SET-11.</td>
+<td>All winners same $\rho$; $C_{\max}\ge L\Rightarrow\rho=1$</td>
+</tr>
+<tr>
+<td>FR-SET-04</td>
+<td>Surplus $S=\max(T-L,0)$ SHALL be paid only if $\rho=1$. $S_C=20\%S$ SHALL go to the protocol LP cover pool (<code>pay_surplus_cover</code>) — <strong>not</strong> to the platform. Of $\tilde S=S-S_C$: if $C_R^{\mathrm{final}}=0$, $S_P=\tilde S$ and $S_R=0$; if $C_R^{\mathrm{final}}&gt;0$, $S_R=\alpha_R\tilde S$ (<code>alpha_r_bps</code>, default $7000$), $S_P=(1-\alpha_R)\tilde S$. <strong>Only</strong> the protocol <code>platform</code> UserVault SHALL receive $S_P$ (<code>pay_surplus_platform</code>). Any payer MAY submit that credit; it SHALL NOT require a platform signer. <strong>Only</strong> the platform vault owner MAY <code>withdraw</code>. If $\rho&lt;1$, VOID, or $S=0$, $S_P=0$ and that ix SHALL reject (<code>NoSurplus</code>). $S_P$ SHALL NOT be mixed with $\phi$ (FR-TRD-04). Drawing $H$ / $C_P$ is a shortfall stack (FR-SET-07), not surplus. Product §1.2.1 / §1.2.7.</td>
+<td>Surplus cases + claim ixs</td>
+</tr>
+<tr>
+<td>FR-SET-05</td>
+<td>Dust from $\lfloor\rho\cdot\mathrm{face}\rfloor$ SHALL go to reserves, not to a preferred user.</td>
+<td>Remainder account</td>
+</tr>
+<tr>
+<td>FR-SET-06</td>
+<td>There SHALL be no <code>admin_withdraw</code>. Outflows are: user unused margin, settlement payout, LP draw, $C_P$ allocation, surplus split, LP cover claims, platform fee claim, VOID / failed-resolution refunds.</td>
+<td>Instruction whitelist</td>
+</tr>
+<tr>
+<td>FR-SET-07</td>
+<td>There SHALL be one platform adjustment fund pool $C_P^{\mathrm{pool}}$ (one USDC vault). Draw order SHALL be $T$ (<code>Board.trading_revenue</code>; fees never entered; payable premium SHALL NOT be subtracted before $\rho$), then $C_R$ by leftover shortfall, then $C_P^{\mathrm{alloc}}=\min((L-T-C_R)^+,C_P^{\mathrm{board}},C_P^{\mathrm{pool}})$, which SHALL debit the pool. If $L\le T$, $C_P^{\mathrm{alloc}}$ SHALL be $0$. Missing tap or empty pool SHALL allocate $0$. Listing tap MAY be $0$ (create default). The pool SHALL NOT be an unlimited guarantee and SHALL NOT be a protocol percent of $L$. Boards SHALL NOT hold a private $C_P$ balance. Product §1.2.1.</td>
+<td>Pool balance + two-board contention</td>
+</tr>
+<tr>
+<td>FR-SET-08</td>
+<td>If $L\le R_{\mathrm{net}}$, Risk LP $H$ SHALL be $0$ and $C_P$ SHALL NOT be drawn.</td>
+<td>Own-funds fixture</td>
+</tr>
+<tr>
+<td>FR-SET-09</td>
+<td>Ticket face SHALL be $q\cdot n_{\mathrm{hit}}/n_{\mathrm{parts}}$. Ordinary sets: one part. Quarter lines: two parts of $q/2$. Fill and settle SHALL use the same <code>skellam_masks</code>. A quarter OR-mask paying $\rho\cdot q$ is forbidden.</td>
+<td>Half-win $q/2$; $E(c)=\sum\mathrm{face}$</td>
+</tr>
+<tr>
+<td>FR-SET-10</td>
+<td>The displayed market distribution SHALL be $p_k$ from $p0,\theta,\beta$ (<code>implied_probs</code>). $E$ SHALL NOT be shown as the PDF. <code>submit_result</code> SHALL NOT rewrite $p$ or $E$.</td>
+<td>PDF sums to 1; $E\neq p$ fixture</td>
+</tr>
+<tr>
+<td>FR-SET-11</td>
+<td>Settlement is a <strong>gate</strong>. After $x^*$ is finalized the program SHALL, in order: (1) lock $L=E(c)$ (FR-SET-01); (2) lock $C_{\max}$ (FR-SET-02, FR-SET-07); (3) write $\rho$ (FR-SET-03) on the board; (4) only then accept <code>vault.payout</code> / claim. A payout instruction SHALL reject if $\rho$ is not yet written. Live $\hat\rho$ / coverage SHALL NOT be used as this $\rho$.</td>
+<td>No payout before written $\rho$; reject ix</td>
+</tr>
+<tr>
+<td>FR-SET-12</td>
+<td>Each Risk LP <code>UserVault</code> SHALL keep a cumulative operating risk P&amp;L $\Pi$ (<code>risk_pnl</code>): minus $H$ on <code>draw_lp</code>, plus premium and $S_R$ credits. Cover SHALL NOT rewrite $\Pi$. The same vault SHALL keep <code>cover_paid</code>, the cumulative USDC already paid from <code>LossPool</code>. <code>cover_lp_loss</code> SHALL be signed by <code>Market.platform</code> and SHALL credit at most $\min((-\Pi)^+-\texttt{cover_paid},\,\text{LossPool.available})$, raising <code>cover_paid</code> (and <code>available</code>) by the credit. Cover SHALL NOT pay when that uncovered amount is $0$. There SHALL NOT be a calendar / epoch gate on outflows. Inflows (<code>pay_surplus_cover</code>) MAY run at any time. When to reimburse is a platform operational choice; the chain SHALL keep the two ledgers strictly. Product §1.2.1 / §1.2.6.</td>
+<td>PnL + cover_paid + platform ix</td>
+</tr>
+</tbody>
+</table>
+<h3 id="451-recovery-rate-normative">4.5.1 Recovery rate (normative)</h3>
+<p>Payout is not “send face and hope the pot lasts”. One board-wide $\rho$ is computed <strong>first</strong>, then every winner is paid at that rate:</p>
+<p>$$<br />
+\rho=\min\bigl(1,C_{\max}/L\bigr),\qquad L=E(c),\quad C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}.<br />
+$$</p>
+<ul>
+<li><strong>Enough:</strong> $C_{\max}\ge L$ $\Rightarrow$ $\rho=1$ $\Rightarrow$ $\lfloor\mathrm{face}\rfloor$ USDC.</li>
+<li><strong>Short:</strong> $C_{\max}&lt;L$ $\Rightarrow$ $\rho=C_{\max}/L$ $\Rightarrow$ $\lfloor\rho\cdot\mathrm{face}\rfloor$ USDC, same $\rho$ for every winner.</li>
+<li><strong>Empty liability:</strong> $L=0$ $\Rightarrow$ $\rho=1$.</li>
+<li><strong>Abnormal end:</strong> VOID / <code>RESOLUTION_FAILED</code> $\Rightarrow$ no $\rho$; refund <code>cost_paid</code>.</li>
+<li><strong>$C_P$ in the numerator:</strong> $C_P^{\mathrm{alloc}}=\min((L-T-C_R)^+,C_P^{\mathrm{board}},C_P^{\mathrm{pool}})$ when $L&gt;T$, else $0$ (FR-SET-07). Default tap $0$. This is the only amount $C_P$ contributes to $\rho$.</li>
+<li><strong>$T$:</strong> trading revenue; SHALL NOT deduct LP premium before $\rho$.</li>
+</ul>
+<p>Product §1.2.1 / §2 ⑦ / §8.1.8. Code: <code>crates/math</code> <code>recovery_rate</code>, <code>c_p_alloc</code>. <code>submit_result</code> SHALL NOT write $\rho$; only <code>begin_settle</code> after <code>finalize</code>.</p>
+<h3 id="452-surplus-after-full-payout-normative">4.5.2 Surplus after full payout (normative)</h3>
+<p>Surplus is <strong>not</strong> “whatever is left in the vault after claims”. It is computed <strong>in the same <code>begin_settle</code> gate</strong> as $\rho$:</p>
+<p>$$<br />
+S=\max(R_{\mathrm{net}}-L,0)\quad\text{only if }\rho=1;\qquad \rho&lt;1\Rightarrow S=0.<br />
+$$</p>
+<ul>
+<li>No filled risk capital: $S_C=0.20 S$, $S_R=0$, $S_P=\tilde S$.</li>
+<li>Filled risk capital: $S_C=0.20 S$, $S_R=\alpha_R\tilde S$, $S_P=\tilde S-S_R$, default $\alpha_R=0.7$ of $\tilde S$.</li>
+<li>Cover claims (<code>cover_lp_loss</code>) reimburse uncovered $(-\Pi)^+$ up to pool cash when <code>Market.platform</code> signs (FR-SET-12). Each vault books <code>risk_pnl</code> and <code>cover_paid</code> separately. <code>pay_surplus_cover</code> MAY run at any time.</li>
+<li>Floor dust from $\lfloor\rho\cdot\mathrm{face}\rfloor$ stays in reserves (FR-SET-05), not in $S$.</li>
+<li>$\phi$ remains on the fee ledger until <code>claim_fees</code>. It is <strong>not</strong> $S_P$ (product §1.2.7).</li>
+</ul>
+<p>Product §1.2.1 / §8.6. Code: <code>surplus</code>, <code>surplus_split</code>, <code>pay_surplus_cover_inner</code>, <code>pay_surplus_lp_inner</code>, <code>pay_surplus_platform_inner</code>.</p>
+<h3 id="46-durability-and-recovery">4.6 Durability and recovery</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+<th>Verify</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-DUR-01</td>
+<td>A receipted fill SHALL persist across a single-node crash. $\theta$ SHALL be reconstructible as $\mathrm{Update}(\theta_0,\mathrm{trade}_1,\ldots,\mathrm{trade}_t)$.</td>
+<td>Kill ER / indexer / PG, replay</td>
+</tr>
+<tr>
+<td>FR-DUR-02</td>
+<td>L1 Commit SHALL be a checkpoint, not the definition of “fill exists”.</td>
+<td>Fills between commits survive</td>
+</tr>
+<tr>
+<td>FR-DUR-03</td>
+<td>The fill journal SHALL have at least two durable copies that do not share a process (ER replica log and object-store append log as specified).</td>
+<td>Ops checklist</td>
+</tr>
+<tr>
+<td>FR-DUR-04</td>
+<td>Postgres / Redis SHALL NOT be the ledger. Recovery order: L1 checkpoint → replay journal → rebuild index. Off-chain PG (listings, fill journal, projections) SHALL be written by Rust services through DDD repositories and sqlx transactions (<code>docs/architecture/ddd-sqlx.md</code>). The Next.js client SHALL NOT open Postgres.</td>
+<td>Runbook drill</td>
+</tr>
+<tr>
+<td>FR-DUR-05</td>
+<td>Recovery SHALL NOT delete receipted fills to “align” state. Mismatch SHALL halt the board and alert.</td>
+<td>Fault injection</td>
+</tr>
+<tr>
+<td>FR-DUR-06</td>
+<td>ER SHALL Commit on an interval (time or N fills), not only at <code>close_ts</code>.</td>
+<td>Commit cadence</td>
+</tr>
+</tbody>
+</table>
+<h3 id="47-client-and-ops-surfaces">4.7 Client and ops surfaces</h3>
+<p>Next.js is the only user client (CR-01). Every capability in §2 that a human performs SHALL have a screen. A route name alone is not a requirement: the page SHALL do the job of that role. Chain rules stay in FR-MKT / FR-WAL / FR-TRD / FR-RSK / FR-RES / FR-SET; this subsection is the <strong>web acceptance list</strong>.</p>
+<p><strong>Keeper split (locked).</strong> R-KEEP write path is the CLI / KMS (FR-CLI-01, FR-UI-28): <code>close</code>, Commit, Undelegate, keeper alerts. That <em>is</em> the keeper screen. <code>/ops</code> is read-only for R-OPS / R-PLAT. The committee desk MAY call <code>resolve_open</code>; it SHALL NOT expose keeper halt / Commit buttons.</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Page</th>
+<th>Job</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R-TRADER</td>
+<td><code>/</code></td>
+<td>Browse / search / page every indexed board by title, tags, family</td>
+</tr>
+<tr>
+<td>R-TRADER</td>
+<td><code>/m/[id]</code></td>
+<td>Trade ticket (FR-UI-32): live implied PDF (FR-UI-39), pre-bet, typed lines, coverage, pending nonce; after close public $x^<em>$ / $\rho$ (FR-UI-33); </em><em>comments after the board is indexed</em>* (FR-UI-42)</td>
+</tr>
+<tr>
+<td>R-TRADER</td>
+<td><code>/portfolio</code></td>
+<td>Cash ticket (FR-UI-35): deposit / withdraw Circle USDC; every fill; settlement tickets (FR-UI-33)</td>
+</tr>
+<tr>
+<td>R-TRADER</td>
+<td>chrome</td>
+<td>Connect / SIWS; open / renew / revoke Session; in-app inbox</td>
+</tr>
+<tr>
+<td>R-LP</td>
+<td><code>/auctions</code></td>
+<td>Browse every open risk book</td>
+</tr>
+<tr>
+<td>R-LP</td>
+<td><code>/auction/[id]</code></td>
+<td>Auction ticket (FR-UI-37): identity, single pool, ranked S_R waterfall vs draw, standing ladder, quote</td>
+</tr>
+<tr>
+<td>R-LP</td>
+<td><code>/lp</code></td>
+<td>Locked $D_i$, expected $H$, premium, surplus / unlock / cover claim, cumulative $\Pi$ and <code>cover_paid</code></td>
+</tr>
+<tr>
+<td>R-CREATOR</td>
+<td><code>/create</code></td>
+<td>Market <strong>application</strong> (SIWS): human title + catalog tags (FR-UI-36), distribution family, <strong>write $P_0$</strong> (FR-MKT-13–22, §4.1.1) via the prior ticket (FR-UI-34). Submit does <strong>not</strong> open trading (FR-UI-43). Duplicate → <code>409</code> (FR-UI-45). SHALL NOT collect comments (FR-UI-42)</td>
+</tr>
+<tr>
+<td>R-REVIEW</td>
+<td><code>/review</code></td>
+<td>Review queue: approve, then <strong>reviewer</strong> signs on-chain create + open; reject, mark duplicate, set geo-IP blocks, audit log (FR-UI-43–45)</td>
+</tr>
+<tr>
+<td>R-CREATOR</td>
+<td><code>/tags</code></td>
+<td>Maintain the tag vocabulary: add a tag; delete only when unused (FR-UI-36)</td>
+</tr>
+<tr>
+<td>R-CMTE</td>
+<td><code>/committee</code>, <code>/resolve/[id]</code></td>
+<td>Lock bond; <code>submit_result</code> inside the report window; evidence, challenge, $M/N$ vote. After <code>report_deadline</code>, committee submit/VOID SHALL be refused</td>
+</tr>
+<tr>
+<td>R-OPS</td>
+<td><code>/ops</code></td>
+<td>Read-only: index lag, coverage, Vault identity, $C_P$ pool, keeper heartbeat. Never Vault withdraw</td>
+</tr>
+<tr>
+<td>R-PLAT</td>
+<td><code>/ops</code> ($C_P$)</td>
+<td>View $C_P^{\mathrm{pool}}$ and per-board caps / allocations. No <code>admin_withdraw</code></td>
+</tr>
+<tr>
+<td>R-PLAT</td>
+<td><code>/resolve/[id]</code></td>
+<td>When <code>now ≥ report_deadline</code> and phase is Open: <code>admin_submit_result</code> (slash) or <code>admin_void_resolution</code> (no slash). Signer SHALL be <code>Market.platform</code></td>
+</tr>
+<tr>
+<td>R-KEEP</td>
+<td>CLI</td>
+<td><code>close</code> / Commit / Undelegate / alerts. Not a web write path</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+<th>Verify</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-UI-01</td>
+<td>Next.js SHALL provide <code>/</code>, <code>/m/[id]</code>, <code>/auctions</code>, <code>/auction/[id]</code>, <code>/portfolio</code>, <code>/lp</code>, <code>/resolve/[id]</code>, <code>/committee</code>, <code>/create</code>, <code>/review</code>, <code>/tags</code>, <code>/ops</code>.</td>
+<td>Routes</td>
+</tr>
+<tr>
+<td>FR-UI-02</td>
+<td>Mobile SHALL be the same site (PWA / in-wallet browser / official TWA).</td>
+<td>Same origin / build</td>
+</tr>
+<tr>
+<td>FR-UI-03</td>
+<td>The client SHALL show PDF (or 11×11 football heat), $p_S$, $C_S(q)$, coverage, $\hat\rho$, and fee separately.</td>
+<td>UI review</td>
+</tr>
+<tr>
+<td>FR-UI-04</td>
+<td>Copy SHALL state that fills are public on-chain. The product SHALL NOT promise on-chain anonymity.</td>
+<td>Copy review</td>
+</tr>
+<tr>
+<td>FR-UI-05</td>
+<td>The public desk (<code>GET /v1/markets/{id}/info</code>, lobby, <code>/m/[id]</code>) SHALL show traders (distinct owners with $q&gt;0$), stake ($\sum$ <code>cost_paid</code>), $L_{\max}$, $C_R$, $C_{\max}$, coverage, and the trading-implied PDF $p_k=\mathrm{implied_probs}(p0,\theta,\beta)$. $E$ SHALL be labeled as face / liability and SHALL NOT be drawn as the PDF. Highest-risk tape: FR-UI-46.</td>
+<td><code>/info</code> + UI review</td>
+</tr>
+<tr>
+<td>FR-UI-07</td>
+<td>The lobby catalog (<code>/</code> and <code>GET /v1/markets</code>) SHALL default to <strong>Trading</strong> (status 1). Omitting <code>status</code> means Trading; <code>status=all</code> (or <code>-1</code>) lists every indexed status. Default sort is <code>stake_usdc</code> descending, then <code>slot</code> descending (not peak-risk). <code>sort=peak</code> remains the highest-risk tape only. Theme filter is catalog <code>tag=</code> (legacy <code>category=</code> aliases it). Lobby MAY switch <code>view=list|grid</code> (default grid). Rows SHALL use the <strong>market name</strong> as the primary heading (never pubkey-only). <code>PENDING_REVIEW</code> and <code>REJECTED</code> applications SHALL NOT appear as tradable rows. It SHALL also show tags, status, and when posted: trading event, description, <code>close_ts</code>, optional cover <code>image_url</code>. Search on name / event / description / tags / market / family / status. A market MAY match if <strong>any</strong> of its tags equals the filter. Page+limit: default 20, max 100. A board without a posted title SHALL still show a <strong>generic family-default name</strong> (e.g. <code>Gaussian prediction market</code>), never a create-form example such as <code>US CPI YoY — 2026-03</code>. Full card: FR-UI-38. Geo-IP: FR-UI-44.</td>
+<td><code>/</code> + <code>/v1/markets</code> review</td>
+</tr>
+<tr>
+<td>FR-UI-08</td>
+<td><code>/committee</code> SHALL list indexed boards and accept a family-correct $x^<em>$ (<code>submit_result</code> / <code>resolve_open</code>) </em><em>only while</em><em> <code>now &lt; report_deadline</code>. Session keys SHALL be rejected. No oracle write path. This is the </em><em>report slice</em>* of FR-UI-13.</td>
+<td>Committee UI review</td>
+</tr>
+<tr>
+<td>FR-UI-09</td>
+<td><code>/portfolio</code> SHALL list the connected wallet’s tickets (<code>GET /v1/owners/{owner}/positions</code>): every board the user filled, cost paid, claimed payout, and a prompt when a board has settled / refunded. Search and pagination apply. Filters SHALL include open / won / lost / unclaimed. The same page SHALL show Vault balance, Session remaining, and deposit / withdraw (FR-UI-16).</td>
+<td>Portfolio + API review</td>
+</tr>
+<tr>
+<td>FR-UI-10</td>
+<td><code>/m/[id]</code> SHALL NOT offer a live LMSR unwind. The sell control SHALL be disabled (<code>Sells closed</code>). Compose SHALL refuse <code>sell_set</code> / <code>sell_skellam_set</code> (<code>403</code>, FR-TRD-14). After a buy, the position stays until settlement claim on <code>/portfolio</code> (or VOID refund of <code>cost_paid</code>).</td>
+<td>Disabled sell + compose 403</td>
+</tr>
+<tr>
+<td>FR-UI-11</td>
+<td>After a board is SETTLED, REFUND, VOID, or <code>RESOLUTION_FAILED</code>, <code>/portfolio</code> SHALL let the owner claim (<code>vault.payout</code> / refund). The UI SHALL show paid, net vs <code>cost_paid</code>, and a persistent prompt until claimed. Session SHALL be rejected.</td>
+<td>Claim / refund ix</td>
+</tr>
+<tr>
+<td>FR-UI-12</td>
+<td><code>/create</code> SHALL let any <strong>SIWS-logged-in</strong> wallet submit a listing <strong>application</strong> by <strong>distribution family</strong> (Skellam / Gaussian / lognormal / Dirichlet / Bernoulli), not by product category. Main wallet only. Required fields: FR-UI-24 (<code>report_open_ts</code> included). Prior parameters are FR-MKT-13–22 (core), not a UI convenience. Submit SHALL NOT open trading. On-chain <code>create_*</code> runs only after <code>R-REVIEW</code> approve (FR-UI-43). Interaction: FR-UI-31, FR-UI-34.</td>
+<td>Application + family + <code>p0_mass</code></td>
+</tr>
+<tr>
+<td>FR-UI-13</td>
+<td><code>/committee</code> / <code>/resolve/[id]</code> SHALL support the full resolution path: lock bond, <code>submit_result</code> inside the report window, challenge, $M/N$ vote. After <code>report_deadline</code> with no proposal, the desk SHALL wait for <code>R-PLAT</code> (<code>admin_submit_result</code> / <code>admin_void_resolution</code>, FR-RES-07) and SHALL NOT auto-fail. Family-correct $x^*$ (FR-RES-04). No oracle write path. Session rejected. Evidence, reporter vs member, and tallies: FR-UI-26. HTTP refresh of committee roster / resolution state SHALL be $60\,\mathrm{s}$ (local countdown MAY tick at $1\,\mathrm{s}$).</td>
+<td>Committee state machine</td>
+</tr>
+<tr>
+<td>FR-UI-14</td>
+<td><code>/auction/[id]</code> SHALL let a Risk LP quote the pool (capacity, premium, profit share) with the main wallet. Session SHALL NOT bid (FR-WAL-06). The pool is FR-UI-22. After-fill LP claims are FR-UI-23.</td>
+<td>Auction desk</td>
+</tr>
+<tr>
+<td>FR-UI-15</td>
+<td>The chrome SHALL let the connected wallet open, renew, and revoke a Session (expiry, remaining USDC, allowed ixs). Revoke SHALL be a distinct control from disconnect. Disconnecting SHALL NOT revoke on-chain (FR-WAL-07). Session ixs: main wallet only. Remaining and expiry SHALL stay visible while a Session is live.</td>
+<td>Session chrome + chain state</td>
+</tr>
+<tr>
+<td>FR-UI-16</td>
+<td><code>/portfolio</code> SHALL expose <code>vault.deposit</code> and <code>vault.withdraw</code> (main wallet). Unconfirmed deposits SHALL NOT raise spendable balance (FR-WAL-03). Copy SHALL state Circle USDC only; the product SHALL NOT offer an in-protocol swap. Interaction: FR-UI-35.</td>
+<td>Deposit / withdraw ix</td>
+</tr>
+<tr>
+<td>FR-UI-17</td>
+<td>A Skellam board on <code>/m/[id]</code> SHALL offer typed lines — 1X2, handicap (integer / half / quarter), totals, BTTS, exact score, and a custom 121-cell mask — each expanded to $S$ then quoted by the same engine (<code>buy_skellam_set</code> or <code>buy_set</code> for a custom union). Sells are closed (FR-TRD-14). Quarter AH SHALL preview as two half-fills of $q/2$ (FR-SET-09). Overflow cells SHALL be labeled <code>10+</code> (or $k_{\max}^+$). The heat is not a substitute for the templates.</td>
+<td>Football board + quote</td>
+</tr>
+<tr>
+<td>FR-UI-18</td>
+<td>After a gateway ACK the client SHALL show <code>pending</code> on that ticket and retry the <strong>same</strong> <code>nonce</code> until <code>confirmed</code> or a terminal reject (FR-TRD-09). Refresh SHALL NOT mint a new nonce for an in-flight submit.</td>
+<td>Pending UX + idempotent nonce</td>
+</tr>
+<tr>
+<td>FR-UI-19</td>
+<td><code>/m/[id]</code> SHALL show a rules strip: family, <code>close_ts</code> countdown, <code>risk_lock_ts</code> if the auction is open, resolution rule, <code>source_url</code> / <code>cert_source</code> when locked, committee roster or public committee id, overflow <code>10+</code> on Skellam. Live score, if shown, SHALL be labeled display-only and SHALL NOT rewrite $P_0$, $\theta$, or <code>close_ts</code>.</td>
+<td>Rules strip review</td>
+</tr>
+<tr>
+<td>FR-UI-20</td>
+<td>After halt or settlement, <code>/m/[id]</code> SHALL disclose the public result: proposed and/or final $x^*$, $\rho$, $L=E(c)$, and $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. VOID and <code>RESOLUTION_FAILED</code> SHALL use refund copy, not a fake $0$-$0$. A connected wallet SHALL see whether each of its $S$ hit. Interaction: FR-UI-33.</td>
+<td>Settled board review</td>
+</tr>
+<tr>
+<td>FR-UI-21</td>
+<td>The chrome SHALL provide an in-app inbox (drawer or <code>/inbox</code>) for: unclaimed settlement / refund, challenge opened, Session expiry, pending→confirmed. Items are <code>{kind, market}</code> from <code>GET /v1/notify</code> plus local session alerts. The drawer SHALL poll that feed on a $60\,\mathrm{s}$ interval (not a multi-second busy loop). It SHALL separate <strong>Unread</strong> from <strong>History</strong>, show an unread badge count, and let the user mark one or all items read. Rows SHALL show the market name when known. Storage MAY be session-local.</td>
+<td>Inbox</td>
+</tr>
+<tr>
+<td>FR-UI-22</td>
+<td><code>/auctions</code> SHALL list every open risk pool (search + page) with listing title and tags when posted. Catalog tag chips and <code>tag=</code> / family / status filters SHALL match the lobby catalog. The page MAY switch <code>view=list|grid</code> (default grid) and SHALL show cover <code>image_url</code> when present. <code>/auction/[id]</code> SHALL show the standing ladder (unit premium, (D), timestamp rank), coverage, and <code>risk_lock_ts</code> countdown when indexed. Interaction: FR-UI-37.</td>
+<td>Auction catalog</td>
+</tr>
+<tr>
+<td>FR-UI-23</td>
+<td><code>/lp</code> SHALL list this wallet’s risk quotes and locks (<code>GET /v1/owners/{owner}/risk</code>): $D_i$, premium, expected $H$, quote P&amp;L, surplus share. It SHALL show cumulative <code>risk_pnl</code>, <code>cover_paid</code>, uncovered $(-\Pi)^+-\texttt{cover_paid}$, and the cover pool (<code>GET /v1/owners/{owner}/vault</code>, <code>GET /v1/pool</code>). After settlement it SHALL let the LP claim premium / surplus / unused collateral and <code>pay_surplus_cover</code> with the main wallet. <code>cover_lp_loss</code> SHALL be enabled only when the connected wallet is that quote’s indexed <code>Market.platform</code> and uncovered loss is $&gt;0$ (FR-SET-12). The desk SHALL NOT treat <code>GET /v1/ops/status</code> <code>create_platform</code> / <code>PLATFORM_PUBKEY</code> as that market’s platform. Session SHALL be rejected.</td>
+<td>LP book + claim ix</td>
+</tr>
+<tr>
+<td>FR-UI-24</td>
+<td><code>/create</code> SHALL collect, per family: <strong>listing title</strong>, <strong>catalog tags</strong>, optional <strong>cover image</strong> (jpeg/png/webp ≤ 2 MiB via <code>POST /v1/listings/media</code> on Market API; not chain, not $C_{\max}$ / $C_P$), $\beta$, grid or atoms, $C_P^{\mathrm{board}}$, committee roster or public committee id, <code>close_ts</code>, <code>risk_lock_ts</code> ($\le$ <code>close_ts</code>; default equal), <code>report_open_ts</code> (required, $\ge$ <code>close_ts</code>; earliest <code>submit_result</code>), <code>committee_bond &gt; 0</code>, resolution rule, published auction layers, topic / tag (on-chain series key, not the human name). The report window SHALL default to 24h (<code>report_window_secs = 86400</code>). Family-specific: Skellam $\lambda_H,\lambda_A,k_{\max}$ and overflow <code>10+</code> preview; Gaussian $\Omega=[x_{\min},x_{\max}]$, $\mu,\sigma$ in the series unit (CPI: percentage points, not cell indices); lognormal $\Omega&gt;0$, $\mu$ on $\log x$, $\sigma$, and <code>price_rule</code>; Dirichlet <code>layout</code> (atoms / top-$n$ / simplex) and $\alpha$; Bernoulli prior and <code>early_resolve</code>. A pubkey without a live SIWS session SHALL be rejected. An allow-list of “authorized creators” SHALL NOT be required. Identity: FR-UI-36. Prior: FR-UI-34. Review: FR-UI-43.</td>
+<td>Create form + application</td>
+</tr>
+<tr>
+<td>FR-UI-25</td>
+<td><strong>Removed.</strong> The product SHALL NOT collect or inject $C_M$.</td>
+<td>—</td>
+</tr>
+<tr>
+<td>FR-UI-26</td>
+<td><code>/committee</code> / <code>/resolve/[id]</code> SHALL distinguish authorized reporter (propose only) from committee member (challenge / vote) from platform (<code>Market.platform</code> from <code>GET /v1/markets/{id}/info</code>, not <code>PLATFORM_PUBKEY</code>). The desk SHALL accept an evidence object, store it off-chain, and send only <code>evidence_hash</code> on-chain (FR-RES-05). It SHALL show the report-window countdown (default 24h from <code>report_open_ts</code>), the challenge-window countdown, and the live $M/N$ tally (vote extend / <code>RESOLUTION_FAILED</code> after a proposal). After <code>report_deadline</code> with no proposal it SHALL show <strong>awaiting platform</strong> and, if the connected wallet is <code>Market.platform</code>, <code>admin_submit_result</code> (slash bond) and <code>admin_void_resolution</code> (no slash).</td>
+<td>Evidence + tally UI</td>
+</tr>
+<tr>
+<td>FR-UI-27</td>
+<td><code>/ops</code> SHALL be read-only: indexer lag, board coverage, Vault token identity (no withdraw control), keeper heartbeat, $C_P^{\mathrm{pool}}$, the LP cover pool, and per-board $C_P^{\mathrm{board}}$ / $C_P^{\mathrm{alloc}}$ (<code>GET /v1/ops/status</code>, <code>GET /v1/pool</code>). It SHALL NOT offer <code>admin_withdraw</code>, cover outflows, or any Vault outflow (FR-SET-06). Cover reimbursement stays <code>cover_lp_loss</code> (FR-SET-12), not this page.</td>
+<td>Ops dashboard</td>
+</tr>
+<tr>
+<td>FR-UI-28</td>
+<td>The web app SHALL NOT expose keeper write instructions (<code>close</code>, Commit, Undelegate, keeper-only halt). Those SHALL run from the CLI / KMS (FR-CLI-01). <code>/ops</code> shows heartbeat only. <code>resolve_open</code> stays on the committee desk (FR-UI-13).</td>
+<td>Negative: no keeper buttons</td>
+</tr>
+<tr>
+<td>FR-UI-29</td>
+<td>The shell nav SHALL include Lobby, Portfolio, Committee, Create, Auctions, Ops. Create SHALL be available to any SIWS session (FR-UI-43). <code>/review</code> SHALL be shown only to <code>R-REVIEW</code>. Ops MAY be hidden unless the connected pubkey is an operator. <code>/auctions</code> SHALL stay public (approved books only).</td>
+<td>Nav review</td>
+</tr>
+<tr>
+<td>FR-UI-30</td>
+<td>Low coverage SHALL show a strong warning on <strong>buy</strong> and SHALL still allow submit (FR-TRD-08). Sells are closed (FR-TRD-14). The warning SHALL NOT change $p_S$ / $C_S$.</td>
+<td>Coverage warning + chain accept</td>
+</tr>
+<tr>
+<td>FR-UI-31</td>
+<td><code>/create</code> SHALL be an <strong>application ticket</strong>, not a flat admin form. The desk SHALL: (1) pick a distribution family first (cards) — catalog tags are identity, not the family picker; (2) collect listing title + catalog tags (FR-UI-36), optional blocked regions (FR-UI-44), and show them on the live ticket with family, $x^<em>$ meaning, cells, $\beta$, $C_P$ tap cap, close window, and derived market PDA; (3) on submit persist a <code>PENDING_REVIEW</code> application (SIWS required) — it SHALL NOT open trading or the risk auction yet; (4) after accept show “pending review”, not a live market; (5) keep protocol $C_P^{\mathrm{pool}}$, <code>claim_fees</code>, and <code>pay_surplus_platform</code> as </em><em>separate</em><em> actions after the board is </em><em>open</em>* (product §1.2.7). <code>claim_fees</code> SHALL require the connected wallet to be <code>Market.platform</code>. <code>pay_surplus_platform</code> MAY be submitted by any connected main wallet (credit into the platform vault only). Compose <code>claim_fees</code> / <code>cover_lp_loss</code> / <code>pay_surplus_platform</code> SHALL return <code>503</code> until the market is in the indexed store, then apply the platform rules. Session SHALL be rejected (FR-WAL-06). Required fields remain FR-UI-24. Duplicate: FR-UI-45.</td>
+<td>Create desk review</td>
+</tr>
+<tr>
+<td>FR-UI-32</td>
+<td><code>/m/[id]</code> SHALL be a <strong>trade ticket</strong> while the prediction market is trading: implied PDF (or 11×11 heat) per FR-UI-39, typed Skellam lines or interval $S$, live $p_S$ / $C_S(q)$ / Pay / hit / miss / net / book EV (FR-UI-06), LMSR cost copy (FR-UI-47), coverage warning that does not rewrite the quote (FR-UI-30), and <code>pending</code> on ACK with the <strong>same</strong> <code>nonce</code> until confirmed (FR-UI-18). Session MAY sign <strong>buy</strong> only while <code>now &lt; close_ts</code> and the market is not settled. Sells are closed (FR-UI-10). Refresh SHALL NOT mint a new nonce for an in-flight fill. When <code>now ≥ close_ts</code> or after settlement, buy SHALL be <strong>disabled</strong> and <code>trade()</code> SHALL refuse. Labels MAY stay visible for review; they SHALL NOT be a write path (FR-UI-20, FR-UI-33).</td>
+<td>Trade desk review</td>
+</tr>
+<tr>
+<td>FR-UI-33</td>
+<td>Settlement SHALL have two surfaces (product §1.2.3). On <code>/m/[id]</code>, after halt / SETTLED / VOID / <code>RESOLUTION_FAILED</code>, the <strong>public result</strong> card SHALL show proposed and/or final $x^<em>$ (from the indexed resolution record when present), $\rho$, $L=E(c)$, $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$, and refund copy — never a fake $0$-$0$. A connected wallet SHALL see its last $S$ on that market. On <code>/portfolio</code>, claimable tickets SHALL render as </em><em>settlement tickets</em><em>: cost paid, shares, $\lfloor\rho\cdot\mathrm{face}\rfloor$ if $S$ contains $x^</em>$ else $0$, or refund <code>cost_paid</code> on VOID / failed resolution, with Claim / Refund. Copy SHALL state the payout is $q\times\mathrm{hit}\times\rho$, not $p_S$ and not $q/p_S$. Session SHALL be rejected. The prompt SHALL persist until claimed (FR-UI-11).</td>
+<td>Settlement desk review</td>
+</tr>
+<tr>
+<td>FR-UI-34</td>
+<td><code>/create</code> SHALL present a <strong>prior ticket</strong> that implements FR-MKT-13–22 / §4.1.1: collect $\Omega,\mu,\sigma$ or $\lambda$ or $\alpha$ in the series unit; offer the US CPI YoY / MoM reference listings; live-preview $P_0$ via <code>GET /v1/prior</code> (bars + interval or 1X2 masses); surface FR-MKT-17 warnings; send <code>milli=true</code>. The desk SHALL NOT expose raw cell-index $\mu,\sigma$ as the CPI path.</td>
+<td>Prior ticket + <code>/v1/prior</code> + milli compose</td>
+</tr>
+<tr>
+<td>FR-UI-35</td>
+<td><code>/portfolio</code> SHALL present a <strong>cash ticket</strong>, not two raw amount buttons. The desk SHALL: (1) separate Deposit ticket vs Withdraw ticket; (2) show a live confirmed ledger — wallet ATA, vault <code>available</code>, <code>reserved</code>, free $=\mathrm{available}-\mathrm{reserved}$, Session cap labeled <strong>not a balance</strong>; (3) on deposit move wallet ATA $\to$ vault <code>available</code>, show <code>pending</code> until confirmed, and SHALL NOT increment spendable before confirm (FR-WAL-03); (4) on withdraw move only <strong>free</strong> unused margin $\to$ wallet ATA and refuse / disable amounts above free (reserved stays locked); (5) copy Circle SPL USDC only, no in-protocol swap, SOL is fees only; (6) main wallet only — Session SHALL be rejected (FR-WAL-06, NFR-17). <code>GET /v1/owners/{owner}/vault</code> SHALL project the same L1 <code>UserVault</code> + ATA (<code>source=l1</code>). The desk SHALL prefer confirmed L1; the API is the same ledger, not a stub.</td>
+<td>Cash ticket + <code>/vault</code> + ix</td>
+</tr>
+<tr>
+<td>FR-UI-36</td>
+<td><code>/create</code> SHALL collect a human <strong>listing title</strong> (market name), <strong>one or more catalog tags</strong>, <strong>trading event</strong>, and <strong>description</strong>. An optional cover MAY be uploaded to Market API local files (<code>MEDIA_DIR</code>, <code>GET /v1/media/{id}</code>); PG stores <code>image_id</code> only. Next.js SHALL NOT store files or open Postgres. Tags are a <strong>maintained English catalog</strong> (e.g. <code>football</code> + <code>epl</code>, or <code>football</code> + <code>world cup</code>); a market MAY belong to several tags. <code>/tags</code> SHALL list every catalog tag with a usage count, accept <code>POST /v1/tags</code> to add, and <code>DELETE /v1/tags/{name}</code> only when unused. Attaching a tag on a listing SHALL register it if new. Tags SHALL NOT replace distribution family and SHALL NOT be confused with the on-chain series <code>tag</code>. These fields SHALL persist via <code>POST /v1/listings</code> (<code>tags[]</code>; legacy <code>category</code> is accepted as a single tag) into <strong>PostgreSQL</strong> (<code>listing.tags</code> + <code>catalog_tag</code>, sqlx, DDD <code>Context</code> transaction). Memory is a cache only. A process crash or API restart SHALL reload names from PG. Local test uses the machine PostgreSQL (<code>infra/local-pg.sql</code>, default <code>postgres://cpm:cpm@127.0.0.1:5432/cpm</code>). <code>LISTINGS_PATH</code> JSON is a one-time import, not the store. The browser MAY hydrate an empty API from its local cache. They SHALL appear on <code>/</code>, <code>/m/[id]</code>, <code>/auctions</code>, <code>/auction/[id]</code>, <code>/committee</code>, <code>/resolve/[id]</code>, <code>/portfolio</code>, <code>/lp</code>, and <code>/ops</code>. Topic / tag remain the 32-byte on-chain series key and SHALL NOT be presented as the public name. Title, at least one tag, event, and description SHALL be required to submit. The on-chain <code>Market</code> account MAY omit these strings (id_hash only).</td>
+<td>Identity ticket + listings file</td>
+</tr>
+<tr>
+<td>FR-UI-37</td>
+<td><code>/auction/[id]</code> SHALL be an <strong>auction ticket</strong>, not a four-stat summary plus a raw form. The desk SHALL: (1) show listing identity (title, tags, family); (2) describe the <strong>single pool</strong> (no layer stack, no (\gamma)); (3) show draw vs ranked (S_R) waterfall copy; (4) show the standing ladder (lowest unit premium, then earlier timestamp); (5) keep the quote ticket (capacity (D) with min size, premium, profit share, rank, lock-is-reserve copy). When <code>now ≥ close_ts</code> (or <code>risk_lock_ts</code> if earlier), the quote ticket SHALL disable <strong>Quote pool</strong> and <code>bid()</code> SHALL refuse. Session SHALL be rejected (FR-WAL-06).</td>
+<td>Auction desk review</td>
+</tr>
+<tr>
+<td>FR-UI-38</td>
+<td>Every market surface (<code>/</code>, <code>/m/[id]</code>, <code>/auction/[id]</code>) SHALL expose a <strong>market card</strong>: name, tags, description, trading event, trading close (<code>close_ts</code>), abnormal end (VOID / <code>RESOLUTION_FAILED</code> refund — never a fake $0$-$0$), clock copy (<code>close_ts</code> is locked and SHALL NOT extend; the report window is 24h from <code>report_open_ts</code> and SHALL NOT auto-extend on a missed report), committee-report-open time (<code>report_open_ts</code>, required), current status, committee final $x^*$ when finalized, liability $L=E(c)$ after settle else $L_{\max}$, capital pool $C_{\max}=R_{\mathrm{net}}+C_R+C_P^{\mathrm{alloc}}$, and payable $\min(L,C_{\max})$. Optional cover <code>image_url</code> SHALL render when present and SHALL NOT occupy a large empty slot when absent. The lobby MAY show a grid of cards (cover, title, tag, stake, close) or a list of rows. The lobby row SHALL at least show the name.</td>
+<td>Market card review</td>
+</tr>
+<tr>
+<td>FR-UI-39</td>
+<td><code>/m/[id]</code> SHALL show the <strong>trading-implied PDF</strong> $p_k=\mathrm{implied_probs}(p0,\theta,\beta)$ from the indexed projection — <strong>not</strong> computed in the browser, <strong>not</strong> a fill histogram, <strong>not</strong> $E$. Cadence: indexer poll $60\,\mathrm{s}$ (floor $400\,\mathrm{ms}$); <code>GET /v1/markets/{id}/ws</code> ticks $250\,\mathrm{ms}$ and SHALL push on connect and whenever $\theta$ changes (payload: <code>slot</code>, $p$ bps, $E$ for hover, coverage / $\hat\rho$ / $L_{\max}$ / $C_{\max}$). The desk SHALL subscribe to that WS; if the socket is down it SHALL reconnect (backoff $1\,\mathrm{s}$ … $30\,\mathrm{s}$) and SHALL poll <code>GET /v1/markets/{id}/info</code> at $\le 30\,\mathrm{s}$ until live. After <code>board_phase\ge 1</code> the chart SHALL freeze and unsubscribe. Display: bars or Skellam $11\times 11$ heat, height/heat relative to the peak $p_k$, hover in percent, selected mass $p_S$, bin $n&gt;32$ cells, stamp <code>Live book</code> / <code>Polling book</code> / <code>Frozen PDF</code> plus snapshot slot. $E$ MAY appear only in the tooltip labeled face. The quote ticket SHALL refresh when the snapshot slot moves.</td>
+<td>PDF desk + WS / poll</td>
+</tr>
+<tr>
+<td>FR-UI-40</td>
+<td>Live coverage and $\hat\rho$ SHALL be shown as $C_{\max}/L_{\max}$ only when $L_{\max}&gt;0$. If $L_{\max}=0$ the desk SHALL print <code>—</code> and SHALL NOT print $100\%$ or a low-coverage warning. Settlement $\rho=\min(1,C_{\max}/L)$ with $L=0\Rightarrow 1$ remains a settlement identity, not a live-book coverage.</td>
+<td>Coverage dash when $L_{\max}=0$</td>
+</tr>
+<tr>
+<td>FR-UI-41</td>
+<td><code>/portfolio</code> tickets, <code>/lp</code> quotes, <code>/ops</code> $C_P$ rows, <code>/resolve/[id]</code>, committee result pane, and inbox links SHALL show the <strong>market name</strong> (FR-UI-36), not pubkey-only. <code>GET /v1/owners/{owner}/positions</code> SHALL include title and the frozen $S$ (<code>mask</code> or Skellam kind). Compose <code>buy_*</code> and <code>POST /v1/tickets</code> SHALL persist $S$ to PostgreSQL <code>fill_journal</code> (same DDD transaction port). <code>TICKETS_PATH</code> JSON is a one-time import. Claim SHALL use that journal (or recover $n\le 16$ / typed Skellam from <code>set_hash</code>) and SHALL NOT require this browser&rsquo;s localStorage. <code>/lp</code> SHALL reload after Draw / Premium / Surplus / Unlock.</td>
+<td>Ticket identity + fill journal</td>
+</tr>
+<tr>
+<td>FR-UI-42</td>
+<td><code>/m/[id]</code> SHALL expose a <strong>flat comment thread</strong> only after the board is <strong>approved and indexed</strong> (<code>market_proj</code>). <code>/create</code> SHALL NOT collect comments. <code>GET</code> / <code>POST /v1/markets/{id}/comments</code> SHALL 404 if the market is not indexed or not open. Posting SHALL send the connected wallet pubkey as <code>author</code> (same grade as <code>POST /v1/listings</code>; SIWS is not required) and a body of 1–2000 trimmed characters. Comments SHALL persist in PostgreSQL <code>market_comment</code> (sqlx, DDD <code>Context</code> transaction). Memory is a cache. Next.js SHALL NOT open Postgres. Comments SHALL NOT be on-chain and SHALL NOT enter $C_{\max}$, $C_P$, or the fee ledger. No nested replies. Page+limit: default 20, max 100, newest first. Geo-IP: FR-UI-44.</td>
+<td>Board comments + <code>/comments</code></td>
+</tr>
+<tr>
+<td>FR-UI-43</td>
+<td>The product SHALL have a <strong>system review desk</strong> <code>/review</code> for role <code>R-REVIEW</code>. Any SIWS wallet MAY <code>POST /v1/listings/applications</code> (create ticket + compose spec with <code>close_in</code>). Status starts <code>PENDING_REVIEW</code>. The reviewer SHALL approve, reject, or mark-duplicate, with a written reason stored in <code>review_log</code>. <strong>Approve and open prediction market</strong> SHALL then be signed by the <strong>reviewer wallet as on-chain <code>owner</code></strong>: <code>create_*</code> + open the risk auction + optional <code>set_tap</code>; attach <code>market</code>; set status <code>OPEN</code>. If create already landed, <strong>Continue opening prediction market</strong> writes the live market into the lobby without a second create. <code>close_ts</code> is the absolute time locked at submit. The applicant SHALL NOT sign <code>create_*</code>. <strong>Reject</strong> sets <code>REJECTED</code> and SHALL NOT open trading. Pending / rejected applications SHALL NOT appear on <code>/</code> as tradable markets. The reviewer is not the committee and SHALL NOT withdraw Vault.</td>
+<td><code>/review</code> + application API</td>
+</tr>
+<tr>
+<td>FR-UI-44</td>
+<td>A listing application MAY lock <strong>blocked regions</strong> (ISO 3166-1 alpha-2, optional ISO 3166-2 subdivision). The Market API SHALL resolve the client IP to a region (GeoIP) and SHALL hide or <code>403</code> that board on lobby, <code>info</code>, <code>quote</code>, <code>preview</code>, <code>compose</code>, trade, auction, and comments when the region is blocked. The reviewer MAY add or confirm the list at review. Next.js SHALL NOT open Postgres; it SHALL call <code>/v1/*</code>. Geo-IP is access policy, not $\rho$ / $C_P$.</td>
+<td>Geo-IP + <code>blocked_regions</code></td>
+</tr>
+<tr>
+<td>FR-UI-45</td>
+<td>Submit SHALL compute a duplicate key = family + normalized <strong>canonical English</strong> title + trading event (trim; ASCII case-fold). Locale strings SHALL NOT enter the key. If another application is <code>PENDING_REVIEW</code> or <code>OPEN</code> with the same key, the API SHALL return <code>409</code>. The reviewer MAY reject as duplicate. On-chain <code>topic</code>/<code>tag</code> uniqueness remains a separate series-key check.</td>
+<td>Duplicate listing</td>
+</tr>
+<tr>
+<td>FR-UI-46</td>
+<td>During trading the system SHALL publish a <strong>highest-risk-payout</strong> object per prediction market: $L_{\max}=\max_k E_k$ and the <strong>thickest overlap</strong> ${x:E(x)=L_{\max}}$ (contiguous plateau), labeled in outcome units (Gaussian / lognormal: print interval on $\Omega$; Skellam: score cell; Bernoulli: YES/NO; Dirichlet: atom). $E(x)$ is overlap depth of bought intervals, not ticket-volume rank. Info / list / WS SHALL include <code>peak_risk</code> (<code>lo</code>/<code>hi</code> = plateau). The lobby and <code>/ops</code> SHALL list every live market’s peak on a $60\,\mathrm{s}$ poll. Display SHALL NOT sum $E$ across a bought band or treat the PDF peak as the risk peak. After <code>board_phase≥1</code> the public number is $L=E(c)$.</td>
+<td>Tape + <code>/info.peak_risk</code></td>
+</tr>
+<tr>
+<td>FR-UI-47</td>
+<td>While trading is open, <code>/m/[id]</code> SHALL explain LMSR fill cost in trader language (product §1.2.4): the same / overlapping $S$ gets more expensive after buys; this is <strong>not</strong> wall-clock time and <strong>not</strong> a separate popularity fee; cold or disjoint intervals MAY get cheaper; coverage / $\hat\rho$ SHALL NOT change $C_S$. Product sells are closed, so the ticket SHALL NOT invite an unwind at live LMSR. $p_S$, $C_S(q)$, fee, and coverage remain separate rows (FR-UI-03).</td>
+<td>Trade ticket copy</td>
+</tr>
+<tr>
+<td>FR-UI-48</td>
+<td>Listing identity SHALL be <strong>canonical English</strong> plus optional locale display (product §1.2.5). <code>/create</code> MAY collect a native draft (<code>source_locale</code>) and SHALL require English title, event, and description sufficient to identify $x^<em>$. <code>GET /v1/markets</code> and listing payloads SHALL include canonical fields and MAY include <code>i18n[locale]</code>. The desk SHALL select <code>Accept-Language</code> / browser locale, then parent, then English; a non-English view SHALL be labeled a translation and SHALL offer English. Search SHALL match English and the requested locale. Catalog tag </em><em>keys</em>* stay English. Canonical English SHALL NOT change after <code>OPEN</code>. Translations MAY be added later. Geo-IP (FR-UI-44) SHALL NOT choose language. Comments SHALL NOT be auto-translated into settlement copy. Next.js SHALL NOT open Postgres.</td>
+<td>Listing i18n + <code>/v1</code></td>
+</tr>
+<tr>
+<td>FR-CLI-01</td>
+<td>CLI SHALL support create-*, close/undelegate, buy-set, session open/renew/revoke, withdraw, risk bid, resolve, keeper, index status, <code>market pdf</code> / <code>market info</code>. <code>sell-set</code> / <code>sell-skellam</code> SHALL refuse (FR-TRD-14). Gateway buys SHALL poll <code>pending</code> then <code>confirmed</code> on the same <code>nonce</code>. Keeper writes in this list are the R-KEEP screen (FR-UI-28).</td>
+<td>Command list</td>
+</tr>
+<tr>
+<td>FR-IDX-01</td>
+<td>Indexer SHALL follow ER + L1 and rebuild from the journal after lag. Reads SHALL be shed if lag exceeds the threshold.</td>
+<td>Lag metric</td>
+</tr>
+</tbody>
+</table>
+<h3 id="471-interaction-desks-normative">4.7.1 Interaction desks (normative)</h3>
+<p>A route that “has the buttons” is not enough. Each human write path SHALL present a <strong>ticket</strong>: what is locked now, what happens if the event hits, what the user signs, and which key may sign. Auction (FR-UI-22) and committee (FR-UI-26) already follow this. Create / trade / settle SHALL match.</p>
+<p><strong>Create (<code>/create</code>, FR-UI-31, FR-UI-34, FR-UI-36, FR-UI-48).</strong> Family cards first — family is the math, not the catalog. The <strong>identity ticket</strong> is the public name: <strong>canonical English</strong> listing title + catalog tags (several allowed — e.g. <code>football</code> + <code>epl</code>). Native-language draft is optional. <code>/tags</code> maintains the English vocabulary; unused tags MAY be deleted. Topic / tag stay the on-chain series key. Writing $P_0$ is the listing (FR-MKT-13–22, §4.1.1). The <strong>prior ticket</strong> is that write: for CPI, $\Omega$ and $\mathcal{N}(\mu,\sigma^2)$ in percentage points — survey median $\to\mu$, survey dispersion $\to\sigma$, $n=256$ — with a live $P_0$ preview and interval masses; not two raw cell integers. The application ticket then previews title, tags, $x^<em>$ meaning, $P_0$ summary, cells, $\beta$, $C_P$ tap, close, derived PDA. Submit is one primary button per family (<code>Create {family} prediction market</code>). Submit persists a <code>PENDING_REVIEW</code> application (<code>POST /v1/listings/applications</code> + compose spec), not a live market. Duplicate key → <code>409</code> (FR-UI-45, English title + event). The applicant SHALL NOT sign <code>create_*</code>. After </em><em>reviewer approve</em><em> (FR-UI-43) the </em><em>reviewer wallet</em><em> is owner: persist title/tags (<code>POST /v1/listings</code>), </em><em>open trading</em><em> and </em><em>open the risk auction</em>*, attach <code>market</code>, set <code>OPEN</code>. The create desk then shows the name and market key and deep-links to the trade desk, the risk auction, and the committee desk. Funding $C_P^{\mathrm{pool}}$ stays secondary — it is not the application. The create desk SHALL NOT collect comments; discussion starts on <code>/m/[id]</code> after the market is live (FR-UI-42).</p>
+<p><strong>Review (<code>/review</code>, FR-UI-43–45).</strong> <code>R-REVIEW</code> only. Queue of <code>PENDING_REVIEW</code> applications: identity, prior, compose spec, blocked regions, duplicate hits. Actions: <strong>Approve and open prediction market</strong> (reviewer signs <code>create_*</code> as owner — lobby visible, traders can buy, and open the risk auction), Reject (reason), Mark duplicate. If chain fails after off-chain approve, retry <strong>Continue opening prediction market</strong>. Every action writes <code>review_log</code>. Not committee $x^*$, not <code>/ops</code> withdraw.</p>
+<p><strong>Trade (<code>/m/[id]</code>, FR-UI-32, FR-UI-39, FR-UI-40, FR-UI-42, FR-UI-47).</strong> Left: implied PDF (or Skellam heat) and typed lines. The chart is a <strong>live book snapshot</strong>: server <code>implied_probs</code>, WS on $\theta$ change, reconnect + $30\,\mathrm{s}$ poll fallback, freeze after close — never a browser LMSR loop. Stamp slot and live/poll/frozen. Hover is percent; $E$ is face in the tooltip. Right: the pre-bet ticket (Pay, fee, hit / miss, net, book EV), refreshed when the snapshot slot moves. Copy next to $C_S(q)$ SHALL state that later buys of a popular / overlapping $S$ cost more because LMSR raised $p_S$ — not wall-clock time, not a popularity fee (product §1.2.4). Coverage / $\hat\rho$ are <code>—</code> while $L_{\max}=0$. Low coverage is a banner that still allows submit <strong>while trading is open</strong>. Sells are closed: the ticket reads <strong>Sells closed</strong> and compose refuses <code>sell_*</code>. After <code>close_ts</code> the ticket reads <strong>Trading closed</strong> and buy is disabled on every family. After gateway ACK the ticket reads <code>pending</code> and retries the same nonce. Session may sign buy only before close. <strong>Comments</strong> sit below the trade ticket: only after <code>market_proj</code> has the prediction market; connected wallet pubkey as <code>author</code>; <code>GET</code>/<code>POST /v1/markets/{id}/comments</code>; Postgres <code>market_comment</code>; 404 if not indexed; 1–2000 trimmed characters; flat, no replies; never $C_{\max}$ / $C_P$ / fees.</p>
+<p><strong>Settle (<code>/m/[id]</code> public result + <code>/portfolio</code> settlement tickets, FR-UI-33, FR-UI-41).</strong> After close the market shows $x^*$, $\rho$, $L$, $C_{\max}$. VOID / <code>RESOLUTION_FAILED</code> use refund copy. <code>/portfolio</code> lifts unclaimed tickets into settlement tickets (name, cost, shares, $\lfloor\rho\cdot\mathrm{face}\rfloor$ or refund) with Claim / Refund. Frozen $S$ comes from the fill journal (<code>TICKETS_PATH</code>), not this browser&rsquo;s localStorage.</p>
+<p><strong>Cash (<code>/portfolio</code> cash ticket, FR-UI-35).</strong> Deposit and withdraw are separate tickets on the same ledger. Deposit: wallet ATA $\to$ vault <code>available</code>; the ticket reads <code>pending</code> and spendable does not move until confirm. Withdraw: only free $=\mathrm{available}-\mathrm{reserved}$ may leave; reserved is risk-lock, not unused margin. Circle SPL USDC only; no swap; Session cannot sign. The Session remaining figure is a cap, not a second vault. <code>GET /v1/owners/{owner}/vault</code> reads L1, not a zero stub.</p>
+<p><strong>Market card (FR-UI-38, FR-UI-46).</strong> Name, tags, description, trading event, <code>close_ts</code>, abnormal end, report-open, status, final $x^<em>$, $L$, $C_{\max}$, payable, and during trading the </em><em>highest risk payout</em>* (thickest overlap interval + $L_{\max}$). The lobby lists the name as the row heading and a live tape of those peaks.</p>
+<p><strong>Auction (<code>/auction/[id]</code>, FR-UI-22, FR-UI-37).</strong> Identity first (title, tags). Then the single pool, ranked (S_R) waterfall vs draw copy, the standing ladder, and the quote ticket ($D$ with min size, premium, rank). Four headline numbers alone are not the desk.</p>
+<p>Auction and committee desks already specified: published-layer quote ticket (FR-UI-22) and phase-gated report / challenge / $M/N$ (FR-UI-26).</p>
+<hr />
+<h2 id="5-external-interface-requirements">5. External interface requirements</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Interface</th>
+<th>Requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>IR-01</td>
+<td>Solana L1</td>
+<td>Vault, create, Delegate/Commit, resolution, settle; dedicated RPC, not a public free endpoint for users</td>
+</tr>
+<tr>
+<td>IR-02</td>
+<td>MagicBlock ER</td>
+<td><code>buy_set</code> / <code>sell_set</code> / optional risk fills; <code>&lt;10</code> ms in-chain target</td>
+</tr>
+<tr>
+<td>IR-03</td>
+<td>Wallet Adapter</td>
+<td>Web: <code>@solana/wallet-adapter-react</code>. Mobile: deep link / injected provider / MWA on TWA</td>
+</tr>
+<tr>
+<td>IR-04</td>
+<td>USDC mint</td>
+<td>Circle official SPL USDC; <code>mint == USDC_MINT</code> on every funds ix</td>
+</tr>
+<tr>
+<td>IR-05</td>
+<td>—</td>
+<td>No on-chain oracle or price-feed dependency</td>
+</tr>
+<tr>
+<td>IR-06</td>
+<td>Object store</td>
+<td>Committee evidence and append-only fill journal; L1 stores hashes / <code>trades_root</code></td>
+</tr>
+<tr>
+<td>IR-07</td>
+<td>BFF / Market API</td>
+<td>Metadata, positions, snapshots, <code>GET /v1/markets</code> catalog (search + page), <code>GET /v1/owners/{owner}/positions</code> tickets, <code>GET /v1/owners/{owner}/vault</code> cash ledger, <code>GET /v1/owners/{owner}/risk</code> LP book, <code>GET /v1/markets/{id}/info</code> desk, <code>GET /v1/markets/{id}/pdf</code> cells, <code>GET /v1/markets/{id}/ws</code> implied-PDF push (IR-08), <code>GET /v1/markets/{id}/preview</code> pre-bet ticket, <code>GET /v1/markets/{id}/layers</code> published auction book, <code>GET /v1/markets/{id}/resolution</code> committee record, <code>GET</code>/<code>POST /v1/markets/{id}/comments</code> board comments (FR-UI-42; 404 if not indexed), <code>GET /v1/auctions</code> auction catalog, <code>POST /v1/listings/applications</code> + <code>GET</code>/<code>POST /v1/review</code> listing review (FR-UI-43–45; SIWS), <code>POST /v1/listings</code> + <code>GET /v1/listings/{id}</code> listing identity (after approve), <code>GET/POST /v1/tags</code> + <code>DELETE /v1/tags/{name}</code> catalog tags, <code>POST /v1/tickets</code> fill journal, <code>GET /v1/ops/status</code> ops snapshot, <code>GET /v1/pool</code> $C_P$ pool, <code>GET /v1/prior</code> create-time $P_0$ preview; no hot-path fill</td>
+</tr>
+<tr>
+<td>IR-08</td>
+<td>Quote WSS</td>
+<td>PDF / book push. Localnet floor is the indexer poll ($60\,\mathrm{s}$, min $400\,\mathrm{ms}$) plus a $250\,\mathrm{ms}$ $\theta$-change tick. ER-era emit after a projected fill remains $&lt;50\,\mathrm{ms}$ (NFR-04).</td>
+</tr>
+<tr>
+<td>IR-09</td>
+<td>Trading Gateway</td>
+<td>Client-signed txs; ACK is <code>pending</code> (NFR-13). ER execution target remains NFR-01. Gateway is not a signer.</td>
+</tr>
+<tr>
+<td>IR-10</td>
+<td>IDL</td>
+<td>One Anchor IDL for <code>packages/sdk</code> and <code>crates/client</code>; no hand-rolled discriminators</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6-non-functional-requirements">6. Non-functional requirements</h2>
+<p>Reliability (crash / replay), security (keys, session authority, payload bounds), and performance (ACK vs confirm) SHALL be treated as first-class requirements. NFR-<em> below are MUST, same as FR-</em>.</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+<th>Target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NFR-01</td>
+<td>ER <code>buy_set</code> execution</td>
+<td>$&lt;10$ ms (excludes wallet popup)</td>
+</tr>
+<tr>
+<td>NFR-02</td>
+<td>ER gas</td>
+<td>0</td>
+</tr>
+<tr>
+<td>NFR-03</td>
+<td>Quote / position API</td>
+<td>$&lt;150$ ms</td>
+</tr>
+<tr>
+<td>NFR-04</td>
+<td>PDF WebSocket</td>
+<td>Emit after a projected $\theta$ change $&lt;50\,\mathrm{ms}$. Localnet indexer lag ($60\,\mathrm{s}$) is a separate floor (FR-UI-39).</td>
+</tr>
+<tr>
+<td>NFR-05</td>
+<td>Halt Commit / Undelegate</td>
+<td>seconds</td>
+</tr>
+<tr>
+<td>NFR-06</td>
+<td>Grid size</td>
+<td>$N=256\sim1024$ (1D); football $11\times11$. Solana <code>create_account</code> / one <code>resize</code> $\le10\,240$ bytes. <code>Grid::space(n)=75+64n</code> (Borsh, no pad): $n=128\to8267$ (one create), $n=256\to16459$ (create + 1 grow), $n=1024\to65611$ (create + 6 grows). Create writes $P_0$ only when <code>space\le10240</code>; else empty vecs, then <code>grow_grid</code> + <code>write_grid_mass</code> (<code>PRIOR_CHUNK=256</code>) + <code>seal_grid</code>. Families that MAY exceed the cap: Gaussian, lognormal, and Dirichlet <strong>simplex with $k\le4$</strong> (e.g. $k=2$ bins=$158$ $n=159$; $k=4$ bins=$10$ $n=286$). Dirichlet <strong>atoms</strong> over the cap SHALL reject (<code>extra.a–d</code> hold at most 4 $\alpha$). Simplex masses are streamed (<code>simplex_chunk_raw</code>); do not rebuild the full simplex on the BPF heap. Interval $P_0$ is the same truncated $\mathcal{N}$: range-reduced <code>exp</code> and a $3\sigma$ index window. <code>grow_grid</code> only resizes. <strong>Continue opening prediction market</strong> / CLI <strong>always</strong> finish from on-chain <code>Market.n</code> until <code>p0.len()=n</code>, <code>z\neq0</code>, and <code>data_len\ge space</code>. Grow / mass / seal / fill txs request 256 KiB heap. Fill SHALL return <code>GridNotReady</code> until sealed. LMSR fills stay on-chain (same <code>exp</code>); quote is already off-chain.</td>
+</tr>
+<tr>
+<td>NFR-07</td>
+<td>Consensus math</td>
+<td>Q64.64; no IEEE float; <code>crates/math</code> shared by chain, Quote, WASM</td>
+</tr>
+<tr>
+<td>NFR-08</td>
+<td>Index rebuild</td>
+<td>From journal / chain; RPO for PG query copy $\le1$ min (not ledger)</td>
+</tr>
+<tr>
+<td>NFR-09</td>
+<td>Monthly drill</td>
+<td>Kill Indexer, Keeper, PG primary, one ER; Vault identity and receipted fills unchanged</td>
+</tr>
+<tr>
+<td>NFR-10</td>
+<td>Observability</td>
+<td>ER latency, fill success, index lag, coverage, Vault balance, Keeper heartbeat</td>
+</tr>
+<tr>
+<td>NFR-11</td>
+<td>Availability (Keeper)</td>
+<td>Active-standby; idempotent <code>close</code></td>
+</tr>
+<tr>
+<td>NFR-12</td>
+<td>Precision</td>
+<td>Same test vectors on chain, Quote, WASM</td>
+</tr>
+<tr>
+<td>NFR-13</td>
+<td>Gateway submit ACK</td>
+<td>Return <code>pending</code> without waiting for RPC confirm. Target $&lt;50$ ms after the signed tx is accepted (local disk write included; not ER fill time)</td>
+</tr>
+<tr>
+<td>NFR-14</td>
+<td>Gateway receipt durability</td>
+<td>A receipt the gateway already ACK’d as <code>pending</code> SHALL survive a gateway process crash. The store is <strong>not</strong> the ledger (FR-DUR-04). RPO $=0$ for ACK’d receipts on that host</td>
+</tr>
+<tr>
+<td>NFR-15</td>
+<td>Gateway / Session secrets</td>
+<td>The system SHALL NOT persist or log private keys, mnemonics, or Session secret material. A signed transaction MAY be stored only to re-forward the same <code>nonce</code>. Logs SHALL NOT print full <code>tx_b64</code></td>
+</tr>
+<tr>
+<td>NFR-16</td>
+<td>Gateway idempotency</td>
+<td>The same <code>(owner, market, nonce)</code> SHALL return the existing receipt. After <code>confirmed</code>, a new signed tx for that nonce SHALL NOT be forwarded again</td>
+</tr>
+<tr>
+<td>NFR-17</td>
+<td>Session is not a vault</td>
+<td><code>remaining_usdc</code> is a Session cap. The L1 user vault debit is authoritative. Session SHALL NOT authorize <code>withdraw</code>, <code>create_*</code>, risk <code>bid</code>, or resolution</td>
+</tr>
+<tr>
+<td>NFR-18</td>
+<td>Gateway rate limit</td>
+<td>Submit SHALL be rate-limited per owner (default $20$ / $10$ s). Excess SHALL return HTTP $429$</td>
+</tr>
+<tr>
+<td>NFR-19</td>
+<td>Gateway payload bound</td>
+<td>Signed tx body SHALL be rejected above $4$ KiB. JSON body limit $16$ KiB</td>
+</tr>
+<tr>
+<td>NFR-20</td>
+<td>Confirm path vs hot path</td>
+<td>RPC send / confirm SHALL run off the submit ACK path (background). Confirm latency SHALL NOT block the <code>pending</code> response</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="7-constraints-locked-stack">7. Constraints (locked stack)</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Constraint</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CR-01</td>
+<td>User client SHALL be Next.js only. Flutter, React Native, native store apps SHALL NOT be built.</td>
+</tr>
+<tr>
+<td>CR-02</td>
+<td>The system SHALL NOT submit a trading app to the App Store or Google Play.</td>
+</tr>
+<tr>
+<td>CR-03</td>
+<td>Apple IAP and Play Billing SHALL NOT be used.</td>
+</tr>
+<tr>
+<td>CR-04</td>
+<td>Programs SHALL be Anchor + <code>ephemeral-rollups-sdk</code> + <code>session-keys</code>.</td>
+</tr>
+<tr>
+<td>CR-05</td>
+<td>Four programs: <code>market</code>, <code>risk</code>, <code>vault</code>, <code>resolution</code>. <code>vault</code> and <code>resolution</code> SHALL never Delegate and SHALL reject Session as authority.</td>
+</tr>
+<tr>
+<td>CR-06</td>
+<td>All backend services SHALL be Rust Axum.</td>
+</tr>
+<tr>
+<td>CR-07</td>
+<td>Chain clients SHALL be <code>@coral-xyz/anchor</code> + <code>@solana/web3.js</code> (not <code>@solana/kit</code> in parallel).</td>
+</tr>
+<tr>
+<td>CR-08</td>
+<td>Collateral and payouts SHALL be Circle SPL USDC only. SOL pays L1 fees only.</td>
+</tr>
+<tr>
+<td>CR-09</td>
+<td>No in-protocol swap, Jupiter CPI, or second mint.</td>
+</tr>
+<tr>
+<td>CR-10</td>
+<td>Light Protocol, if used, SHALL archive <strong>closed</strong> books only; never Vault or hot $\theta$.</td>
+</tr>
+<tr>
+<td>CR-11</td>
+<td>TEE, if used, SHALL attest ER integrity only. TEE SHALL NOT replace the committee or L1 Vault.</td>
+</tr>
+<tr>
+<td>CR-12</td>
+<td>PDF / $E$ / $L_{\max}$ SHALL remain public. Private ER encryption SHALL NOT be used for the main book.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-data-and-security-requirements">8. Data and security requirements</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DR-01</td>
+<td>Public book ($f$, fills, $E$, $x^*$, $\rho$, payouts) SHALL be public and recomputable.</td>
+</tr>
+<tr>
+<td>DR-02</td>
+<td>Secrets (upgrade keys, keeper keys, KMS, DB, RPC tokens) SHALL use least privilege and KMS/HSM.</td>
+</tr>
+<tr>
+<td>DR-03</td>
+<td>PII SHALL be encrypted, off-chain, and not written to L1.</td>
+</tr>
+<tr>
+<td>DR-04</td>
+<td>TLS in transit; KMS-backed encryption at rest for PG, object store, backups.</td>
+</tr>
+<tr>
+<td>DR-05</td>
+<td>Evidence objects: private bucket, L1 hash only.</td>
+</tr>
+<tr>
+<td>DR-06</td>
+<td>Logs MAY include truncated pubkey; SHALL NOT include phone, government id, or raw IP by default.</td>
+</tr>
+<tr>
+<td>DR-07</td>
+<td>A stolen index DB SHALL NOT enable an extra USDC transfer.</td>
+</tr>
+<tr>
+<td>DR-08</td>
+<td>Gateway receipt files SHALL NOT contain private keys or mnemonics. Signed tx bytes, if stored, are not spend authority.</td>
+</tr>
+<tr>
+<td>DR-09</td>
+<td>Gateway receipt directory SHALL be host-local and not world-readable by default.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-protocol-invariants-test-in-ci">9. Protocol invariants (test in CI)</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Invariant</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>INV-01</td>
+<td>$\sum_k p_k=1$ (or $\int f=1$) after every fill</td>
+</tr>
+<tr>
+<td>INV-02</td>
+<td>Buying $S$ does not decrease $p_S$</td>
+</tr>
+<tr>
+<td>INV-03</td>
+<td>If $\rho=1$, winners are paid ticket face; else $\sum$ paid $=\lfloor\rho\cdot$ faces$\rfloor$ with dust to reserves</td>
+</tr>
+<tr>
+<td>INV-04</td>
+<td>$\sum$ USDC paid to winners $\le C_{\max}$</td>
+</tr>
+<tr>
+<td>INV-05</td>
+<td>Vault token balance equals the accounting sum</td>
+</tr>
+<tr>
+<td>INV-06</td>
+<td>Same $\rho$ for every winner on a board</td>
+</tr>
+<tr>
+<td>INV-07</td>
+<td>Fees never sit in the user payout numerator</td>
+</tr>
+<tr>
+<td>INV-08</td>
+<td>After any mix of fills, $\sum_j\mathrm{face}_j(c)=E(c)$</td>
+</tr>
+<tr>
+<td>INV-09</td>
+<td>$p_k$ is not $E_k$; $\sum p_k=1$</td>
+</tr>
+<tr>
+<td>INV-10</td>
+<td>Session is not vault authority: <code>withdraw</code> / <code>create_*</code> / <code>bid</code> / <code>submit_result</code> fail when signed only by Session</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="10-shall-not-out-of-scope">10. SHALL NOT (out of scope)</h2>
+<p>The system SHALL NOT:</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Forbidden</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>XX-01</td>
+<td>Bake expected $\rho$ into LMSR price</td>
+</tr>
+<tr>
+<td>XX-13</td>
+<td>Treat $E$ as the PDF; sum $E$ across atoms as $L$; pay $\rho\cdot q$ on a quarter OR-mask</td>
+</tr>
+<tr>
+<td>XX-02</td>
+<td>Haircut by arrival time / FIFO</td>
+</tr>
+<tr>
+<td>XX-03</td>
+<td>Hard-reject trading because $L_{\max}$ exceeds locked $C_R$ fails</td>
+</tr>
+<tr>
+<td>XX-04</td>
+<td>Let one LP lock underwrite multiple boards</td>
+</tr>
+<tr>
+<td>XX-05</td>
+<td>Use a parameterized AMM (only $\mu,\sigma$ or $\lambda_H,\lambda_A$)</td>
+</tr>
+<tr>
+<td>XX-06</td>
+<td>Run a full on-chain CVaR portfolio optimizer</td>
+</tr>
+<tr>
+<td>XX-07</td>
+<td>Ship committee token governance or a large on-chain court</td>
+</tr>
+<tr>
+<td>XX-08</td>
+<td>Accept SOL or other SPL tokens as margin / collateral / payout</td>
+</tr>
+<tr>
+<td>XX-09</td>
+<td>Auto-swap arbitrary coins into USDC inside the protocol</td>
+</tr>
+<tr>
+<td>XX-10</td>
+<td>Use multi-collateral or a house stablecoin</td>
+</tr>
+<tr>
+<td>XX-11</td>
+<td>Build Flutter / RN / a store trading app or a “read-only store package”</td>
+</tr>
+<tr>
+<td>XX-12</td>
+<td>Use IAP / Play Billing or in-store circumvention copy</td>
+</tr>
+<tr>
+<td>XX-14</td>
+<td>Persist or log Session / user private keys, mnemonics, or keypair JSON in the gateway, BFF, or indexer</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="11-acceptance-for-a-release">11. Acceptance for a release</h2>
+<p>A release is acceptable only if all of the following pass:</p>
+<ol>
+<li>Every FR-<em> and CR-</em> in this SRS has an automated or documented manual test.</li>
+<li>INV-01–INV-07 run in CI against <code>crates/math</code> and program fixtures.</li>
+<li>FR-DUR-01 drill: kill one ER, Indexer, and PG primary; receipted fills and Vault identity unchanged.</li>
+<li>FR-SET-03 fixture: two winners, $L&gt;C_{\max}$, same $\rho$, no FIFO remainder to the earlier fill.</li>
+<li>FR-RES-01: no code path writes $x^*$ except <code>submit_result</code>.</li>
+<li>FR-WAL-03 / CR-08: non-USDC deposit rejected.</li>
+<li>Client is the Next.js app only; no store binaries in the release.</li>
+<li>FR-TRD-09 / NFR-13–16: gateway submit returns <code>pending</code> after a durable write; that receipt survives a gateway process restart; same <code>(owner, market, nonce)</code> is idempotent; no private keys in receipt files.</li>
+</ol>
+<hr />
+<h2 id="12-traceability-summary">12. Traceability (summary)</h2>
+<table>
+<thead>
+<tr>
+<th>SRS group</th>
+<th>Product spec</th>
+<th>Architecture</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-MKT-*</td>
+<td>§§4, 4.6–4.10 (priors), 11, 16; SRS §4.1.1</td>
+<td>Tech §5–6, §6.2 $P_0$</td>
+</tr>
+<tr>
+<td>FR-WAL-*</td>
+<td>§14.5, 16</td>
+<td>Tech §2</td>
+</tr>
+<tr>
+<td>FR-TRD-*</td>
+<td>§§4–5, 7–8, 16</td>
+<td>Tech §6.3</td>
+</tr>
+<tr>
+<td>FR-RSK-*</td>
+<td>§6, 16</td>
+<td>Tech §6.5</td>
+</tr>
+<tr>
+<td>FR-HAL/RES/SET-*</td>
+<td>§§8–11, 16</td>
+<td>Tech §6.6–6.7, Sys §3</td>
+</tr>
+<tr>
+<td>FR-DUR-*</td>
+<td>§16 fill durability</td>
+<td>Sys §10</td>
+</tr>
+<tr>
+<td>FR-UI-*</td>
+<td>§3 roles, §4.6 football templates, §8.1 desk, §14.5–14.6 client</td>
+<td>Tech §2; Sys §2</td>
+</tr>
+<tr>
+<td>NFR-*</td>
+<td>§14.4</td>
+<td>Sys §4, 6</td>
+</tr>
+<tr>
+<td>CR-*</td>
+<td>§16–17</td>
+<td>Tech §1–2, 5, 10</td>
+</tr>
+<tr>
+<td>DR-*</td>
+<td>—</td>
+<td>Sys §9, 12</td>
+</tr>
+<tr>
+<td>XX-*</td>
+<td>§17</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="13-change-control">13. Change control</h2>
+<ul>
+<li>New behavior requires an SRS ID and a product-spec update in the same change.</li>
+<li>“Should we add X later?” without an SRS ID is not a requirement.</li>
+<li>Stack changes (e.g. leaving Next.js or Anchor) require CR-* amendment and SDK updates in the same change.</li>
+</ul>
+<p><strong>v1.4:</strong> Gateway <code>pending</code>-first durable receipts; NFR-13–20 (reliability, secrets, rate limit, ACK vs confirm); DR-08–09; FR-TRD-09 / FR-WAL-09 / FR-CLI-01 tightened; XX-14.</p>
+<p><strong>v1.5:</strong> FR-UI-05 public desk — traders, stake, $L_{\max}$, $C_R$, implied PDF on <code>GET /v1/markets/{id}/info</code> and <code>/m/[id]</code>.</p>
+<p><strong>v1.6:</strong> FR-UI-06 pre-bet ticket — Pay, fee, hit / miss cashflows, net if hit, book EV on <code>GET /v1/markets/{id}/preview</code> and <code>/m/[id]</code>.</p>
+<p><strong>v1.7:</strong> FR-UI-07 lobby catalog — search by market / family / status and paginated <code>GET /v1/markets</code>.</p>
+<p><strong>v1.8:</strong> FR-UI-08 <code>/committee</code> desk — list boards, family-correct $x^*$, <code>submit_result</code> / <code>resolve_open</code>, no Session / oracle.</p>
+<p><strong>v1.9:</strong> FR-UI-09 portfolio tickets — all boards a wallet filled, claimed PnL, settle/refund prompts.</p>
+<p><strong>v1.10:</strong> §4.7 is the web acceptance list. Role→page matrix. FR-UI-01 adds <code>/create</code>. FR-UI-10–14: sell, claim/refund, create-by-family, committee challenge/vote, LP auction desk. v1.0–1.4 only named routes (FR-UI-01–04); v1.5–1.9 backfilled pages after they were requested.</p>
+<p><strong>v1.11:</strong> Completes the web acceptance list against §2. Role→page adds <code>/auctions</code>, <code>/lp</code>, <code>/ops</code>, chrome Session / inbox. FR-UI-01 routes updated. FR-UI-09/11/12/13/14 tightened. FR-UI-15–30: Session chrome, vault cash, Skellam typed lines, pending nonce, rules strip, public $x^*$/$\rho$, inbox, auction catalog + published book, LP claims, create field list, inject $C_M$, committee evidence/tally, <code>/ops</code> + $C_P$, keeper writes CLI-only, shell nav, coverage warning on buy. IR-07 adds <code>/auctions</code>, <code>/layers</code>, <code>/risk</code>, <code>/ops/status</code>, <code>/pool</code>. Keeper split: CLI is the R-KEEP screen; web has no halt / Commit buttons.</p>
+<p><strong>v1.12:</strong> Interaction desks. §4.7.1 is the ticket rule for every human write path. FR-UI-31 listing ticket on <code>/create</code> (family cards, live capital ticket, post-list links). FR-UI-32 trade ticket on <code>/m/[id]</code> (pre-bet + pending nonce + coverage banner). FR-UI-33 settlement tickets: public $x^*$/$\rho$/$L$/$C_{\max}$ on the board, claim/refund tickets on <code>/portfolio</code>. IR-07 adds <code>GET /v1/markets/{id}/resolution</code>. Auction and committee desks stay FR-UI-22 / FR-UI-26.</p>
+<p><strong>v1.13:</strong> Prior ticket (FR-UI-34). <code>/create</code> takes Gaussian $\Omega,\mu,\sigma$ in the series unit (CPI: percentage points; preset $\mathcal{N}(2.4,0.35)$ on $[-2,12]$), live $P_0$ via <code>GET /v1/prior</code>, interval masses, and tail / grid warnings. Compose writes Q64 thousandths (<code>milli</code>). FR-UI-24 and §4.7.1 updated. IR-07 adds <code>/v1/prior</code>.</p>
+<p><strong>v1.14:</strong> Prior parameterization is a <strong>market</strong> rule, not only a desk. §4.1.1 is normative. FR-MKT-13–22: outcome-unit scalars (not cell indices), Q64 thousandths, truncated Gaussian on $\Omega$ with CPI $\mu$=survey median / $\sigma$=dispersion, reference <code>US_CPI_YOY</code> $\mathcal{N}(2.4,0.35)$ on $[-2,12]$ $n=256$, lognormal $\Omega&gt;0$ / $\mu$ on $\log x$, Skellam $\lambda$ in goals, Dirichlet/Bernoulli $\alpha$, reject illegal params, <code>p0_mass</code> equals <code>crates/math</code>. FR-MKT-01/07/09 and FR-UI-12/34 point here. Product §§4.6–4.10 remain the construction source.</p>
+<p><strong>v1.15:</strong> Cash ticket (FR-UI-35). <code>/portfolio</code> deposit / withdraw is a ledger ticket: Deposit vs Withdraw, confirmed <code>available</code> / <code>reserved</code> / free, Session cap is not a balance, <code>pending</code> until confirm (FR-WAL-03), Circle USDC only, Session rejected. FR-UI-16 and §4.7.1 updated. IR-07 adds <code>GET /v1/owners/{owner}/vault</code>.</p>
+<p><strong>v1.16:</strong> Listing identity (FR-UI-36) and auction ticket (FR-UI-37). <code>/create</code> requires a human title and catalog category, persisted <code>POST /v1/listings</code>, shown on lobby / board / auctions. <code>/auction/[id]</code> is a layer-stack ticket with $H$ if drawn and a standing ladder — not four stats plus a raw form. FR-UI-07/22/24/31 and §4.7.1 updated. IR-07 adds <code>/v1/listings</code>.</p>
+<p><strong>v1.17:</strong> Market card (FR-UI-38). Listings require name, category, trading event, description. Lobby row heading is the market name (never pubkey-only). <code>/m/[id]</code> and <code>/auction/[id]</code> show close, abnormal refund, report-open, status, final $x^*$, $L$, $C_{\max}$, payable. <code>close_ts</code> does not move; only report/challenge may extend. FR-UI-07/36 updated.</p>
+<p><strong>v1.18:</strong> Settlement gate. FR-SET-03 states the two $\rho$ cases ($C_{\max}\ge L\Rightarrow 1$, else $C_{\max}/L$). FR-SET-11 forbids <code>vault.payout</code> until $\rho$ is written. §4.5.1 is normative. Product §2 ⑦ / §8.1.8 match. VOID / failed resolution still refund, not a fake $\rho$.</p>
+<p><strong>v1.19:</strong> Implied-PDF desk (FR-UI-39). <code>/m/[id]</code> shows $p_k=\mathrm{implied_probs}$ from the indexed book — not a browser LMSR loop. Cadence: indexer $400\,\mathrm{ms}$, WS on connect + $\theta$ change ($250\,\mathrm{ms}$ tick), $2\,\mathrm{s}$ poll fallback, freeze after close. Display: percent hover, selected $p_S$, bin $n&gt;32$, live/poll/frozen + slot. IR-07/08 and NFR-04 state the localnet floor vs ER emit. Product §8.1.7 / §14.6 match.</p>
+<p><strong>v1.20:</strong> Listings file (<code>LISTINGS_PATH</code>) so names survive API restart (FR-UI-36). <code>GET /v1/owners/{owner}/vault</code> reads L1 (FR-UI-35). Live coverage is <code>—</code> while $L_{\max}=0$ (FR-UI-40) — not a fake $100\%$.</p>
+<p><strong>v1.21:</strong> Secondary lists show market names (FR-UI-41). Fill journal (<code>TICKETS_PATH</code>) + compose/<code>POST /v1/tickets</code> so claim does not need this browser&rsquo;s mask. <code>/lp</code> reloads after a write. Untitled boards use a generic family name, never the create CPI example (FR-UI-07). Public result prints written ρ, not Q64 raw.</p>
+<p><strong>v1.22:</strong> Board comments (FR-UI-42). Discussion is on <code>/m/[id]</code> only after the board is indexed. <code>/create</code> SHALL NOT collect comments. Wallet pubkey as <code>author</code> (listings grade; no SIWS). Postgres <code>market_comment</code>. <code>GET</code>/<code>POST /v1/markets/{id}/comments</code> 404 if unknown. Flat thread; not on-chain; not $C_{\max}$ / $C_P$ / fees. IR-07 and §4.7.1 updated. Product §1.1 locks the same rule.</p>
+<p><strong>v1.23:</strong> Listing review (FR-UI-43–45). Any SIWS wallet may apply; a system reviewer (<code>R-REVIEW</code>, <code>/review</code>) must approve before the board opens. Duplicates <code>409</code>. Geo-IP region blocks. Lobby lists only <code>OPEN</code> boards. On-chain create runs on approve, not on first submit. Product §1.1 / §4.6.1 / §14.6 updated.</p>
+<p><strong>v1.24:</strong> After approve, the <strong>reviewer</strong> (not the applicant) is the on-chain owner and signs <code>create_*</code> / <code>fund_cm</code> / <code>risk_open_book</code>. The application stores a compose spec (<code>close_in</code>); <code>close_ts</code> is set at open so the queue does not burn the clock. <code>/create</code> is submit-only. <code>/review</code> Approve and open. Status <code>OPEN</code> once <code>market</code> is attached. Product §1.1 / §1.2 updated.</p>
+<p><strong>v1.25:</strong> $C_M$ / seed reserve / inject removed from the product. $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$. Risk layers attach at $(k-1)D_{\mathrm{unit}}$ (no retained seed layer). Create and <code>/m/[id]</code> no longer collect or inject creator capital. <code>fund_cm</code> only opens the board vault at amount $0$. Product §1.1 / §1.2 / §6.6 / §9 updated.</p>
+<p><strong>v1.26:</strong> Product copy: <strong>open the prediction market</strong> and <strong>open the risk auction</strong>. Do not use “board” / “book” / “open the book” / “close the book” as the product noun, or “listing” / “open the risk book” / “hang the catalog” for those steps. <code>/review</code> buttons: Approve and open prediction market / Continue opening prediction market. Lobby: Live markets. <code>/auctions</code>: Risk auctions. Product §1.1 / §1.2 / §4.6.1 / §14.6 updated.</p>
+<p><strong>v1.27:</strong> After <code>close_ts</code>, <strong>no prediction-market fills on any family</strong>. <code>/m/[id]</code> disables buy / sell; compose refuses <code>buy_*</code> / <code>sell_*</code> (<code>403</code>); chain <code>Closed</code>. Bernoulli <code>close_ts</code> is the trading deadline (not “slightly after for verification”). Kickoff / report / early YES do not reopen trading. Product §1.1 / §4.11 / §16. FR-TRD-01 / FR-UI-32.</p>
+<p><strong>v1.28:</strong> Highest risk payout during trading is the <strong>thickest overlap</strong> ${x:E(x)=L_{\max}}$ of bought intervals, labeled on $\Omega$ (Gaussian print plateau, not ticket-volume rank). Live tape on <code>/</code> and <code>/ops</code>. FR-UI-46. Product §4.5.</p>
+<p><strong>v1.29:</strong> Gaussian / lognormal $n=256$ is the create default. Grid larger than 10 240 bytes is created at the Solana cap then finished with <code>grow_grid</code> (NFR-06). Trading stays blocked until $P_0$ is written.</p>
+<p><strong>v1.30:</strong> <code>Grid::space</code> equals Anchor <code>try_serialize</code> length. <strong>Continue opening prediction market</strong> retries <code>grow_grid</code> against chain <code>Market.n</code> / <code>p0.len</code> (a create that landed with a failed grow is no longer left untradeable). Grow / create txs set <code>request_heap_frame(128KiB)</code>.</p>
+<p><strong>v1.31:</strong> Core settlement rule locked in Product §1.2.1: $\rho$ is written only in <code>begin_settle</code> after finalize — not at <code>submit_result</code>; surplus $S$ only if $\rho=1$, default $70/30$ when $C_R&gt;0$, else all $S$ to the platform. FR-SET-04 / §4.5.2.</p>
+<p><strong>v1.32:</strong> Default Gaussian $n=256$ is creatable on-chain. One ix cannot compute and write 256 $Q64$ $\exp$ masses under the 1.4M CU cap. <code>grow_grid</code> only resizes; <code>write_grid_mass</code> / <code>seal_grid</code> write the same <code>truncated_normal</code> prior (chunk size at that landing was 32; current <code>PRIOR_CHUNK=256</code>, v1.33). NFR-06.</p>
+<p><strong>v1.33:</strong> Prior kernel: range-reduced $e^x=2^{x/\ln 2}\cdot e^r$ and only $\sim 3\sigma$ nodes call <code>exp</code>. <code>write_grid_mass</code> chunk is <code>PRIOR_CHUNK=256</code>. LMSR fills remain on-chain (FR-MKT / quote already off-chain).</p>
+<p><strong>v1.34:</strong> NFR-06: empty-then-grow is not Gaussian / lognormal only. Dirichlet <strong>simplex</strong> with $k\le4$ MAY exceed 10 240 bytes (<code>write_grid_mass</code> streams <code>simplex_chunk_raw</code>, chunk 256). Dirichlet atoms over the cap still reject. Changelog chunk 32 in v1.32 is historical.</p>
+<p><strong>v1.35:</strong> 1-D interval mapping is nearest-node, not $\int_a^b$. FR-TRD-12 / product §8.1.2.1: $i^*$ clamps outside $\Omega$; $S$ is the inclusive node range; no partial atom. Example $[5.5,7.8]$ on a $0.1$ grid from $6$ → ${6.0,\ldots,7.8}$.</p>
+<p><strong>v1.36:</strong> Product §1.2.2 / FR-TRD-13: selling interval probability $p_S$; $\partial C/\partial q$ is price; ordinary face is $1$ USDC; $1/p_S$ is cash multiple only, never share size or hit payout $q/p_S$.</p>
+<p><strong>v1.37:</strong> Product §1.2.3: claim amount is $q\times\mathrm{hit}\times\rho$, shown on the quote ticket / public result / portfolio. Product §5.1.1 / FR-MKT-15: Gaussian default $n=256$ is enough vs $\sigma$ on the CPI $\Omega$; $512$/$1024$ are finer options, $n=8$ is not a product default. FR-UI-33 copy forbids $p_S$ or $q/p_S$ as the claim number.</p>
+<p><strong>v1.38:</strong> Product §1.2.4 / FR-TRD-03 / FR-UI-47: later buys of a <strong>popular / overlapping</strong> $S$ cost more because LMSR raised $p_S$, not because the clock moved. Trade ticket SHALL say so. Cold / disjoint intervals MAY get cheaper; sells press $C_S$ down; $\hat\rho$ does not rewrite $C_S$.</p>
+<p><strong>v1.39:</strong> Product specification language is English. Locked core rules §1.2.1–1.2.4 and §5.1.1 are English (same math). <code>/review</code> copy matches the UI: Approve and open prediction market / Continue opening prediction market. Forbidden product nouns: “board”, “book”, “open the book”, “close the book”.</p>
+<p><strong>v1.40:</strong> Product §1.2.5 / FR-UI-48: canonical English listing identity; optional locale display; duplicate key ignores translations; Geo-IP is not language.</p>
+<p><strong>v1.41:</strong> Product sells closed (FR-TRD-14 / FR-UI-10): compose <code>403</code> on <code>sell_*</code>; ticket <strong>Sells closed</strong>; CLI bails. Inventory stays until settlement claim or VOID refund of <code>cost_paid</code>. Not an LMSR unwind.</p>
+<p><strong>v1.42:</strong> Market program rejects <code>sell_set</code> / <code>sell_skellam_set</code> / wide <code>is_buy=false</code> with <code>SellsClosed</code>. Not a UI-only lock.</p>
+<p><strong>v1.45:</strong> When $H=0$, $S_R$ is a ranked waterfall (not winner-take-all): cheapest unit premium first, pay each quote up to its premium until the pot is gone.</p>
+<p><strong>v1.46:</strong> Surplus $S_C=20\%S$ funds a protocol LP cover pool. Each LP vault tracks cumulative $\Pi$. <code>cover_lp_loss</code> pays $\min(-\Pi,\mathrm{pool})$. FR-SET-04 / FR-SET-12 / FR-UI-23. Product §1.2.1.</p>
+<p><strong>v1.47:</strong> <code>report_open_ts ≥ close_ts</code> is required at create. Report window default is 24h. Missed report does not auto-fail: the platform writes $x^*$ (slash committee bond) or VOIDs (no slash). Bernoulli early occurrence VOIDs. FR-RES-06 / FR-RES-07.</p>
+<p><strong>v1.48:</strong> Product §1.1 / §10.5 is the locked timeout table: no auto-extend, no auto-<code>RESOLUTION_FAILED</code> on a missed report; <code>admin_submit_result</code> slashes, <code>admin_void_resolution</code> does not. Vote fail remains FR-RES-03. Definitions, FR-MKT-01, FR-UI-08/13/24/26/38, R-PLAT desk.</p>
+<p><strong>v1.49:</strong> Product §1.2.6 is the settlement cash map: winner pot (T) / (C_R) / (C_P) vs LP cover (S_C) vs fees vs (S_P). Same SHALL as FR-SET-03–04 / FR-SET-07 / FR-SET-11–12; do not mix ledgers.</p>
+<p><strong>v1.50:</strong> Cover-pool outflows are epoch-gated. <code>cover_lp_loss</code> only in the last 7 days of each 30-day unix epoch; <code>pay_surplus_cover</code> is not gated. FR-SET-12 / FR-UI-23 / FR-UI-27. Product §1.2.1 / §1.2.6.</p>
+<p><strong>v1.51:</strong> Settlement $\rho$ recipe is product §1.2.1: $T$ is trading revenue (premium not deducted before $\rho$); $C_P^{\mathrm{alloc}}$ is the leftover-shortfall three-way min, default tap $0$, not a % of $L$. FR-SET-07 / §4.5.1.</p>
+<p><strong>v1.52:</strong> Product §1.2.7 locks $\phi$ vs $S_P$: fees always platform (<code>claim_fees</code>, including VOID); $S_P$ only after $\rho=1$ and $S&gt;0$, after the $20\%$ cover slice. FR-TRD-04 / FR-SET-04 / FR-UI-31.</p>
+<p><strong>v1.53:</strong> Highest-risk tape poll is $60\,\mathrm{s}$ on <code>/</code> and <code>/ops</code> (FR-UI-46). Desk PDF cadence unchanged (WS + $2\,\mathrm{s}$ fallback). Product §4.5.</p>
+<p><strong>v1.54:</strong> Desk PDF WS fallback poll is $30\,\mathrm{s}$ (FR-UI-39). Highest-risk tape stays $60\,\mathrm{s}$. Product §4.5 / §8.1.7.</p>
+<p><strong>v1.55:</strong> Desk PDF SHALL reconnect the WS after drop (backoff $1\,\mathrm{s}$ … $30\,\mathrm{s}$); $30\,\mathrm{s}$ <code>/info</code> poll is only while the socket is down. FR-UI-39.</p>
+<p><strong>v1.56:</strong> Cover outflows are not epoch-gated. <code>Market.platform</code> signs <code>cover_lp_loss</code>. Each LP vault books operating $\Pi$ (<code>risk_pnl</code>) and <code>cover_paid</code> separately. FR-SET-12 / FR-UI-23 / FR-UI-27. Product §1.2.1 / §1.2.6.</p>
+<p><strong>v1.57:</strong> <code>pay_surplus_platform</code> is a permissionless credit into the platform UserVault; <code>withdraw</code> remains owner-only. <code>claim_fees</code> still requires <code>Market.platform</code>. FR-SET-04 / FR-UI-31. Product §1.2.7.</p>
+<p><strong>v1.58:</strong> Compose <code>claim_fees</code> / <code>cover_lp_loss</code> / <code>pay_surplus_platform</code> SHALL <code>503</code> until the market is in the indexed store (retry after indexer upsert). FR-UI-31.</p>
+<p><strong>v1.59:</strong> Localnet indexer GPA poll is $1\,\mathrm{s}$ (floor $400\,\mathrm{ms}$, <code>INDEXER_POLL_MS</code>). Desk PDF WS cadence unchanged. FR-UI-39 / IR-08 / NFR-04. Product §8.1.7.</p>
+<p><strong>v1.60:</strong> Localnet indexer GPA poll is $60\,\mathrm{s}$ (floor $400\,\mathrm{ms}$, <code>INDEXER_POLL_MS</code>). Highest-risk-payout list stays $60\,\mathrm{s}$. Desk PDF WS cadence unchanged. FR-UI-39 / IR-08 / NFR-04. Product §4.5 / §8.1.7.</p>
+<p><strong>v1.61:</strong> <code>/lp</code> cover and <code>/resolve</code> admin buttons compare the connected wallet to indexed <code>Market.platform</code> (<code>/info</code>, <code>/risk</code>), not <code>PLATFORM_PUBKEY</code> / <code>GET /v1/ops/status</code>. <code>ops/status</code> reports <code>create_platform</code> as the create default only. FR-UI-23 / FR-UI-26. Product §1.1.</p>
+<p><strong>v1.62:</strong> Official <code>Protocol</code> PDA: <code>create_*</code> copies <code>platform</code> / fee / report window / challenge / committee bond / $\alpha_R$ from that account into <code>Market</code> (instruction args for those fields are ignored). Compose still stamps the same numbers. <code>set_tap</code> is platform-only and capped. Lobby hides other <code>platform</code> keys. <code>GET /v1/protocol</code>. Product §1.1.</p>
+<p><strong>v1.63:</strong> Inbox (<code>GET /v1/notify</code>), <code>/committee</code>, and <code>/resolve/[id]</code> resolution HTTP poll are $60\,\mathrm{s}$. Desk PDF WS cadence and highest-risk list unchanged. FR-UI-13 / FR-UI-21.</p>
+          </div>
+        </article>
+      </div>
+    </div>
+  </body>
+</html>

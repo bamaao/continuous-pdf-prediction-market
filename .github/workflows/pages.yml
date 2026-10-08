@@ -1,0 +1,58 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "website/**"
+      - "docs/**"
+      - "README.md"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stage docs into website/content
+        run: |
+          mkdir -p website/content
+          cp README.md website/content/README.md
+          cp docs/product-specification.md website/content/
+          cp docs/software-requirements-specification.md website/content/
+          cp docs/risk-capital-guide.md website/content/
+          cp docs/system-architecture.md website/content/
+          cp docs/technical-architecture.md website/content/
+          cp docs/system-arch.png docs/tech-arch.png docs/business-flow.png website/content/
+
+      - name: Render docs to static HTML
+        run: |
+          python -m pip install --quiet "markdown>=3.4"
+          python website/build-docs.py
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

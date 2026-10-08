@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Risk capital guide — Continuous</title>
+    <meta name="theme-color" content="#0e0d0b" />
+    <link rel="icon" href="../assets/icon-192.png" type="image/png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../styles.css" />
+    <link rel="stylesheet" href="../docs.css" />
+  </head>
+  <body class="docs-body">
+    <div class="site docs-shell">
+      <header class="wrap nav">
+        <a class="brand" href="../index.html">
+          <img
+            class="brand-mark"
+            src="../assets/icon-192.png"
+            width="36"
+            height="36"
+            alt="Continuous"
+          />
+          <span class="brand-text">
+            Continuous
+            <small>docs</small>
+          </span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="../index.html#flow">Flow</a>
+          <a href="../index.html#rules">Rules</a>
+          <a href="../index.html">Landing</a>
+          <a href="https://github.com/bamaao/continuous-pdf-prediction-market">GitHub</a>
+        </nav>
+      </header>
+
+      <div class="docs-layout wrap">
+        <aside class="docs-side" aria-label="Document list">
+          <p class="kicker">Library</p>
+          <nav class="docs-nav">
+          <a href="./readme.html">README</a>
+          <a href="./product-specification.html">Product specification</a>
+          <a href="./software-requirements-specification.html">SRS</a>
+          <a href="./risk-capital-guide.html" class="is-active">Risk capital guide</a>
+          <a href="./system-architecture.html">System architecture</a>
+          <a href="./technical-architecture.html">Technical architecture</a>
+          </nav>
+        </aside>
+        <article class="docs-article">
+          <p class="docs-status">Risk capital guide</p>
+          <div class="markdown-body">
+<h1 id="risk-capital-handbook">Risk capital handbook</h1>
+<p><strong>Who this is for:</strong> wallets that lock USDC to underwrite a prediction market (Risk LPs).<br />
+<strong>What this is:</strong> the auction and payout rules in plain language.<br />
+<strong>What this is not:</strong> LMSR math, committee procedure, or engineer tickets. Those stay in the product specification.<br />
+<strong>If this file and the product specification disagree, the product specification wins</strong> (<code>docs/product-specification.md</code> §1.2.1, §1.2.6, §6, §8.6).</p>
+<p>Language of this handbook: English (same as the product specification). Chinese walkthrough: <code>docs/risk-capital-guide.zh.md</code>.</p>
+<hr />
+<h2 id="0-cash-map-do-not-mix-these">0. Cash map (do not mix these)</h2>
+<p>One vault USDC account. Five ledgers:</p>
+<table>
+<thead>
+<tr>
+<th>Ledger</th>
+<th>For</th>
+<th>Not for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Trading revenue (T)</td>
+<td>Winners first</td>
+<td>Fees</td>
+</tr>
+<tr>
+<td>Risk capital (C_R)</td>
+<td>Winners second (draw (H) if short)</td>
+<td>Cover-pool insurance</td>
+</tr>
+<tr>
+<td>Adjustment pool (C_P)</td>
+<td>Winners third, capped</td>
+<td>LP losses, fees</td>
+</tr>
+<tr>
+<td>LP cover pool (S_C)</td>
+<td>Lifetime (\Pi&lt;0) Risk LP wallets</td>
+<td>Winners</td>
+</tr>
+<tr>
+<td>Fees (\phi) / surplus (S_P)</td>
+<td>Platform (two claims: <code>claim_fees</code> vs <code>pay_surplus_platform</code>)</td>
+<td>(C_P) or cover</td>
+</tr>
+</tbody>
+</table>
+<p>Lock ρ once per prediction market, then Portfolio (winners) and <code>/lp</code> (quotes) claim <strong>per ticket</strong>. Formal map: product §1.2.6.</p>
+<hr />
+<h2 id="1-what-you-are-selling">1. What you are selling</h2>
+<p>You are <strong>not</strong> buying a ticket. You are posting <strong>coverage</strong>: “this prediction market may draw up to (D) USDC from me if winners need more cash than trading collected.”</p>
+<table>
+<thead>
+<tr>
+<th>You lock</th>
+<th>Worst case</th>
+<th>Best case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Collateral (\ge D) in your UserVault (reserved, not sent out)</td>
+<td>Settlement draws up to your filled (D) (you lose that (H))</td>
+<td>No draw: unused (D) unlocks; you may collect premium / surplus in rank order</td>
+</tr>
+</tbody>
+</table>
+<p>Traders can still buy when coverage is thin. The auction <strong>does not</strong> gate trading. Thin coverage only warns them that expiry might pay at a haircut (\rho&lt;1).</p>
+<p>One lock <strong>underwrites one prediction market only</strong>. You may quote several markets with <strong>separate</strong> collateral.</p>
+<hr />
+<h2 id="2-words-you-will-see">2. Words you will see</h2>
+<table>
+<thead>
+<tr>
+<th>Word</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>(D) (capacity)</td>
+<td>Max this quote can be drawn</td>
+</tr>
+<tr>
+<td>Premium</td>
+<td>What you ask to be paid if there is leftover cash and you rank high enough</td>
+</tr>
+<tr>
+<td>Unit premium</td>
+<td>(\mathrm{premium}/D). <strong>Lower is cheaper</strong> and ranks first</td>
+</tr>
+<tr>
+<td>Profit share</td>
+<td>Extra field on the quote. <strong>No-draw surplus</strong> is paid by <strong>rank and premium cap</strong>, not by this field. If a draw happened, this market has (S=0), so there is no surplus share to weight</td>
+</tr>
+<tr>
+<td>(T)</td>
+<td>Trading revenue (what buyers paid into this market, not fees)</td>
+</tr>
+<tr>
+<td>(L)</td>
+<td>Face stacked on the <strong>realized</strong> outcome only — not the worst cell during trading</td>
+</tr>
+<tr>
+<td>(C_R)</td>
+<td>Sum of filled, locked (D)</td>
+</tr>
+<tr>
+<td>(H)</td>
+<td>Draw from risk capital: leftover shortfall ((L-T)^+), each quote at most its filled (D)</td>
+</tr>
+<tr>
+<td>(\rho)</td>
+<td>One recovery rate for <strong>all</strong> winning tickets. (1) = paid in full</td>
+</tr>
+<tr>
+<td>(S)</td>
+<td>Surplus, only if (\rho=1): (S=\max(T-L,0))</td>
+</tr>
+<tr>
+<td>(\Pi)</td>
+<td>Your <strong>lifetime</strong> risk P&amp;L on this wallet (all markets)</td>
+</tr>
+</tbody>
+</table>
+<p>Fees never enter (T), (S), or the cover pool.</p>
+<hr />
+<h2 id="3-clock">3. Clock</h2>
+<pre><code class="language-text">Reviewer opens the prediction market
+        │  auction is already open (even with zero trades)
+        ▼
+Trading + quoting in parallel
+        │  you post D / premium / profit share and lock collateral
+        ▼
+risk_lock_ts  (≤ close_ts; often equal)
+        │  no new quotes
+        ▼
+close_ts
+        │  no new trades, no new quotes; locked C_R stays
+        ▼
+report_open_ts  (≥ close_ts; required; often equal)
+        │  committee MAY submit_result for report_window_secs (default 24h)
+        │  missed report: wait for Market.platform
+        │    admin_submit_result → slash committee_bond, then settle
+        │    admin_void_resolution → VOID, return bond, no slash
+        ▼
+Committee (or platform) writes the result → finalize
+        ▼
+begin_settle locks L, T, C_R, ρ, S
+        ▼
+You claim on /lp: draw H (if any) → premium → surplus → unlock unused D
+        │  surplus markets also Fund cover (20% of S)
+        ▼
+If your lifetime Π &lt; 0, Claim cover from the protocol pool
+</code></pre>
+<p>There is <strong>no</strong> extra window after <code>close_ts</code> to top up coverage.</p>
+<p>Screens: browse <code>/auctions</code>, quote <code>/auction/[id]</code>, claim <code>/lp</code>. Use the <strong>main wallet</strong>. Session keys cannot bid or claim.</p>
+<hr />
+<h2 id="4-how-you-quote">4. How you quote</h2>
+<p>On <code>/auction/[id]</code> you post:</p>
+<ol>
+<li><strong>Capacity (D)</strong> — at least this listing’s min size (<code>d_unit</code>, default 10 USDC). Dust is rejected.</li>
+<li><strong>Premium</strong> — absolute USDC, not a percent. Rank uses (\mathrm{premium}/D).</li>
+<li><strong>Profit share</strong> — stored on the quote. No-draw leftover uses rank + premium cap instead. After a draw, (S=0), so this field does not pay you.</li>
+<li><strong>Lock</strong> — UserVault must already hold enough <strong>free</strong> USDC; the quote <strong>reserves</strong> (D), it does not withdraw to a third party.</li>
+</ol>
+<p>Standing book: <strong>at most 64 quotes</strong> per prediction market. Every valid quote that fits <strong>joins the pool in full</strong>. There is:</p>
+<ul>
+<li><strong>no</strong> layer tower ([A, A+D])</li>
+<li><strong>no</strong> 10% concentration cap</li>
+<li><strong>no</strong> “only the first quote counts”</li>
+</ul>
+<p>More locked (D) is better for winners. Rank does <strong>not</strong> stop a later quote from locking.</p>
+<hr />
+<h2 id="5-who-ranks-first">5. Who ranks first</h2>
+<p>Rank is <strong>only</strong> for <strong>who gets paid surplus / premium when nobody is drawn</strong>. It does <strong>not</strong> decide who is drawn first when cash is short (the shortfall takes from filled quotes until the gap is closed, each capped at filled (D)).</p>
+<ol>
+<li>Lowest unit premium (\mathrm{premium}/D)</li>
+<li>If tied, <strong>earlier</strong> timestamp</li>
+</ol>
+<p>Cheaper cover ranks ahead of expensive cover. Tiny (D) that fails min size never enters the book.</p>
+<hr />
+<h2 id="6-three-settlement-stories">6. Three settlement stories</h2>
+<p>Settlement <strong>first</strong> pays winning traders at one (\rho). Risk capital is a <strong>backstop</strong>, then a <strong>residual claim</strong>.</p>
+<h3 id="story-a-trading-already-covers-winners-l-le-t">Story A — Trading already covers winners ((L \le T))</h3>
+<ul>
+<li>Nobody is drawn. (H=0). Your (D) unlocks after you claim.</li>
+<li>(\rho=1). Surplus (S=T-L) exists.</li>
+<li>Split (S) as in §7. The slice for this market’s quotes ((S_R)) is paid <strong>down the rank until it is gone</strong>:</li>
+<li>next quote receives up to <strong>its own premium</strong></li>
+<li>then the next rank</li>
+<li>a quote below the leftover receives <strong>0</strong></li>
+<li>if all premiums are paid and (S_R) is still left, that leftover stays on this market’s surplus ledger (it is <strong>not</strong> extra bonus beyond premium)</li>
+</ul>
+<p>This is <strong>not</strong> winner-take-all. Rank 1 does not scoop the whole (S_R).</p>
+<p>Fees (\phi) are <strong>always</strong> the protocol platform (<code>claim_fees</code>), including haircut and VOID. (S_P) is <strong>this market’s leftover</strong> after winners are whole and after the 20% cover slice — not (\phi). Haircut / draw / VOID (\Rightarrow S_P=0).</p>
+<h3 id="story-b-trading-is-short-locked-d-and-maybe-c_p-still-make-winners-whole-t-l-le-c_max">Story B — Trading is short, locked (D) (and maybe (C_P)) still make winners whole ((T &lt; L \le C_{\max}))</h3>
+<ul>
+<li>Shortfall (H_{\mathrm{need}}=(L-T)^+).</li>
+<li>Filled quotes are drawn, each at most filled (D), until the gap is closed. <strong>More (C_R) is better.</strong></li>
+<li>(\rho=1). Surplus (S=0) (there is no leftover of (T-L)).</li>
+<li>After users are whole you may still claim <strong>premium</strong> for the filled quote.</li>
+<li>Unused (D) (if the gap did not need all of it) unlocks.</li>
+</ul>
+<h3 id="story-c-even-c_r-and-c_p-are-not-enough-l-c_max">Story C — Even (C_R) (and (C_P)) are not enough ((L &gt; C_{\max}))</h3>
+<ul>
+<li>Winners are paid at the same (\rho=C_{\max}/L&lt;1).</li>
+<li>Risk capital is still drawn up to locked (D) to raise (\rho).</li>
+<li><strong>No surplus</strong> ((S=0)). No surplus share, no 20% cover slice from <strong>this</strong> market.</li>
+</ul>
+<h3 id="void-failed-result">VOID / failed result</h3>
+<p>Collateral unlocks. No (H). No surplus. Traders get <code>cost_paid</code> back, not a (\rho) payout.</p>
+<h3 id="how-rho-is-a-number-includes-c_p">How (\rho) is a number (includes (C_P))</h3>
+<p>(C_P) does <strong>not</strong> have a separate “how much % of this market” rule. It only feeds (C_{\max}):</p>
+<ol>
+<li>(T) = this market’s trading revenue (fees never in it; premium is <strong>not</strong> taken out first)</li>
+<li>If (L\le T): (\rho=1), (C_P) stays in the protocol pool</li>
+<li>If (L&gt;T): leftover after filled (D) is ((L-T-C_R)^+). This market may take<br />
+   (\min(\text{that leftover},\;\text{listing tap},\;\text{pool cash})). Create default tap is <strong>0</strong>. Pool cash is only what <code>fund_pool</code> already deposited.</li>
+<li>(C_{\max}=T+C_R+C_P^{\mathrm{alloc}}), then (\rho=\min(1,C_{\max}/L))</li>
+</ol>
+<p>Example: (T=600), (L=1000), (C_R=300), tap (200), pool (50) → (C_P=50), (C_{\max}=950), (\rho=0.95). Same numbers, tap (0) → (\rho=0.90).</p>
+<hr />
+<h2 id="7-how-surplus-is-split-only-story-a">7. How surplus is split (only Story A)</h2>
+<p>Only when (\rho=1) and (S&gt;0):</p>
+<pre><code class="language-text">S  (leftover of trading revenue after paying L)
+ ├─ 20%  →  protocol LP cover pool   (S_C)   ← not paid to this market’s rank
+ └─ 80%  →  remainder S̃
+      ├─ if this market has filled C_R:
+      │     70% of S̃ → this market’s quotes (S_R)   default α_R = 7000 bps
+      │     30% of S̃ → platform (S_P)
+      └─ if nobody locked C_R:
+            0 to quotes; all of S̃ to the platform
+</code></pre>
+<p>Worked default: (S=100) and (C_R&gt;0) → <strong>20 / 56 / 24</strong> (cover / this market’s quotes / platform).<br />
+Same (S), no (C_R) → <strong>20 / 0 / 80</strong>.</p>
+<p>(S_C) is <strong>one protocol account</strong> (<code>LossPool</code>), not split among this market’s quotes. It exists so <strong>losing</strong> risk wallets (see §8) can be topped up later, including from <strong>other</strong> prediction markets that finished with surplus.</p>
+<p>On <code>/lp</code>, after settlement: <strong>Fund cover</strong> moves this market’s (S_C) into that pool (any time). The vault shows lifetime (\Pi) and <strong>cover paid</strong>. <strong>Claim cover</strong> is signed by the protocol platform when it chooses to reimburse uncovered loss — there is no 7-day calendar window.</p>
+<hr />
+<h2 id="8-lifetime-pl-and-the-cover-pool">8. Lifetime P&amp;L and the cover pool</h2>
+<p>Your UserVault keeps (\Pi) (<code>risk_pnl</code>) <strong>across all prediction markets</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>(\Pi)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Draw (H)</td>
+<td>minus (H)</td>
+</tr>
+<tr>
+<td>Premium credited</td>
+<td>plus premium</td>
+</tr>
+<tr>
+<td>Surplus (S_R) credited</td>
+<td>plus that credit</td>
+</tr>
+<tr>
+<td>Cover paid to you</td>
+<td><code>cover_paid</code> increases; (\Pi) does <strong>not</strong> change</td>
+</tr>
+</tbody>
+</table>
+<p>Cover rule:</p>
+<ul>
+<li>Uncovered amount is ((-\Pi)^+ - \texttt{cover_paid})</li>
+<li>Credit (\min(\text{uncovered},\;\text{pool balance}))</li>
+<li>Rank on <strong>this</strong> market does <strong>not</strong> order cover claims</li>
+<li>A wallet with uncovered (=0) gets <strong>0</strong> from the pool</li>
+<li><strong>Only the platform signs</strong> <code>cover_lp_loss</code>. Timing is operational. Funding the pool from surplus is not gated.</li>
+</ul>
+<p>The chain’s job is to <strong>stat operating P&amp;L and cover paid strictly</strong>. Whether to reimburse this week is a platform choice — not a unix window.</p>
+<p>A market that <strong>drew</strong> (H) has (S=0), so it does <strong>not</strong> fund the pool. Losers are reimbursed (partially) from <strong>other</strong> markets’ 20% surplus slices.</p>
+<hr />
+<h2 id="9-caps-read-this-twice">9. Caps (read this twice)</h2>
+<ul>
+<li>You never lose more than <strong>this quote’s filled (D)</strong> on that market’s draw.</li>
+<li>Later traders raising live (L_{\max}) <strong>do not</strong> rewrite your locked (D).</li>
+<li>Premium is a <strong>reward after users are whole</strong>, not a haircut of winners.</li>
+<li>You cannot unwind a quote at the live LMSR price. Unused (D) unlocks at settlement or VOID.</li>
+<li>You cannot bid or claim with a Session key.</li>
+<li>USDC only (Circle SPL). SOL only pays network fees.</li>
+</ul>
+<hr />
+<h2 id="10-numeric-pictures">10. Numeric pictures</h2>
+<p><strong>No draw, ranked surplus.</strong> (T=1\,000), (L=800) → (S=200).<br />
+(S_C=40), remainder (160), (S_R=112), (S_P=48).</p>
+<table>
+<thead>
+<tr>
+<th>Rank</th>
+<th>(D)</th>
+<th>Premium</th>
+<th>Unit</th>
+<th>Paid from (S_R)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>100</td>
+<td>5</td>
+<td>0.05</td>
+<td>5</td>
+</tr>
+<tr>
+<td>2</td>
+<td>100</td>
+<td>8</td>
+<td>0.08</td>
+<td>8</td>
+</tr>
+<tr>
+<td>3</td>
+<td>200</td>
+<td>20</td>
+<td>0.10</td>
+<td>20</td>
+</tr>
+</tbody>
+</table>
+<p>Paid (33). Rank did not take (112) in one cheque. Each line stopped at its premium. Unlock all (D). (\Pi) on each wallet rises by that premium (and they were not drawn).</p>
+<p><strong>Draw.</strong> (T=600), (L=1\,000) → need (400). Three filled quotes (D=100+100+200). Each can be drawn up to (D); together they cover the (400). (S=0). After users are paid, claim premium; (\Pi) falls by (H) then rises by premium.</p>
+<p><strong>Cover across markets.</strong> Last month (\Pi=-50). This month a <strong>different</strong> market has (S=100) → (20) into the pool. When the platform signs <strong>Claim cover</strong>, it pays (20); (\Pi) stays (-50), <code>cover_paid</code> (=20), uncovered (=30). Next surplus can pay more until uncovered reaches (0).</p>
+<hr />
+<h2 id="11-claim-order-on-lp">11. Claim order on <code>/lp</code></h2>
+<p>After <code>begin_settle</code>:</p>
+<ol>
+<li><strong>Draw H</strong> if Story B / C (this is the loss)</li>
+<li><strong>Premium</strong></li>
+<li><strong>Surplus</strong> (Story A; ranked waterfall)</li>
+<li><strong>Fund cover</strong> (moves (S_C) into the protocol pool; any wallet may do this, any time)</li>
+<li><strong>Unlock</strong> unused (D) (or the VOID path)</li>
+<li><strong>Claim cover</strong> is platform-signed, if uncovered ((-\Pi)^+-\texttt{cover_paid}&gt;0)</li>
+</ol>
+<p>Do not skip draw when (H) is owed: that is how (\Pi) records the loss.</p>
+<hr />
+<h2 id="12-formal-pointers">12. Formal pointers</h2>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Spec</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>(\rho), surplus, (S_C), (\Pi)</td>
+<td>Product §1.2.1</td>
+</tr>
+<tr>
+<td>Ledgers / who claims</td>
+<td>Product §1.2.6</td>
+</tr>
+<tr>
+<td>Auction, one pool, rank</td>
+<td>Product §6 / §6.6</td>
+</tr>
+<tr>
+<td>Settlement stack</td>
+<td>Product §8.6</td>
+</tr>
+<tr>
+<td>SHALL text</td>
+<td>SRS FR-RSK-01–08, FR-SET-04, FR-SET-12, FR-UI-23, FR-UI-37</td>
+</tr>
+<tr>
+<td>Chain</td>
+<td><code>programs/risk</code> matching; <code>programs/vault</code> settle; <code>crates/math</code> <code>surplus_split</code>, <code>waterfall_pay</code></td>
+</tr>
+</tbody>
+</table>
+          </div>
+        </article>
+      </div>
+    </div>
+  </body>
+</html>

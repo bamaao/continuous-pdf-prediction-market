@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Continuous — PDF Prediction Markets</title>
+    <meta
+      name="description"
+      content="Prediction markets over continuous PDFs. Discover probabilities and risk capital, settle USDC on Solana with soft solvency ρ."
+    />
+    <meta name="theme-color" content="#0e0d0b" />
+    <link rel="icon" href="./assets/icon-192.png" type="image/png" />
+    <link rel="apple-touch-icon" href="./assets/icon-192.png" />
+    <meta property="og:title" content="Continuous — PDF Prediction Markets" />
+    <meta
+      property="og:description"
+      content="Continuous PDF prediction markets with a risk-capital auction and soft solvency on Solana."
+    />
+    <meta property="og:image" content="./assets/icon-512.png" />
+    <meta property="og:type" content="website" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="site">
+      <header class="wrap nav">
+        <a class="brand" href="#top">
+          <img
+            class="brand-mark"
+            src="./assets/icon-192.png"
+            width="36"
+            height="36"
+            alt="Continuous"
+          />
+          <span class="brand-text">
+            Continuous
+            <small>PDF markets</small>
+          </span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="#markets">Markets</a>
+          <a href="#flow">Flow</a>
+          <a href="#rules">Rules</a>
+          <a href="#docs">Docs</a>
+          <a href="./docs/readme.html">Read docs</a>
+          <a href="https://github.com/bamaao/continuous-pdf-prediction-market">GitHub</a>
+        </nav>
+      </header>
+
+      <main id="top">
+        <section class="hero wrap" aria-label="Hero">
+          <div class="hero-copy">
+            <div class="hero-copy-text">
+              <div class="hero-title-row">
+                <img
+                  class="hero-mark"
+                  src="./assets/icon-192.png"
+                  width="48"
+                  height="48"
+                  alt="Continuous"
+                />
+                <h1>Continuous</h1>
+              </div>
+              <p class="hero-lead">
+                Prediction markets over a live density — buy probability mass on a
+                set, underwrite risk with LPs, settle Circle USDC on Solana.
+              </p>
+            </div>
+            <div class="cta-row">
+              <a class="btn btn-primary" href="#flow">See flow &amp; demos</a>
+              <a class="btn btn-ghost" href="./docs/readme.html">Read README</a>
+            </div>
+          </div>
+          <figure class="hero-stage" aria-label="Complete business flow">
+            <svg
+              class="hero-flow"
+              viewBox="0 0 1100 420"
+              role="img"
+              aria-labelledby="hero-flow-title"
+            >
+              <title id="hero-flow-title">
+                Continuous market lifecycle: create, dual live markets, freeze, resolve, settle
+              </title>
+              <defs>
+                <marker id="heroArr" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+                  <path d="M0,0 L7,3.5 L0,7" fill="none" stroke="#f0c36a" stroke-width="1.2" />
+                </marker>
+                <linearGradient id="heroLive" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0%" stop-color="#d4a24a" stop-opacity="0.16" />
+                  <stop offset="100%" stop-color="#b85c38" stop-opacity="0.16" />
+                </linearGradient>
+              </defs>
+
+              <!-- phase bands -->
+              <rect x="16" y="48" width="168" height="300" rx="2" fill="rgba(212,162,74,0.08)" stroke="rgba(212,162,74,0.35)" />
+              <rect x="196" y="48" width="300" height="300" rx="2" fill="url(#heroLive)" stroke="rgba(212,162,74,0.4)" />
+              <rect x="508" y="48" width="140" height="300" rx="2" fill="rgba(239,230,212,0.05)" stroke="rgba(239,230,212,0.28)" />
+              <rect x="660" y="48" width="180" height="300" rx="2" fill="rgba(212,162,74,0.08)" stroke="rgba(212,162,74,0.35)" />
+              <rect x="852" y="48" width="232" height="300" rx="2" fill="rgba(240,195,106,0.1)" stroke="rgba(240,195,106,0.45)" />
+
+              <text x="100" y="72" text-anchor="middle" class="hf-phase">① CREATE</text>
+              <text x="346" y="72" text-anchor="middle" class="hf-phase">② LIVE · DUAL MARKET</text>
+              <text x="578" y="72" text-anchor="middle" class="hf-phase">③ FREEZE</text>
+              <text x="750" y="72" text-anchor="middle" class="hf-phase">④ RESOLVE</text>
+              <text x="968" y="72" text-anchor="middle" class="hf-phase">⑤ SETTLE</text>
+
+              <!-- create -->
+              <rect x="36" y="100" width="128" height="56" fill="#14120e" stroke="#d4a24a" stroke-width="1.5" />
+              <text x="100" y="122" text-anchor="middle" class="hf-title">Choose family</text>
+              <text x="100" y="142" text-anchor="middle" class="hf-sub">Skellam · Gauss · …</text>
+
+              <rect x="36" y="176" width="128" height="56" fill="#14120e" stroke="#d4a24a" stroke-width="1.5" />
+              <text x="100" y="198" text-anchor="middle" class="hf-title">SIWS apply</text>
+              <text x="100" y="218" text-anchor="middle" class="hf-sub">reviewer approve</text>
+
+              <rect x="36" y="252" width="128" height="56" fill="#14120e" stroke="rgba(239,230,212,0.4)" stroke-width="1.5" />
+              <text x="100" y="274" text-anchor="middle" class="hf-title">create_*</text>
+              <text x="100" y="294" text-anchor="middle" class="hf-sub">market opens</text>
+
+              <path d="M164 204 H196" stroke="#f0c36a" stroke-width="1.4" marker-end="url(#heroArr)" />
+
+              <!-- live dual rails -->
+              <rect x="216" y="100" width="260" height="72" fill="#14120e" stroke="#d4a24a" stroke-width="1.8" />
+              <text x="346" y="126" text-anchor="middle" class="hf-title">Prediction · LMSR</text>
+              <text x="346" y="148" text-anchor="middle" class="hf-sub">Buy mass on set S · update f(x)</text>
+              <text x="346" y="164" text-anchor="middle" class="hf-eq">P(X ∈ S)</text>
+
+              <rect x="216" y="196" width="260" height="72" fill="#14120e" stroke="#c97a5a" stroke-width="1.8" />
+              <text x="346" y="222" text-anchor="middle" class="hf-title">Risk capital auction</text>
+              <text x="346" y="244" text-anchor="middle" class="hf-sub">LPs quote / lock C_R</text>
+              <text x="346" y="260" text-anchor="middle" class="hf-eq">cover when T &lt; L</text>
+
+              <text x="346" y="300" text-anchor="middle" class="hf-warn">‖ parallel until close_ts</text>
+              <text x="346" y="322" text-anchor="middle" class="hf-sub">same clock · both discoveries</text>
+
+              <!-- freeze -->
+              <path d="M476 136 H508" stroke="#f0c36a" stroke-width="1.4" marker-end="url(#heroArr)" />
+              <path d="M476 232 H508" stroke="#f0c36a" stroke-width="1.4" marker-end="url(#heroArr)" />
+              <line x1="578" y1="88" x2="578" y2="330" stroke="#f0c36a" stroke-width="1.6" stroke-dasharray="5 4" />
+              <text x="578" y="130" text-anchor="middle" class="hf-title">close_ts</text>
+              <text x="578" y="154" text-anchor="middle" class="hf-sub">fills stop</text>
+              <text x="578" y="174" text-anchor="middle" class="hf-sub">auction stops</text>
+              <text x="578" y="194" text-anchor="middle" class="hf-sub">f frozen</text>
+              <text x="578" y="230" text-anchor="middle" class="hf-title">wait</text>
+              <text x="578" y="250" text-anchor="middle" class="hf-sub">for the event</text>
+              <text x="578" y="290" text-anchor="middle" class="hf-eq">risk_lock ≤ close</text>
+
+              <!-- resolve -->
+              <path d="M648 204 H660" stroke="#f0c36a" stroke-width="1.4" marker-end="url(#heroArr)" />
+              <rect x="680" y="100" width="140" height="56" fill="#14120e" stroke="#d4a24a" stroke-width="1.5" />
+              <text x="750" y="122" text-anchor="middle" class="hf-title">submit_result</text>
+              <text x="750" y="142" text-anchor="middle" class="hf-sub">committee → x*</text>
+
+              <rect x="680" y="176" width="140" height="56" fill="#14120e" stroke="rgba(239,230,212,0.4)" stroke-width="1.5" />
+              <text x="750" y="198" text-anchor="middle" class="hf-title">challenge</text>
+              <text x="750" y="218" text-anchor="middle" class="hf-sub">finalize x*</text>
+
+              <rect x="680" y="252" width="140" height="56" fill="#14120e" stroke="rgba(201,122,90,0.7)" stroke-width="1.5" />
+              <text x="750" y="274" text-anchor="middle" class="hf-warn">missed window</text>
+              <text x="750" y="294" text-anchor="middle" class="hf-sub">platform admin only</text>
+
+              <!-- settle -->
+              <path d="M820 204 H852" stroke="#f0c36a" stroke-width="1.4" marker-end="url(#heroArr)" />
+              <rect x="872" y="96" width="192" height="48" fill="#14120e" stroke="#f0c36a" stroke-width="1.6" />
+              <text x="968" y="126" text-anchor="middle" class="hf-title">begin_settle</text>
+
+              <rect x="872" y="160" width="192" height="56" fill="rgba(212,162,74,0.14)" stroke="#d4a24a" stroke-width="1.6" />
+              <text x="968" y="182" text-anchor="middle" class="hf-title">lock L · C_max · ρ</text>
+              <text x="968" y="202" text-anchor="middle" class="hf-eq">ρ = min(1, C_max / L)</text>
+
+              <rect x="872" y="236" width="90" height="48" fill="#14120e" stroke="#d4a24a" stroke-width="1.5" />
+              <text x="917" y="266" text-anchor="middle" class="hf-title">claim</text>
+
+              <rect x="974" y="236" width="90" height="48" fill="#14120e" stroke="#c97a5a" stroke-width="1.5" />
+              <text x="1019" y="266" text-anchor="middle" class="hf-title">surplus</text>
+
+              <text x="968" y="312" text-anchor="middle" class="hf-sub">ρ=1 → 20% S to LP cover</text>
+              <text x="968" y="330" text-anchor="middle" class="hf-sub">rest α_R / α_P · no FIFO</text>
+
+              <text x="550" y="390" text-anchor="middle" class="hf-foot">
+                Probability discovery + risk-capital discovery → one report x* → one recovery rate ρ
+              </text>
+            </svg>
+            <figcaption class="hero-stage-cap">
+              Complete business flow — from family choice through dual markets to soft-solvency settlement
+            </figcaption>
+          </figure>
+        </section>
+
+        <section id="markets">
+          <div class="wrap reveal">
+            <p class="kicker">Two prices at once</p>
+            <h2 class="section-title">Probability and risk capital</h2>
+            <p class="section-copy">
+              Unlike YES/NO markets, each listing keeps a density
+              <em>f(x)</em> with ∫f&nbsp;=&nbsp;1. Traders buy a set
+              <em>S</em>; risk LPs underwrite the gap when payouts exceed trading
+              revenue.
+            </p>
+            <div class="dual">
+              <article>
+                <h3>Prediction</h3>
+                <p>
+                  Discover <em>P(X∈S)</em> — the probability mass on an
+                  interval, score cell, election atom, or YES. Hit pays 1 USDC
+                  per share (then × market-wide ρ); miss pays 0.
+                </p>
+                <p class="eq">Price = current mass on S · LMSR</p>
+              </article>
+              <article>
+                <h3>Risk capital</h3>
+                <p>
+                  Auction discovers the cost of underwriting shortfalls when
+                  final liability exceeds trading revenue. LPs lock capital,
+                  may be drawn, and share surplus when ρ&nbsp;=&nbsp;1.
+                </p>
+                <p class="eq">Coverage for L when T &lt; L</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="flow">
+          <div class="wrap reveal">
+            <p class="kicker">Core business flow</p>
+            <h2 class="section-title">From family choice to surplus split</h2>
+            <p class="section-copy">
+              One locked lifecycle for every listing. Prediction trading and the
+              risk auction open together, freeze together at <em>close_ts</em>,
+              then resolve through committee report and a single ρ.
+            </p>
+
+            <figure class="flow-video">
+              <div class="video-tabs" role="tablist" aria-label="Lifecycle demo by family">
+                <button type="button" class="video-tab is-active" role="tab" aria-selected="true" data-family="skellam" data-src="./assets/video/skellam.mp4" data-poster="./assets/posters/skellam.jpg">Skellam</button>
+                <button type="button" class="video-tab" role="tab" aria-selected="false" data-family="gaussian" data-src="./assets/video/gaussian.mp4" data-poster="./assets/posters/gaussian.jpg">Gaussian</button>
+                <button type="button" class="video-tab" role="tab" aria-selected="false" data-family="lognormal" data-src="./assets/video/lognormal.mp4" data-poster="./assets/posters/lognormal.jpg">Lognormal</button>
+                <button type="button" class="video-tab" role="tab" aria-selected="false" data-family="dirichlet" data-src="./assets/video/dirichlet.mp4" data-poster="./assets/posters/dirichlet.jpg">Dirichlet</button>
+                <button type="button" class="video-tab" role="tab" aria-selected="false" data-family="bernoulli" data-src="./assets/video/bernoulli.mp4" data-poster="./assets/posters/bernoulli.jpg">Bernoulli</button>
+              </div>
+              <div class="video-frame">
+                <video
+                  id="lifecycle-video"
+                  controls
+                  playsinline
+                  preload="metadata"
+                  poster="./assets/posters/skellam.jpg"
+                >
+                  <source src="./assets/video/skellam.mp4" type="video/mp4" />
+                  Your browser does not support the video tag.
+                </video>
+              </div>
+              <div class="video-biz" id="video-biz" data-active="skellam">
+                <article class="video-biz-panel is-active" data-family="skellam">
+                  <p class="kicker">Sports · Skellam</p>
+                  <h3>EPL Matchday — Arsenal vs Chelsea</h3>
+                  <p class="video-biz-event">
+                    Full-time score difference (home − away) as a Skellam outcome.
+                    Trading closes at kickoff; committee reports the official FT scoreline.
+                  </p>
+                  <dl class="video-biz-meta">
+                    <div><dt>Trades</dt><dd>Buy mass on score cells / 1X2-style sets via LMSR</dd></div>
+                    <div><dt>Demo ticket</dt><dd>1X2 Home · 3 shares</dd></div>
+                    <div><dt>Reported x*</dt><dd>Arsenal 2–1 Chelsea (diff = +1)</dd></div>
+                    <div><dt>Video shows</dt><dd>Create → risk auction → trade → report → lock ρ → settle → claim</dd></div>
+                  </dl>
+                  <p class="video-biz-tags">football · epl · arsenal · chelsea · skellam</p>
+                </article>
+                <article class="video-biz-panel" data-family="gaussian" hidden>
+                  <p class="kicker">Macro · Gaussian</p>
+                  <h3>US CPI — 2026 Q3 YoY %</h3>
+                  <p class="video-biz-event">
+                    Continuous scalar on the BLS headline CPI YoY print. Grid cells price
+                    probability mass; settlement uses the reported scalar x*.
+                  </p>
+                  <dl class="video-biz-meta">
+                    <div><dt>Trades</dt><dd>Buy density bands on the CPI print grid</dd></div>
+                    <div><dt>Demo ticket</dt><dd>2 shares on a print band</dd></div>
+                    <div><dt>Reported x*</dt><dd>3.2% YoY (BLS release)</dd></div>
+                    <div><dt>Video shows</dt><dd>Create → risk auction → trade → report → lock ρ → settle → claim</dd></div>
+                  </dl>
+                  <p class="video-biz-tags">macro · cpi · inflation · us · gaussian</p>
+                </article>
+                <article class="video-biz-panel" data-family="lognormal" hidden>
+                  <p class="kicker">Crypto · Lognormal</p>
+                  <h3>SOL/USD — 7-day close spot</h3>
+                  <p class="video-biz-event">
+                    Lognormal market on Solana spot at the scheduled close. Committee
+                    reports the reference index mid agreed in the listing.
+                  </p>
+                  <dl class="video-biz-meta">
+                    <div><dt>Trades</dt><dd>Buy density on positive-skew price cells</dd></div>
+                    <div><dt>Demo ticket</dt><dd>1 share on a spot cell</dd></div>
+                    <div><dt>Reported x*</dt><dd>148.50 USD (demo units 148500)</dd></div>
+                    <div><dt>Video shows</dt><dd>Create → risk auction → trade → report → lock ρ → settle → claim</dd></div>
+                  </dl>
+                  <p class="video-biz-tags">crypto · solana · sol · spot · lognormal</p>
+                </article>
+                <article class="video-biz-panel" data-family="dirichlet" hidden>
+                  <p class="kicker">Politics · Dirichlet</p>
+                  <h3>City mayoral primary — vote share atoms</h3>
+                  <p class="video-biz-event">
+                    Categorical / Dirichlet demo: each atom is a candidate. Traders take
+                    sets over atoms; committee reports the certified plurality atom.
+                  </p>
+                  <dl class="video-biz-meta">
+                    <div><dt>Trades</dt><dd>Buy sets over candidate atoms</dd></div>
+                    <div><dt>Demo ticket</dt><dd>2 shares on atom set</dd></div>
+                    <div><dt>Reported x*</dt><dd>Atom 0 (Candidate A) plurality</dd></div>
+                    <div><dt>Video shows</dt><dd>Create → risk auction → trade → report → lock ρ → settle → claim</dd></div>
+                  </dl>
+                  <p class="video-biz-tags">politics · election · mayoral · primary · dirichlet</p>
+                </article>
+                <article class="video-biz-panel" data-family="bernoulli" hidden>
+                  <p class="kicker">Macro · Bernoulli</p>
+                  <h3>Fed cuts rates at the next FOMC?</h3>
+                  <p class="video-biz-event">
+                    YES if the FOMC lowers the funds target range vs the prior meeting;
+                    NO on hold or hike. Continuous PDF pricing on a binary support.
+                  </p>
+                  <dl class="video-biz-meta">
+                    <div><dt>Trades</dt><dd>Buy YES / NO probability mass</dd></div>
+                    <div><dt>Demo ticket</dt><dd>5 shares YES</dd></div>
+                    <div><dt>Reported x*</dt><dd>YES — 25 bp cut vs prior meeting</dd></div>
+                    <div><dt>Video shows</dt><dd>Create → risk auction → trade → report → lock ρ → settle → claim</dd></div>
+                  </dl>
+                  <p class="video-biz-tags">macro · fed · fomc · rates · bernoulli</p>
+                </article>
+              </div>
+            </figure>
+
+            <div class="flow-viz">
+              <figure class="flow-step">
+                <svg viewBox="0 0 220 100" aria-hidden="true">
+                  <text x="12" y="20" class="svg-label">01</text>
+                  <circle cx="50" cy="58" r="18" fill="none" stroke="#d4a24a" />
+                  <circle cx="95" cy="58" r="18" fill="none" stroke="rgba(239,230,212,0.35)" />
+                  <circle cx="140" cy="58" r="18" fill="none" stroke="rgba(239,230,212,0.35)" />
+                  <circle cx="185" cy="58" r="18" fill="rgba(212,162,74,0.15)" stroke="#f0c36a" />
+                  <text x="50" y="62" text-anchor="middle" class="svg-muted">Sk</text>
+                  <text x="95" y="62" text-anchor="middle" class="svg-muted">G</text>
+                  <text x="140" y="62" text-anchor="middle" class="svg-muted">Ln</text>
+                  <text x="185" y="62" text-anchor="middle" class="svg-muted">…</text>
+                </svg>
+                <figcaption>
+                  <strong>Choose family</strong>
+                  <span>Skellam / Gaussian / Lognormal / Dirichlet / Bernoulli — locked at create.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="flow-step">
+                <svg viewBox="0 0 220 100" aria-hidden="true">
+                  <text x="12" y="20" class="svg-label">02</text>
+                  <rect x="24" y="40" width="70" height="36" fill="none" stroke="#d4a24a" />
+                  <text x="59" y="62" text-anchor="middle" class="svg-eq" style="font-size:13px">apply</text>
+                  <path d="M102 58 H118" stroke="#efe6d4" stroke-width="1.2" />
+                  <path d="M114 52 L122 58 L114 64" fill="none" stroke="#efe6d4" />
+                  <rect x="128" y="40" width="70" height="36" fill="rgba(212,162,74,0.15)" stroke="#f0c36a" />
+                  <text x="163" y="62" text-anchor="middle" class="svg-eq" style="font-size:13px">OPEN</text>
+                </svg>
+                <figcaption>
+                  <strong>Apply → approve</strong>
+                  <span>SIWS apply; reviewer approve / create_* opens trading and the risk auction.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="flow-step">
+                <svg viewBox="0 0 220 100" aria-hidden="true">
+                  <text x="12" y="20" class="svg-label">03</text>
+                  <rect x="28" y="34" width="164" height="24" fill="rgba(212,162,74,0.18)" stroke="#d4a24a" />
+                  <text x="110" y="50" text-anchor="middle" class="svg-muted">LMSR buys on S</text>
+                  <rect x="28" y="66" width="164" height="24" fill="rgba(184,92,56,0.18)" stroke="#b85c38" />
+                  <text x="110" y="82" text-anchor="middle" class="svg-muted">Risk LPs lock C_R</text>
+                </svg>
+                <figcaption>
+                  <strong>Trade ‖ risk auction</strong>
+                  <span>Two discoveries run in parallel: probability mass and underwriting capital.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="flow-step">
+                <svg viewBox="0 0 220 100" aria-hidden="true">
+                  <text x="12" y="20" class="svg-label">04</text>
+                  <line x1="30" y1="50" x2="120" y2="50" stroke="#d4a24a" stroke-width="3" />
+                  <line x1="30" y1="70" x2="120" y2="70" stroke="#b85c38" stroke-width="3" />
+                  <line x1="120" y1="34" x2="120" y2="86" stroke="#f0c36a" stroke-dasharray="3 2" />
+                  <text x="132" y="62" class="svg-eq" style="font-size:14px">close_ts</text>
+                </svg>
+                <figcaption>
+                  <strong>close_ts</strong>
+                  <span>Stop prediction fills and risk auction together; freeze density f.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="flow-step">
+                <svg viewBox="0 0 220 100" aria-hidden="true">
+                  <text x="12" y="20" class="svg-label">05</text>
+                  <circle cx="70" cy="58" r="22" fill="none" stroke="rgba(239,230,212,0.35)" stroke-dasharray="4 3" />
+                  <text x="70" y="62" text-anchor="middle" class="svg-muted">wait</text>
+                  <path d="M100 58 H140" stroke="#efe6d4" />
+                  <rect x="146" y="42" width="52" height="32" fill="none" stroke="#d4a24a" />
+                  <text x="172" y="62" text-anchor="middle" class="svg-eq" style="font-size:12px">event</text>
+                </svg>
+                <figcaption>
+                  <strong>Wait for the event</strong>
+                  <span>No fills. The market idles until the report window opens.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="flow-step">
+                <svg viewBox="0 0 220 100" aria-hidden="true">
+                  <text x="12" y="20" class="svg-label">06</text>
+                  <rect x="24" y="40" width="80" height="36" fill="rgba(212,162,74,0.12)" stroke="#d4a24a" />
+                  <text x="64" y="62" text-anchor="middle" class="svg-eq" style="font-size:12px">committee</text>
+                  <path d="M112 58 H132" stroke="#efe6d4" />
+                  <text x="168" y="62" text-anchor="middle" class="svg-eq">x*</text>
+                </svg>
+                <figcaption>
+                  <strong>Report x*</strong>
+                  <span>submit_result → challenge / finalize. Missed window → platform admin only.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="flow-step">
+                <svg viewBox="0 0 220 100" aria-hidden="true">
+                  <text x="12" y="20" class="svg-label">07</text>
+                  <rect x="24" y="38" width="172" height="44" fill="rgba(212,162,74,0.12)" stroke="#f0c36a" />
+                  <text x="110" y="56" text-anchor="middle" class="svg-eq" style="font-size:14px">lock ρ</text>
+                  <text x="110" y="74" text-anchor="middle" class="svg-muted">L · C_max · claims</text>
+                </svg>
+                <figcaption>
+                  <strong>begin_settle → lock ρ</strong>
+                  <span>Lock L, C_max, ρ; winners claim; draw Risk LP / C_P if needed.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="flow-step">
+                <svg viewBox="0 0 220 100" aria-hidden="true">
+                  <text x="12" y="20" class="svg-label">08</text>
+                  <circle cx="70" cy="58" r="28" fill="none" stroke="rgba(239,230,212,0.25)" stroke-width="10" />
+                  <circle cx="70" cy="58" r="28" fill="none" stroke="#d4a24a" stroke-width="10"
+                    stroke-dasharray="35 141" transform="rotate(-90 70 58)" />
+                  <text x="70" y="62" text-anchor="middle" class="svg-eq" style="font-size:12px">20%</text>
+                  <text x="120" y="52" class="svg-muted">cover pool</text>
+                  <text x="120" y="70" class="svg-muted">α_R / α_P</text>
+                </svg>
+                <figcaption>
+                  <strong>Surplus (ρ = 1)</strong>
+                  <span>If S &gt; 0: 20% to LP cover pool; remainder splits α_R / α_P.</span>
+                </figcaption>
+              </figure>
+            </div>
+          </div>
+        </section>
+
+        <section id="rules">
+          <div class="wrap reveal">
+            <p class="kicker">Core business rules · locked</p>
+            <h2 class="section-title">Protocol rules, drawn not hinted</h2>
+            <p class="section-copy">
+              These are program invariants. Each diagram is a rule the desk,
+              Quote engine, and on-chain settle path must obey.
+            </p>
+
+            <div class="rule-viz">
+              <figure class="rule-card">
+                <svg viewBox="0 0 320 160" role="img" aria-label="Share face is one USDC">
+                  <text x="16" y="22" class="svg-label">BUY</text>
+                  <text x="200" y="22" class="svg-label">HIT PAYOUT</text>
+                  <rect x="16" y="40" width="88" height="88" fill="none" stroke="#d4a24a" stroke-width="1.5"/>
+                  <text x="60" y="78" text-anchor="middle" class="svg-eq">p_S</text>
+                  <text x="60" y="102" text-anchor="middle" class="svg-muted">cost now</text>
+                  <path d="M118 84 H168" stroke="#efe6d4" stroke-width="1.2" marker-end="url(#arr)"/>
+                  <rect x="180" y="40" width="120" height="88" fill="rgba(212,162,74,0.12)" stroke="#f0c36a" stroke-width="1.5"/>
+                  <text x="240" y="78" text-anchor="middle" class="svg-eq">1 × ρ</text>
+                  <text x="240" y="102" text-anchor="middle" class="svg-muted">face · never 1/p</text>
+                  <defs>
+                    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                      <path d="M0,0 L6,3 L0,6" fill="none" stroke="#efe6d4"/>
+                    </marker>
+                  </defs>
+                </svg>
+                <figcaption>
+                  <strong>01 · Sells probability; face = 1</strong>
+                  <span>Price ≈ mass on S. Hit pays 1 USDC per share (× ρ). Face is never 1/p<sub>S</sub>.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="rule-card">
+                <svg viewBox="0 0 320 160" role="img" aria-label="Popular intervals get dearer via LMSR">
+                  <text x="16" y="22" class="svg-label">C_S VIA LMSR</text>
+                  <path d="M28 130 C 70 128, 90 100, 120 70 C 150 40, 190 28, 292 22" fill="none" stroke="#d4a24a" stroke-width="1.8"/>
+                  <path d="M28 130 C 80 126, 110 118, 150 105 C 200 88, 240 70, 292 48" fill="none" stroke="rgba(239,230,212,0.35)" stroke-width="1.2" stroke-dasharray="4 4"/>
+                  <text x="210" y="38" class="svg-muted">after buys</text>
+                  <text x="170" y="118" class="svg-muted">before</text>
+                  <line x1="28" y1="130" x2="292" y2="130" stroke="rgba(239,230,212,0.2)"/>
+                  <text x="16" y="150" class="svg-muted">overlap / heat raises cost — not a clock markup</text>
+                </svg>
+                <figcaption>
+                  <strong>02 · Popular stretches get dearer</strong>
+                  <span>Hot or overlapping buys raise contract cost C<sub>S</sub> through LMSR renormalization of f.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="rule-card">
+                <svg viewBox="0 0 320 160" role="img" aria-label="No live sells, hold to claim">
+                  <text x="16" y="22" class="svg-label">POSITION PATH</text>
+                  <rect x="20" y="52" width="70" height="36" fill="rgba(212,162,74,0.15)" stroke="#d4a24a"/>
+                  <text x="55" y="74" text-anchor="middle" class="svg-eq">BUY</text>
+                  <path d="M98 70 H128" stroke="#efe6d4" stroke-width="1.2"/>
+                  <rect x="132" y="52" width="70" height="36" fill="none" stroke="rgba(239,230,212,0.45)"/>
+                  <text x="167" y="74" text-anchor="middle" class="svg-eq">HOLD</text>
+                  <path d="M210 70 H240" stroke="#efe6d4" stroke-width="1.2"/>
+                  <rect x="244" y="52" width="56" height="36" fill="rgba(212,162,74,0.15)" stroke="#f0c36a"/>
+                  <text x="272" y="74" text-anchor="middle" class="svg-eq">CLAIM</text>
+                  <path d="M167 96 V112" stroke="rgba(184,92,56,0.8)" stroke-width="1.2"/>
+                  <text x="167" y="132" text-anchor="middle" class="svg-warn">✕ no live sell / unwind</text>
+                  <text x="16" y="150" class="svg-muted">VOID refunds cost_paid — not ρ</text>
+                </svg>
+                <figcaption>
+                  <strong>03 · Sells are closed</strong>
+                  <span>No unwind at live LMSR. Hold to settlement claim, or VOID refund of cost paid.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="rule-card">
+                <svg viewBox="0 0 320 160" role="img" aria-label="Soft solvency with one global rho">
+                  <text x="16" y="22" class="svg-label">ONE ρ · NO FIFO</text>
+                  <rect x="24" y="44" width="28" height="72" fill="rgba(212,162,74,0.55)"/>
+                  <rect x="64" y="44" width="28" height="72" fill="rgba(212,162,74,0.55)"/>
+                  <rect x="104" y="44" width="28" height="72" fill="rgba(212,162,74,0.55)"/>
+                  <rect x="24" y="44" width="28" height="28" fill="rgba(14,13,11,0.55)"/>
+                  <rect x="64" y="44" width="28" height="28" fill="rgba(14,13,11,0.55)"/>
+                  <rect x="104" y="44" width="28" height="28" fill="rgba(14,13,11,0.55)"/>
+                  <text x="78" y="136" text-anchor="middle" class="svg-muted">same haircut</text>
+                  <text x="200" y="60" class="svg-eq">ρ = C_max / L</text>
+                  <text x="168" y="88" class="svg-muted">write ρ before</text>
+                  <text x="168" y="106" class="svg-muted">any winner claim</text>
+                  <text x="168" y="130" class="svg-warn">fills never rejected for L_max</text>
+                </svg>
+                <figcaption>
+                  <strong>04 · Soft solvency · one ρ</strong>
+                  <span>Do not reject fills when L<sub>max</sub> is high. Settle on L = E(x*). Every winner the same ratio.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="rule-card rule-card-wide">
+                <svg viewBox="0 0 680 170" role="img" aria-label="Fees surplus and platform pool are separate">
+                  <text x="16" y="24" class="svg-label">THREE SEPARATE BUCKETS</text>
+                  <rect x="24" y="48" width="180" height="88" fill="none" stroke="#d4a24a" stroke-width="1.4"/>
+                  <text x="114" y="84" text-anchor="middle" class="svg-eq">φ fee</text>
+                  <text x="114" y="108" text-anchor="middle" class="svg-muted">always platform</text>
+                  <text x="114" y="126" text-anchor="middle" class="svg-warn">∉ C_max</text>
+                  <rect x="250" y="48" width="180" height="88" fill="none" stroke="#f0c36a" stroke-width="1.4"/>
+                  <text x="340" y="84" text-anchor="middle" class="svg-eq">S surplus</text>
+                  <text x="340" y="108" text-anchor="middle" class="svg-muted">only if ρ = 1</text>
+                  <text x="340" y="126" text-anchor="middle" class="svg-muted">settlement leftover</text>
+                  <rect x="476" y="48" width="180" height="88" fill="none" stroke="rgba(239,230,212,0.45)" stroke-width="1.4"/>
+                  <text x="566" y="84" text-anchor="middle" class="svg-eq">C_P pool</text>
+                  <text x="566" y="108" text-anchor="middle" class="svg-muted">optional cover</text>
+                  <text x="566" y="126" text-anchor="middle" class="svg-muted">enters C_max</text>
+                  <text x="16" y="158" class="svg-muted">φ ≠ S_P ≠ C_P — never mix fee revenue into solvency math</text>
+                </svg>
+                <figcaption>
+                  <strong>05 · Fees ≠ surplus ≠ platform pool</strong>
+                  <span>φ is always claimed by the platform. Surplus appears only when ρ = 1. C<sub>P</sub> is optional cover capital.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="rule-card rule-card-wide">
+                <svg viewBox="0 0 680 170" role="img" aria-label="Close timestamp stops both markets">
+                  <text x="16" y="24" class="svg-label">DUAL MARKET TIMELINE</text>
+                  <line x1="40" y1="70" x2="520" y2="70" stroke="rgba(239,230,212,0.25)" stroke-width="2"/>
+                  <line x1="40" y1="110" x2="520" y2="110" stroke="rgba(239,230,212,0.25)" stroke-width="2"/>
+                  <line x1="40" y1="70" x2="360" y2="70" stroke="#d4a24a" stroke-width="3"/>
+                  <line x1="40" y1="110" x2="360" y2="110" stroke="#b85c38" stroke-width="3"/>
+                  <line x1="360" y1="48" x2="360" y2="130" stroke="#f0c36a" stroke-width="1.5" stroke-dasharray="3 3"/>
+                  <text x="372" y="44" class="svg-eq">close_ts</text>
+                  <text x="48" y="62" class="svg-muted">Prediction fills</text>
+                  <text x="48" y="102" class="svg-muted">Risk auction</text>
+                  <text x="400" y="80" class="svg-muted">both frozen</text>
+                  <text x="400" y="100" class="svg-muted">f locked</text>
+                  <text x="560" y="90" class="svg-eq">→ report</text>
+                  <text x="16" y="158" class="svg-muted">risk_lock_ts ≤ close_ts — one clock stops both discoveries</text>
+                </svg>
+                <figcaption>
+                  <strong>06 · Close stops both markets</strong>
+                  <span>At close_ts, prediction fills and risk-auction quotes/fills halt together; density f freezes.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="rule-card">
+                <svg viewBox="0 0 320 160" role="img" aria-label="Committee writes the outcome">
+                  <text x="16" y="22" class="svg-label">WHO WRITES x*</text>
+                  <rect x="24" y="48" width="120" height="64" fill="rgba(212,162,74,0.12)" stroke="#d4a24a"/>
+                  <text x="84" y="76" text-anchor="middle" class="svg-eq">Committee</text>
+                  <text x="84" y="96" text-anchor="middle" class="svg-muted">submit_result</text>
+                  <path d="M152 80 H188" stroke="#efe6d4" stroke-width="1.2"/>
+                  <text x="220" y="86" text-anchor="middle" class="svg-eq">x*</text>
+                  <rect x="24" y="124" width="120" height="24" fill="none" stroke="rgba(184,92,56,0.7)"/>
+                  <text x="84" y="140" text-anchor="middle" class="svg-warn">✕ oracle write</text>
+                  <text x="168" y="140" class="svg-muted">miss → admin only</text>
+                </svg>
+                <figcaption>
+                  <strong>07 · Committee writes x*</strong>
+                  <span>No oracle outcome writes. Missed report window: platform slash-or-VOID only — no auto-extend.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="rule-card">
+                <svg viewBox="0 0 320 160" role="img" aria-label="Surplus split with twenty percent cover">
+                  <text x="16" y="22" class="svg-label">SURPLUS WHEN ρ = 1</text>
+                  <circle cx="96" cy="88" r="48" fill="none" stroke="rgba(239,230,212,0.25)" stroke-width="18"/>
+                  <circle cx="96" cy="88" r="48" fill="none" stroke="#d4a24a" stroke-width="18"
+                    stroke-dasharray="60 241" stroke-dashoffset="0" transform="rotate(-90 96 88)"/>
+                  <text x="96" y="84" text-anchor="middle" class="svg-eq">20%</text>
+                  <text x="96" y="102" text-anchor="middle" class="svg-muted">cover</text>
+                  <text x="180" y="64" class="svg-muted">S_C → LP cover pool</text>
+                  <text x="180" y="88" class="svg-muted">rest → α_R / α_P</text>
+                  <text x="180" y="112" class="svg-muted">(or all S_P if no C_R)</text>
+                  <text x="16" y="150" class="svg-muted">surplus only after users are paid in full</text>
+                </svg>
+                <figcaption>
+                  <strong>08 · Surplus cover slice</strong>
+                  <span>When ρ = 1 and S &gt; 0, first 20% of S funds the protocol LP cover pool; remainder splits per listing.</span>
+                </figcaption>
+              </figure>
+            </div>
+          </div>
+        </section>
+
+        <section id="solvency">
+          <div class="wrap reveal">
+            <p class="kicker">Soft solvency · settlement cases</p>
+            <h2 class="section-title">ρ keeps every winner equal</h2>
+            <p class="section-copy">
+              One market-wide recovery rate is locked before any claim.
+              Winners receive ⌊ρ · face⌋. VOID / RESOLUTION_FAILED refund
+              <em>cost_paid</em> and do not use ρ.
+            </p>
+            <div class="rho-grid">
+              <div class="rho-panel">
+                <p class="kicker">Locked before claim</p>
+                <p class="big">ρ = min(1, C<sub>max</sub>/L)</p>
+                <p class="section-copy" style="margin: 0">
+                  C<sub>max</sub> = T + C<sub>R</sub><sup>final</sup> + C<sub>P</sub><sup>alloc</sup> —
+                  then applied uniformly to every winning share.
+                </p>
+              </div>
+              <table class="settle">
+                <thead>
+                  <tr>
+                    <th>Funds vs L</th>
+                    <th>ρ</th>
+                    <th>Winners get</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>L ≤ T</td>
+                    <td>1</td>
+                    <td>Full face; no risk draw</td>
+                  </tr>
+                  <tr>
+                    <td>T &lt; L ≤ C<sub>max</sub></td>
+                    <td>1</td>
+                    <td>Full face; draw C<sub>R</sub> then C<sub>P</sub></td>
+                  </tr>
+                  <tr>
+                    <td>L &gt; C<sub>max</sub></td>
+                    <td>C<sub>max</sub>/L</td>
+                    <td>Same ratio for all — no FIFO</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="families">
+          <div class="wrap reveal">
+            <p class="kicker">Five parametric families</p>
+            <h2 class="section-title">Pick the shape that fits the question</h2>
+            <p class="section-copy">
+              The family is locked at create and cannot change later — so
+              liquidity, scoring, and resolution stay coherent through the full
+              lifecycle.
+            </p>
+            <div class="family-rail">
+              <div class="family">
+                <strong>Skellam</strong>
+                <span>Football / score differentials and integer margins.</span>
+              </div>
+              <div class="family">
+                <strong>Gaussian</strong>
+                <span>CPI prints, rates, and other symmetric continuous outcomes.</span>
+              </div>
+              <div class="family">
+                <strong>Lognormal</strong>
+                <span>Same-day BTC / ETH and other positive skewed paths.</span>
+              </div>
+              <div class="family">
+                <strong>Dirichlet</strong>
+                <span>Elections and multi-atom categorical outcomes.</span>
+              </div>
+              <div class="family">
+                <strong>Bernoulli</strong>
+                <span>Deadline YES / NO with continuous PDF pricing.</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="stack">
+          <div class="wrap reveal">
+            <p class="kicker">Open stack</p>
+            <h2 class="section-title">From desk to settlement</h2>
+            <p class="section-copy">
+              A monorepo you can run locally: Next.js desk, market API, and
+              Solana programs. Trading can run on MagicBlock ER; settlement is
+              Circle SPL USDC on Solana L1.
+            </p>
+            <div class="stack">
+              <div>
+                <strong>Web desk</strong>
+                <span>Next.js UI — create, auction, trade, resolve, claim.</span>
+              </div>
+              <div>
+                <strong>Market API</strong>
+                <span>Postgres listings, tickets, and resolution pipeline.</span>
+              </div>
+              <div>
+                <strong>Gateway</strong>
+                <span>SIWS sessions and chain-facing helpers.</span>
+              </div>
+              <div>
+                <strong>Solana</strong>
+                <span>Protocol PDA, soft solvency, USDC settlement.</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="docs">
+          <div class="wrap reveal">
+            <p class="kicker">Documentation</p>
+            <h2 class="section-title">README and product specs</h2>
+            <p class="section-copy">
+              Read the business map and locked rules on this site — same sources
+              as the repository, rendered for the browser.
+            </p>
+            <div class="doc-rail">
+              <a class="doc-link" href="./docs/readme.html">
+                <strong>README</strong>
+                <span>Three-minute business map, flow, and locked rules.</span>
+              </a>
+              <a class="doc-link" href="./docs/product-specification.html">
+                <strong>Product specification</strong>
+                <span>Markets, LMSR, soft solvency, ρ, committee, lifecycle.</span>
+              </a>
+              <a class="doc-link" href="./docs/software-requirements-specification.html">
+                <strong>SRS</strong>
+                <span>Numbered SHALL / SHALL NOT for tickets and QA.</span>
+              </a>
+              <a class="doc-link" href="./docs/risk-capital-guide.html">
+                <strong>Risk capital guide</strong>
+                <span>Auction, rank, draw, surplus cover pool.</span>
+              </a>
+              <a class="doc-link" href="./docs/system-architecture.html">
+                <strong>System architecture</strong>
+                <span>Clients, services, funds, recovery, data security.</span>
+              </a>
+              <a class="doc-link" href="./docs/technical-architecture.html">
+                <strong>Technical architecture</strong>
+                <span>Next.js / Anchor / Axum, algorithms, wallets.</span>
+              </a>
+            </div>
+          </div>
+        </section>
+
+        <section class="cta-band">
+          <div class="bg" aria-hidden="true"></div>
+          <div class="wrap reveal">
+            <p class="kicker">Open source</p>
+            <h2>Read the code. Run the desk. Ship a market.</h2>
+            <div class="cta-row">
+              <a
+                class="btn btn-primary"
+                href="https://github.com/bamaao/continuous-pdf-prediction-market"
+                >GitHub repository</a
+              >
+              <a class="btn btn-ghost" href="./docs/readme.html">Open README</a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <div class="wrap">
+          <span>Continuous · continuous PDF prediction markets</span>
+          <span>
+            <a href="https://github.com/bamaao/continuous-pdf-prediction-market"
+              >bamaao/continuous-pdf-prediction-market</a
+            >
+          </span>
+        </div>
+      </footer>
+    </div>
+    <script src="./main.js"></script>
+  </body>
+</html>

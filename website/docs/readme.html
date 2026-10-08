@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>README — Continuous</title>
+    <meta name="theme-color" content="#0e0d0b" />
+    <link rel="icon" href="../assets/icon-192.png" type="image/png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../styles.css" />
+    <link rel="stylesheet" href="../docs.css" />
+  </head>
+  <body class="docs-body">
+    <div class="site docs-shell">
+      <header class="wrap nav">
+        <a class="brand" href="../index.html">
+          <img
+            class="brand-mark"
+            src="../assets/icon-192.png"
+            width="36"
+            height="36"
+            alt="Continuous"
+          />
+          <span class="brand-text">
+            Continuous
+            <small>docs</small>
+          </span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="../index.html#flow">Flow</a>
+          <a href="../index.html#rules">Rules</a>
+          <a href="../index.html">Landing</a>
+          <a href="https://github.com/bamaao/continuous-pdf-prediction-market">GitHub</a>
+        </nav>
+      </header>
+
+      <div class="docs-layout wrap">
+        <aside class="docs-side" aria-label="Document list">
+          <p class="kicker">Library</p>
+          <nav class="docs-nav">
+          <a href="./readme.html" class="is-active">README</a>
+          <a href="./product-specification.html">Product specification</a>
+          <a href="./software-requirements-specification.html">SRS</a>
+          <a href="./risk-capital-guide.html">Risk capital guide</a>
+          <a href="./system-architecture.html">System architecture</a>
+          <a href="./technical-architecture.html">Technical architecture</a>
+          </nav>
+        </aside>
+        <article class="docs-article">
+          <p class="docs-status">README</p>
+          <div class="markdown-body">
+<h1 id="continuous-pdf-prediction-market">Continuous PDF Prediction Market</h1>
+<p>Prediction market on a <strong>continuous PDF</strong> (LMSR) plus a <strong>risk-capital auction</strong>. Settlement is Circle SPL USDC on Solana L1; trading runs on MagicBlock ER.</p>
+<p>This README is a three-minute <strong>business map</strong>. Normative detail lives in the specs below — do not treat this page as the source of truth for formulas or SHALL rules.</p>
+<h2 id="specs-start-here">Specs (start here)</h2>
+<table>
+<thead>
+<tr>
+<th>Doc</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="docs/software-requirements-specification.md">docs/software-requirements-specification.md</a></td>
+<td>SRS — numbered SHALL / SHALL NOT for tickets and QA</td>
+</tr>
+<tr>
+<td><a href="docs/product-specification.md">docs/product-specification.md</a></td>
+<td>Product rules: markets, LMSR (§1.2.4), listing language (§1.2.5), soft solvency, $\rho$, committee</td>
+</tr>
+<tr>
+<td><a href="docs/risk-capital-guide.md">docs/risk-capital-guide.md</a></td>
+<td>Risk LP handbook: auction, rank, draw, surplus 20% cover pool (Chinese: <a href="docs/risk-capital-guide.zh.md">risk-capital-guide.zh.md</a>)</td>
+</tr>
+<tr>
+<td><a href="docs/system-architecture.md">docs/system-architecture.md</a></td>
+<td>Clients, services, funds, crash recovery, data security</td>
+</tr>
+<tr>
+<td><a href="docs/technical-architecture.md">docs/technical-architecture.md</a></td>
+<td>Next.js / Anchor / Axum, algorithms, wallets</td>
+</tr>
+</tbody>
+</table>
+<p>Diagrams (if present): <code>docs/business-flow.png</code>, <code>docs/system-arch.png</code>, <code>docs/tech-arch.png</code>.</p>
+<p>Public landing page (static): <a href="website/"><code>website/</code></a> — deployed by <a href=".github/workflows/pages.yml"><code>.github/workflows/pages.yml</code></a>. After the first push, set <strong>Settings → Pages → Source</strong> to <strong>GitHub Actions</strong>. Site URL:</p>
+<p><code>https://bamaao.github.io/continuous-pdf-prediction-market/</code></p>
+<p>Docs on Pages: <code>…/docs/readme.html</code> (and sibling pages for product / SRS / risk / architecture). Lifecycle demo videos live under <code>website/assets/video/</code>.</p>
+<p>Local preview: open <code>website/index.html</code> or <code>npx serve website</code>. Regenerate doc HTML after editing specs: <code>python website/build-docs.py</code> (CI also runs this).</p>
+<hr />
+<h2 id="core-business">Core business</h2>
+<p>The product discovers two prices at once:</p>
+<table>
+<thead>
+<tr>
+<th>Market</th>
+<th>What is discovered</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A — Prediction</strong></td>
+<td>$P(X\in I)$ — probability that the outcome falls in an interval / atom set</td>
+</tr>
+<tr>
+<td><strong>B — Risk capital</strong></td>
+<td>Cost of underwriting the gap when final payout exceeds the market’s own trading revenue</td>
+</tr>
+</tbody>
+</table>
+<p>$$<br />
+\text{Probability Discovery} + \text{Risk Capital Discovery}<br />
+$$</p>
+<p>Unlike YES/NO books, each listing maintains a density $f(x)$ with $\int f=1$. Traders buy a set $S$ (interval, score cell, election atom, YES…). Price is current probability mass; <strong>hit pays 1 USDC per share</strong> (then × market-wide $\rho$), miss pays 0.</p>
+<p>Distribution families (locked at create; cannot swap later):</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Typical underlying</th>
+<th>Create ix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Skellam</td>
+<td>Football / scores</td>
+<td><code>create_skellam_market</code></td>
+</tr>
+<tr>
+<td>Gaussian</td>
+<td>CPI / macro prints</td>
+<td><code>create_gaussian_market</code></td>
+</tr>
+<tr>
+<td>Lognormal</td>
+<td>Same-day BTC / ETH</td>
+<td><code>create_lognormal_market</code></td>
+</tr>
+<tr>
+<td>Dirichlet</td>
+<td>Elections</td>
+<td><code>create_dirichlet_market</code></td>
+</tr>
+<tr>
+<td>Bernoulli</td>
+<td>Deadline YES / NO</td>
+<td><code>create_bernoulli_market</code></td>
+</tr>
+</tbody>
+</table>
+<p>Product copy: users create a <strong>prediction market</strong>. Do not use “board”, “book”, or “open/close the book” as product nouns.</p>
+<p>Full definition: <a href="docs/product-specification.md#1-product-definition">product-specification §1</a>.</p>
+<hr />
+<h2 id="core-concepts">Core concepts</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>$f(x)$ / $\theta$</td>
+<td>Prior at create; fills update $\theta$, LMSR renormalizes $f$. Frozen after <code>close_ts</code>. Committee reports $x^*$, never rewrites $f$.</td>
+</tr>
+<tr>
+<td>Shares $q$ on set $S$</td>
+<td>Position size. Hit face = $q$ USDC (ordinary lines), not $q/p_S$.</td>
+</tr>
+<tr>
+<td>$C_S(q)$</td>
+<td>LMSR contract cost into the vault (payout stack). Fee $\phi\cdot C_S$ is separate.</td>
+</tr>
+<tr>
+<td>$R_{\mathrm{net}}$ / $T$</td>
+<td>Trading revenue (buyer contract cost). Fees never enter.</td>
+</tr>
+<tr>
+<td>$L = E(c)$</td>
+<td>Liability at the realized atom after $x^<em>$ is final — </em><em>not</em>* trading-period $L_{\max}$.</td>
+</tr>
+<tr>
+<td>$C_R$</td>
+<td>Risk LP capital locked via the auction; may be 0.</td>
+</tr>
+<tr>
+<td>$C_P$</td>
+<td>Optional platform adjustment pool + listing tap; capped; default tap 0.</td>
+</tr>
+<tr>
+<td>$C_{\max}$</td>
+<td>$T + C_R^{\mathrm{final}} + C_P^{\mathrm{alloc}}$ — maximum payable to winners.</td>
+</tr>
+<tr>
+<td>$\rho$</td>
+<td>One market-wide recovery rate $\min(1, C_{\max}/L)$, written <strong>before</strong> any winner claim.</td>
+</tr>
+<tr>
+<td>Coverage / $\hat\rho$</td>
+<td>Display-only during trading; not settlement $\rho$.</td>
+</tr>
+<tr>
+<td>Protocol PDA</td>
+<td>Official <code>platform</code>, <code>fee_bps</code>, report clocks, $\alpha_R$, etc. Create copies them onto <code>Market</code>; applicants cannot choose.</td>
+</tr>
+</tbody>
+</table>
+<p>Roles (detail: <a href="docs/product-specification.md#3-roles">§3</a>):</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Job</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Trader</strong></td>
+<td>Buy probability sets; claim $\lfloor\rho\cdot\mathrm{face}\rfloor$ if hit</td>
+</tr>
+<tr>
+<td><strong>Applicant / reviewer</strong></td>
+<td>SIWS apply → review approve opens trading <strong>and</strong> the risk auction</td>
+</tr>
+<tr>
+<td><strong>Risk LP</strong></td>
+<td>Tail underwriter: lock $D_i$, may be drawn if $T &lt; L$; earn premium / surplus share when $\rho=1$</td>
+</tr>
+<tr>
+<td><strong>Committee / resolver</strong></td>
+<td>On-chain <code>submit_result</code> for $x^*$ — no oracle writes outcomes</td>
+</tr>
+<tr>
+<td><strong>Platform</strong></td>
+<td>Claims $\phi$; optional $S_P$; funds $C_P^{\mathrm{pool}}$; admin path after missed report</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="core-business-flow">Core business flow</h2>
+<p>Lifecycle sketch (<a href="docs/product-specification.md#12-end-to-end-business-flow">§1.2</a>, <a href="docs/product-specification.md#11-market-lifecycle">§11</a>):</p>
+<pre><code class="language-text">① Choose distribution family
+② Apply (SIWS) → reviewer approve / create_*  → trading + risk auction OPEN
+③ Trade (LMSR buys) ‖ Risk LPs quote / lock C_R
+④ close_ts → stop prediction fills AND risk auction; freeze f
+⑤ Wait for the event
+⑥ report_open_ts… → committee submit_result → challenge / finalize x*
+     (missed window → only platform admin_submit_result or admin_void_resolution)
+⑦ begin_settle → lock L, C_max, ρ → winners claim; draw Risk LP / C_P if needed
+⑧ If ρ=1 and surplus S&gt;0 → 20% S to LP cover pool; rest α_R / α_P (or all S_P if no C_R)
+</code></pre>
+<p>Settlement cases (same section):</p>
+<table>
+<thead>
+<tr>
+<th>Funds vs $L$</th>
+<th>$\rho$</th>
+<th>What winners get</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>$L \le T$</td>
+<td>1</td>
+<td>Full face; no risk draw</td>
+</tr>
+<tr>
+<td>$T &lt; L \le C_{\max}$</td>
+<td>1</td>
+<td>Full face; draw $C_R$ then $C_P$ as needed</td>
+</tr>
+<tr>
+<td>$L &gt; C_{\max}$</td>
+<td>$C_{\max}/L$</td>
+<td>Every winner the <strong>same</strong> ratio — no FIFO</td>
+</tr>
+</tbody>
+</table>
+<p>VOID / <code>RESOLUTION_FAILED</code> refund <code>cost_paid</code>; they do <strong>not</strong> use $\rho$.</p>
+<hr />
+<h2 id="core-business-rules-locked">Core business rules (locked)</h2>
+<p>These are protocol rules, not UI hints. Programs, Quote, and desks must follow them. Full table: <a href="docs/product-specification.md#11-locked-business-rules">product-specification §1.1</a>.</p>
+<ol>
+<li><strong>Sells probability; share face is 1.</strong> Price ≈ $p_S$; hit pays 1 per share (× $\rho$). Never treat face as $1/p_S$. (<a href="docs/product-specification.md#122-core-business-rule-the-product-sells-probability-share-face-is-1-locked">§1.2.2</a>)</li>
+<li><strong>Popular stretches get dearer.</strong> Hot / overlapping buys raise $C_S$ via LMSR; not a wall-clock markup. (<a href="docs/product-specification.md#124-core-business-rule-popular-intervals-get-more-expensive-locked">§1.2.4</a>)</li>
+<li><strong>Sells are closed.</strong> No unwind at live LMSR; hold to settlement claim or VOID refund.</li>
+<li><strong>Soft solvency.</strong> Do not reject fills when $L_{\max}$ is high; settle on $L=E(c)$ with one global $\rho$.</li>
+<li><strong>One $\rho$, users first.</strong> Write $\rho$ before any payout; surplus only when $\rho=1$; FIFO forbidden. (<a href="docs/product-specification.md#121-core-business-rule-recovery-rate-and-surplus-locked">§1.2.1</a>)</li>
+<li><strong>Fees $\phi$ ≠ surplus $S_P$ ≠ $C_P$.</strong> $\phi$ always platform (<code>claim_fees</code>); never enters $C_{\max}$ / cover pool. (<a href="docs/product-specification.md#127-core-business-rule-phi-is-always-the-platform-s_p-is-settlement-leftover-locked">§1.2.7</a>)</li>
+<li><strong>Official platform params from Protocol.</strong> Create copies them; lobby hides markets whose <code>platform</code> ≠ official key.</li>
+<li><strong>Close stops both markets.</strong> At <code>close_ts</code>, prediction fills and risk-auction quotes/fills stop (<code>risk_lock_ts ≤ close_ts</code>).</li>
+<li><strong>Committee writes $x^*$.</strong> No oracle outcome writes. Missed report: platform slash-or-VOID only — no auto-fail / auto-extend.</li>
+<li><strong>Canonical listing language is English</strong>; locale strings are display-only. (<a href="docs/product-specification.md#125-core-business-rule-how-a-global-lobby-names-a-market-locked">§1.2.5</a>)</li>
+<li><strong>Anyone with SIWS may apply; review opens trading.</strong> Duplicate event key → <code>409</code>. Rejected apps never become markets.</li>
+<li><strong>Surplus cover slice.</strong> When $\rho=1$ and $S&gt;0$, first $S_C=20\%S$ funds the protocol LP cover pool (<code>cover_lp_loss</code>); remainder splits per listing $\alpha_R$/$\alpha_P$.</li>
+</ol>
+<p>Invariants summary: <a href="docs/product-specification.md#12-protocol-invariants">§12</a>. Risk LP economics: <a href="docs/risk-capital-guide.md">risk-capital-guide</a>.</p>
+<hr />
+<h2 id="locked-for-implementation">Locked for implementation</h2>
+<ul>
+<li>Client: Next.js only (PWA / wallet WebView / official Android TWA). No store apps.</li>
+<li>Chain: Anchor + MagicBlock ER + session-keys. <code>vault</code> / <code>resolution</code> never Delegate.</li>
+<li>Collateral: Circle SPL USDC only.</li>
+<li>Outcomes: committee <code>submit_result</code> only. No oracle writes $x^*$.</li>
+<li>Solvency: do not reject when $L_{\max}$ is high; settle $L=E(x^*)$; one global $\rho$.</li>
+</ul>
+<p>Suggested repo layout: <a href="docs/technical-architecture.md">docs/technical-architecture.md</a> §9.</p>
+<p>Implementation order: <a href="docs/plans/2026-09-24-implementation-sequence.md">docs/plans/2026-09-24-implementation-sequence.md</a>.</p>
+<pre><code class="language-bash"># Machine PostgreSQL on :5432 (do not start Docker if that port is already taken):
+#   psql -U postgres -h 127.0.0.1 -f infra/local-pg.sql
+# DATABASE_URL defaults to postgres://cpm:cpm@127.0.0.1:5432/cpm
+cargo run -p readpath --bin market-api
+cd apps/web &amp;&amp; npm install &amp;&amp; npm run dev
+</code></pre>
+<p>Staging (Linux): prep with <code>scripts/staging-prep-ubuntu.sh</code> or <code>scripts/staging-prep-centos.sh</code>, then <code>bash scripts/deploy-staging.sh</code> — <a href="deploy/README.md">deploy/README.md</a>.</p>
+<p>Listing names and the fill journal live in <strong>local Postgres</strong>, not process memory. A Market API restart reloads them. <code>ALLOW_MEMORY_ONLY=1</code> is only for unit tests.</p>
+<p>Web talks to <code>market-api</code> (<code>:8080</code>), Trading Gateway (<code>:8081</code>), and local RPC. Quotes come from <code>crates/math</code> (WASM crate + Market API). Do not reimplement LMSR in TypeScript. Persistence: <code>docs/architecture/ddd-sqlx.md</code>.</p>
+          </div>
+        </article>
+      </div>
+    </div>
+  </body>
+</html>

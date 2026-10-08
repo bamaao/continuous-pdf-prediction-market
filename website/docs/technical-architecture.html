@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Technical architecture — Continuous</title>
+    <meta name="theme-color" content="#0e0d0b" />
+    <link rel="icon" href="../assets/icon-192.png" type="image/png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../styles.css" />
+    <link rel="stylesheet" href="../docs.css" />
+  </head>
+  <body class="docs-body">
+    <div class="site docs-shell">
+      <header class="wrap nav">
+        <a class="brand" href="../index.html">
+          <img
+            class="brand-mark"
+            src="../assets/icon-192.png"
+            width="36"
+            height="36"
+            alt="Continuous"
+          />
+          <span class="brand-text">
+            Continuous
+            <small>docs</small>
+          </span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="../index.html#flow">Flow</a>
+          <a href="../index.html#rules">Rules</a>
+          <a href="../index.html">Landing</a>
+          <a href="https://github.com/bamaao/continuous-pdf-prediction-market">GitHub</a>
+        </nav>
+      </header>
+
+      <div class="docs-layout wrap">
+        <aside class="docs-side" aria-label="Document list">
+          <p class="kicker">Library</p>
+          <nav class="docs-nav">
+          <a href="./readme.html">README</a>
+          <a href="./product-specification.html">Product specification</a>
+          <a href="./software-requirements-specification.html">SRS</a>
+          <a href="./risk-capital-guide.html">Risk capital guide</a>
+          <a href="./system-architecture.html">System architecture</a>
+          <a href="./technical-architecture.html" class="is-active">Technical architecture</a>
+          </nav>
+        </aside>
+        <article class="docs-article">
+          <p class="docs-status">Technical architecture</p>
+          <div class="markdown-body">
+<h1 id="technical-architecture-continuous-pdf-prediction-market">Technical Architecture — Continuous PDF Prediction Market</h1>
+<p><strong>Continuous PDF Prediction Market</strong></p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Version</td>
+<td>1.6</td>
+</tr>
+<tr>
+<td>Corresponding product</td>
+<td><code>product-specification.md</code> v1.13</td>
+</tr>
+<tr>
+<td>Corresponding system</td>
+<td><code>system-architecture.md</code></td>
+</tr>
+</tbody>
+</table>
+<p>This document answers: which frameworks, which middleware, and how the core algorithms are implemented.</p>
+<p><img alt="Technical architecture" src="tech-arch.png" /></p>
+<hr />
+<h2 id="1-technology-stack-summary">1. Technology stack summary</h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Choice (locked; no parallel alternatives)</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Web</td>
+<td>TypeScript, <strong>Next.js App Router</strong>, React, Tailwind CSS</td>
+<td>Lobby, trading board, auctions, committee entry</td>
+</tr>
+<tr>
+<td>Web state</td>
+<td><strong>Zustand</strong> (quotes in a dedicated store)</td>
+<td>Avoid full-tree re-renders that stall the PDF</td>
+</tr>
+<tr>
+<td>Mobile</td>
+<td><strong>The same Next.js stack</strong>: PWA + in-wallet browsers + official-site Android TWA</td>
+<td>No App Store / Play</td>
+</tr>
+<tr>
+<td>CLI</td>
+<td>Rust <code>clap</code> + <code>crates/client</code></td>
+<td>Market creation, Keeper, reporting</td>
+</tr>
+<tr>
+<td>All backends</td>
+<td><strong>Rust Axum</strong> (no Node/Fastify)</td>
+<td>Query, trading gateway, indexer, Keeper</td>
+</tr>
+<tr>
+<td>Persistence (read path)</td>
+<td><strong>sqlx → PostgreSQL 16</strong>, DDD + associated-type <code>Context</code></td>
+<td>Catalog, fill journal, projections. Next.js does not use sqlx</td>
+</tr>
+<tr>
+<td>On-chain programs</td>
+<td><strong>Anchor</strong> + <code>ephemeral-rollups-sdk</code> + <code>session-keys</code></td>
+<td>Not hand-written-entrypoint pure native</td>
+</tr>
+<tr>
+<td>Chain client</td>
+<td><code>@coral-xyz/anchor</code> + <code>@solana/web3.js</code> (do not use <code>@solana/kit</code>)</td>
+<td>Build transactions from IDL</td>
+</tr>
+<tr>
+<td>Indexing</td>
+<td><code>yellowstone-grpc</code></td>
+<td>Write to PG</td>
+</tr>
+<tr>
+<td>Database</td>
+<td>PostgreSQL 16</td>
+<td>Indexing and audit</td>
+</tr>
+<tr>
+<td>Cache</td>
+<td>Redis 7</td>
+<td>Quotes, rate limits, login sessions</td>
+</tr>
+<tr>
+<td>Messaging</td>
+<td><strong>NATS JetStream</strong></td>
+<td>Fill fan-out, notifications</td>
+</tr>
+<tr>
+<td>Object storage</td>
+<td>S3 protocol</td>
+<td>Evidence, fill ledgers</td>
+</tr>
+<tr>
+<td>Observability</td>
+<td>OpenTelemetry, Prometheus, Grafana, Loki</td>
+<td>Metrics / traces / logs</td>
+</tr>
+<tr>
+<td>Web wallets</td>
+<td>Wallet Standard + <code>@solana/wallet-adapter-react</code></td>
+<td>Phantom / Solflare / Backpack are required integrations</td>
+</tr>
+<tr>
+<td>Mobile wallets</td>
+<td>Wallet Adapter + deep links / wallet WebView; Android TWA may use MWA</td>
+<td>External wallet signs; no in-store IAP</td>
+</tr>
+<tr>
+<td>Stablecoin</td>
+<td>Circle <strong>SPL USDC</strong> (official mainnet mint)</td>
+<td>Deposits, collateral, payouts</td>
+</tr>
+</tbody>
+</table>
+<p>Do not introduce a second “off-chain matching engine” as a substitute for LMSR. Off-chain Quote is read-only preview only; fills are authoritative once an ER receipt exists.</p>
+<hr />
+<h2 id="2-client-technology">2. Client technology</h2>
+<p>The only user trading client is <strong>this Next.js stack</strong>. No Flutter, no React Native, no standalone Swift/Kotlin, no second chain client (do not use <code>@solana/kit</code>). The sole LMSR implementation is Rust (WASM for the browser).</p>
+<h3 id="21-web">2.1 Web</h3>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Locked</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Framework</td>
+<td><strong>Next.js App Router</strong> + React + TypeScript</td>
+</tr>
+<tr>
+<td>Styling</td>
+<td>Tailwind CSS</td>
+</tr>
+<tr>
+<td>State</td>
+<td><strong>Zustand</strong>; <code>quoteStore</code> is separate from the UI store</td>
+</tr>
+<tr>
+<td>Charts</td>
+<td>Canvas / WebGL for the PDF and the football 121-cell heatmap</td>
+</tr>
+<tr>
+<td>Realtime</td>
+<td><code>quote</code>-domain WSS market data + fill receipts</td>
+</tr>
+<tr>
+<td>Offline shell</td>
+<td><strong>PWA</strong> (manifest + service worker): add to home screen, cache static assets; fills remain authoritative only from online ER</td>
+</tr>
+<tr>
+<td>Deployment</td>
+<td><code>www</code> SSR lobby; trading-board pages are <code>'use client'</code>; instructions are not forwarded through a business API</td>
+</tr>
+</tbody>
+</table>
+<p>Minimum route set: <code>/</code> lobby catalog (approved boards only), <code>/m/[id]</code> board, <code>/auctions</code> catalog, <code>/auction/[id]</code> layer book, <code>/portfolio</code> tickets, <code>/lp</code> Risk LP book, <code>/resolve/[id]</code>, <code>/committee</code>, <code>/create</code> (SIWS application), <code>/review</code> (system reviewer), <code>/ops</code> (read-only). Committee is a route in the same Next.js app until it earns a split. Keeper writes stay on the CLI. Web acceptance list: SRS §4.7 (FR-UI-*).</p>
+<h3 id="22-how-phones-are-used-no-native-store-apps">2.2 How phones are used: no native store apps</h3>
+<p>A real-money prediction book will be rejected by the App Store / Play as gambling. Building Flutter or RN would face the same clauses; <strong>if it cannot be listed, that client is not built</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Entry</th>
+<th>Approach</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Desktop / laptop</td>
+<td>Open Next.js in a browser</td>
+</tr>
+<tr>
+<td>iPhone</td>
+<td>Open the same site in Safari; “Add to Home Screen” for PWA; or open in Phantom / Solflare <strong>in-app browsers</strong> (wallet already connected; best experience)</td>
+</tr>
+<tr>
+<td>Android</td>
+<td>Same PWA / wallet WebView; for an icon install, download the official-site <strong>TWA APK</strong> (Trusted Web Activity: Chrome runs the same site fullscreen, <strong>not via Play</strong>)</td>
+</tr>
+<tr>
+<td>Solana Seeker and similar</td>
+<td>Open the same URL from the wallet or a dApp directory</td>
+</tr>
+</tbody>
+</table>
+<p>Quotes: <code>crates/math</code> → WASM, computed in the browser. No Flutter FFI.</p>
+<h3 id="23-cli">2.3 CLI</h3>
+<ul>
+<li><code>crates/cli</code>, <code>clap</code></li>
+<li>Instruction encoding comes only from <code>crates/client</code> (generated from the Anchor IDL); do not hand-write a second discriminator</li>
+</ul>
+<h3 id="24-shared-sdk">2.4 Shared SDK</h3>
+<pre><code class="language-text">crates/math              Q64.64, LMSR, ρ, auctions
+crates/client            RPC, transaction building (CLI / Keeper)
+crates/math-wasm         wasm-bindgen, for Next.js
+packages/sdk             Next.js: IDL, SIWS, WASM calls
+apps/web                 Next.js (includes PWA)
+apps/android-twa         Official-site TWA wrapper, no independent business code
+programs/*               Anchor
+</code></pre>
+<p>Forbidden: rewriting LMSR in TypeScript; opening a Flutter / RN repo.</p>
+<h3 id="25-how-web-wallets-are-connected">2.5 How web wallets are connected</h3>
+<p>Stack:</p>
+<ul>
+<li><code>@solana/wallet-adapter-react</code> + <code>@solana/wallet-adapter-react-ui</code></li>
+<li>Wallets: Wallet Standard auto-discovery; <strong>must test</strong> Phantom, Solflare, Backpack</li>
+<li>Connection: <code>ConnectionProvider</code> points at self-hosted <code>l1-rpc</code> (via Gateway; do not bake vendor URLs into the frontend bundle)</li>
+<li>Program client: <code>AnchorProvider</code> + the four program IDLs</li>
+</ul>
+<p>User path (order is fixed):</p>
+<pre><code class="language-text">1. Click “Connect wallet” → Adapter selects a wallet → authorize public key
+2. Sign-In with Solana (SIWS) → BFF verifies and issues a JWT (for positions / push binding, not on-chain identity)
+3. Deposit: main wallet popup signs vault.deposit (L1)
+   User USDC ATA → protocol Vault Token Account
+4. Open a trading session: main wallet popup once
+   Create Session Keypair + MagicBlock SessionToken
+   Then write this protocol’s limits on-chain: expiry, remaining USDC, allowed ixs, market whitelist
+5. In-book buy_set / sell_set: Session Key signs; main wallet no longer pops
+6. Withdraw, create market, authorize committee members: must be a main-wallet popup; Session has no authority
+7. “End session”: revoke SessionToken + delete the key locally; “Disconnect wallet”: clear JWT
+</code></pre>
+<p>How the frontend stores keys:</p>
+<ul>
+<li>Session private key goes into <strong>IndexedDB</strong>, wrapped with WebCrypto; <strong>plaintext <code>localStorage</code> is forbidden</strong></li>
+<li>Refreshing the page can restore an unexpired session; revoke or expiry requires repeating step 4</li>
+<li>Seed phrases never enter the page</li>
+</ul>
+<h3 id="26-how-wallets-are-connected-on-phones">2.6 How wallets are connected on phones</h3>
+<p>There is no second native wallet SDK. Still Wallet Standard + Adapter; the invocation method differs by shell:</p>
+<table>
+<thead>
+<tr>
+<th>Shell</th>
+<th>How to connect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Safari / Chrome / PWA</td>
+<td>Deep-link out to Phantom, Solflare; jump back to this site with the signature</td>
+</tr>
+<tr>
+<td>In-wallet browser</td>
+<td>Injected provider; Adapter connects directly, one fewer hop (<strong>prefer guiding users to open from here</strong>)</td>
+</tr>
+<tr>
+<td>Android TWA</td>
+<td>Same as Chrome; if detectable, use <strong>MWA</strong></td>
+</tr>
+<tr>
+<td>Desktop extensions</td>
+<td>Phantom / Solflare / Backpack extensions</td>
+</tr>
+</tbody>
+</table>
+<p>The path is the same as 2.5: connect → SIWS → <code>deposit</code> → Session → place orders. The Session private key still lives in IndexedDB + WebCrypto. Do not build an in-page seed-phrase wallet. Do not integrate IAP.</p>
+<h3 id="27-which-class-of-operation-is-signed-by-whom">2.7 Which class of operation is signed by whom</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Signer</th>
+<th>Chain</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Connect, SIWS</td>
+<td>Main wallet (message, not on-chain)</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>vault.deposit</code> / <code>withdraw</code></td>
+<td><strong>Main wallet</strong></td>
+<td>L1</td>
+</tr>
+<tr>
+<td>Open / renew / revoke Session</td>
+<td><strong>Main wallet</strong></td>
+<td>L1 (SessionToken + this protocol’s limit account)</td>
+</tr>
+<tr>
+<td><code>buy_set</code> / <code>sell_set</code></td>
+<td><strong>Session</strong></td>
+<td>ER</td>
+</tr>
+<tr>
+<td>Risk auction <code>bid</code> / <code>cancel</code></td>
+<td>Main wallet (locking collateral is a funds action)</td>
+<td>L1 or ER per program, but must be the main wallet</td>
+</tr>
+<tr>
+<td><code>create_*</code></td>
+<td>Main wallet / ops multisig</td>
+<td>L1</td>
+</tr>
+<tr>
+<td><code>submit_result</code> / <code>challenge</code> / <code>vote</code></td>
+<td>Committee member main wallet or KMS hot key</td>
+<td>L1</td>
+</tr>
+<tr>
+<td>Program upgrade</td>
+<td>Multisig + timelock</td>
+<td>L1</td>
+</tr>
+</tbody>
+</table>
+<p>The Trading Gateway <strong>forwards but does not sign</strong>: it assembles the ER transaction, the Session signs on the client, and the Gateway only relays. Gateway memory must not hold Session private keys long-term.</p>
+<h3 id="28-usdc-accounts">2.8 USDC accounts</h3>
+<p>The protocol <strong>recognizes only one mint</strong>: Circle’s official mainnet SPL USDC. Not a “stablecoin basket,” not SOL, no in-protocol FX.</p>
+<ul>
+<li>The user must have an ATA for that mint; if missing, <code>createAssociatedTokenAccount</code> before deposit</li>
+<li><code>USDC_MINT</code> is Circle’s official SPL mint on that cluster (mainnet <code>EPjFWdd5…</code>). <code>initialize</code> does not accept a deployer-chosen mint. <code>vault.deposit</code> / Risk lock-collateral: <code>mint == USDC_MINT</code>; other coins are rejected</li>
+<li>Protocol Vault: one USDC Token Account per funds domain (user-margin pool, fees, each book’s Risk Vault)</li>
+<li>Deposit confirmation: wait for L1 finalized before increasing the ER available-balance mirror; unconfirmed funds grant no trading quota</li>
+<li>The client may link to an external DEX; that is a jump, <strong>not</strong> a Vault CPI</li>
+<li>SOL network fees for L1 transactions are paid from the main wallet; the ER hot path is 0 gas and does not debit SOL as margin</li>
+</ul>
+<h3 id="29-why-not-list-in-stores-and-which-path-to-use">2.9 Why not list in stores, and which path to use</h3>
+<p>Review will reject a <strong>full trading app</strong> as real-money gambling. Maintaining Flutter / RN when listing is impossible means a second client that can never ship.</p>
+<p><strong>Locked: do not submit a trading app to the App Store or Google Play. The user client = Next.js.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Next.js website</td>
+<td>Full trading: deposit, order, withdraw, auctions, committee</td>
+</tr>
+<tr>
+<td>PWA</td>
+<td>The same site, added to the home screen</td>
+</tr>
+<tr>
+<td>In-wallet browser</td>
+<td>The same URL, wallet already injected; primary mobile path</td>
+</tr>
+<tr>
+<td>Official-site Android TWA APK</td>
+<td>Fullscreen shell of the same site, downloaded from the official site, not via Play</td>
+</tr>
+<tr>
+<td>CLI</td>
+<td>Ops / Keeper, not a user app</td>
+</tr>
+</tbody>
+</table>
+<p>Do not adopt: Flutter, RN, store-downgraded read-only packages, IAP deposits, or a second “pay outside the store” circumvention narrative written just to get listed.</p>
+<p>Legal and regional switches are ops configuration (disable trading by jurisdiction), not another client.</p>
+<hr />
+<h2 id="3-server-side-frameworks">3. Server-side frameworks</h2>
+<table>
+<thead>
+<tr>
+<th>Service</th>
+<th>Framework</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gateway</td>
+<td>Axum + tower middleware</td>
+<td>Rate limits, timeouts, tracing</td>
+</tr>
+<tr>
+<td>Market API</td>
+<td>Axum + <strong>sqlx</strong></td>
+<td>Web-facing read/catalog API. DDD: Domain traits, Application use-cases, Infrastructure <code>*RepositoryImpl</code>. Next.js never opens PG</td>
+</tr>
+<tr>
+<td>Trading Gateway</td>
+<td>Axum / raw TCP+WSS</td>
+<td>Connection pool to ER</td>
+</tr>
+<tr>
+<td>Quote Engine</td>
+<td>Standalone process, in-memory grid</td>
+<td>Subscribes to Indexer or ER accounts</td>
+</tr>
+<tr>
+<td>Indexer</td>
+<td>tokio tasks</td>
+<td>gRPC yellowstone</td>
+</tr>
+<tr>
+<td>Keeper</td>
+<td>tokio + cron/slot clock</td>
+<td>Fires L1 transactions at the due slot</td>
+</tr>
+</tbody>
+</table>
+<p>Process model: each service is its own binary, a K8s Deployment. Quote and Trading are <strong>not</strong> co-located with the Indexer.</p>
+<h3 id="31-ddd-sqlx-market-api-indexer">3.1 DDD + sqlx (Market API / Indexer)</h3>
+<p>Locked for this application’s Rust services that persist off-chain data. Full scheme: <code>docs/architecture/ddd-sqlx.md</code>.</p>
+<pre><code class="language-text">Interface (Axum) → Application (begin / commit) → Domain (traits) → Infrastructure (sqlx)
+</code></pre>
+<ul>
+<li><strong>Domain</strong> repository traits use an associated type <code>Context</code> (GAT <code>type Context&lt;'c&gt;</code>) so the Domain crate never names sqlx.</li>
+<li><strong>Infrastructure</strong> binds <code>type Context&lt;'c&gt; = sqlx::Transaction&lt;'c, sqlx::Postgres&gt;</code> and runs parameterized <code>sqlx::query!</code>.</li>
+<li><strong>Application</strong> owns the unit of work: <code>let mut tx = pool.begin().await?; repo.save(&amp;mut tx, &amp;agg).await?; tx.commit().await?;</code></li>
+<li><strong>Interface</strong> is Axum only. Handlers do not contain SQL.</li>
+<li><strong>Next.js</strong> calls HTTPS <code>/v1/*</code>. sqlx is not a web-frontend dependency.</li>
+</ul>
+<p>Postgres remains S2: listings, <strong>listing applications / review log</strong>, <strong>board comments</strong>, and the fill journal are off-chain helpers; $\theta$, $\rho$, and Vault USDC stay on-chain (FR-DUR-04). A listing application is <code>PENDING_REVIEW</code> until <code>R-REVIEW</code> approves and the <strong>reviewer wallet</strong> signs on-chain create (FR-UI-43); status is <code>OPEN</code> once <code>market</code> is attached. Comments (<code>market_comment</code>) exist only after a board is approved and indexed (FR-UI-42) and never enter $C_{\max}$, $C_P$, or the fee ledger. Geo-IP blocks (FR-UI-44) are access policy on <code>/v1/*</code>. Local test uses the machine PostgreSQL (<code>DATABASE_URL</code>, default <code>postgres://cpm:cpm@127.0.0.1:5432/cpm</code> after <code>infra/local-pg.sql</code>). Memory is a cache. JSON files are import-only. <code>ALLOW_MEMORY_ONLY=1</code> is not for desks.</p>
+<hr />
+<h2 id="4-middleware-and-infrastructure">4. Middleware and infrastructure</h2>
+<table>
+<thead>
+<tr>
+<th>Middleware</th>
+<th>Usage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PostgreSQL</td>
+<td><strong>sqlx only from Rust services.</strong> Tables: <code>listing</code>, <code>listing_application</code>, <code>review_log</code>, <code>market_comment</code>, <code>fill_journal</code>, <code>market_proj</code> (+ later position/quote/layer/resolution projections). Not the ledger</td>
+</tr>
+<tr>
+<td>Redis</td>
+<td><code>quote:{market}</code>, coverage, nonce, rate-limit token buckets</td>
+</tr>
+<tr>
+<td>NATS JetStream</td>
+<td><code>fills</code>, <code>markets.updated</code>, <code>resolution.*</code></td>
+</tr>
+<tr>
+<td>S3</td>
+<td><code>evidence/{market}/{proposal}</code></td>
+</tr>
+<tr>
+<td>Nginx / Envoy</td>
+<td>TLS, routing to Gateway / WS</td>
+</tr>
+<tr>
+<td>GitHub Actions + Anchor</td>
+<td>Program builds, IDL, images</td>
+</tr>
+<tr>
+<td>Keys</td>
+<td>AWS KMS / GCP KMS / Vault; Keeper hot-key shards</td>
+</tr>
+</tbody>
+</table>
+<p>Messaging only fans out projections of <strong>already-on-chain events</strong>; it does not match in the queue.</p>
+<hr />
+<h2 id="5-on-chain-program-structure">5. On-chain program structure</h2>
+<p><strong>Use Anchor, not pure native.</strong> Entrypoints, account constraints, IDL, and TS/Rust clients all go through Anchor. The LMSR kernel is ordinary Rust (<code>crates/math</code>), called from Anchor handlers; formulas are not written into macros.</p>
+<p>Locked dependencies:</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Choice</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Framework</td>
+<td><strong>Anchor</strong> (the 1.x line consistent with MagicBlock docs)</td>
+</tr>
+<tr>
+<td>ER</td>
+<td><code>ephemeral-rollups-sdk</code> (<code>delegate</code> / <code>commit</code> / <code>#[ephemeral]</code>)</td>
+</tr>
+<tr>
+<td>Frictionless signing</td>
+<td>MagicBlock <strong><code>session-keys</code></strong> (<code>SessionToken</code> + <code>#[session_auth_or]</code>)</td>
+</tr>
+<tr>
+<td>Token</td>
+<td><code>anchor-spl</code>, Circle USDC</td>
+</tr>
+<tr>
+<td>Math</td>
+<td><code>crates/math</code>, Q64.64; IEEE floats are forbidden in consensus</td>
+</tr>
+</tbody>
+</table>
+<p>Four programs, one workspace, each with its own program id, calling one another via CPI:</p>
+<pre><code class="language-text">programs/
+  market/          create_{skellam,gaussian,lognormal,dirichlet,bernoulli},
+                   buy_set, sell_set, buy_skellam_set, sell_skellam_set,
+                   delegate, commit
+  risk/            layers, bid, fill, lock
+  vault/           deposit, withdraw, fee, payout, draw_lp, settle
+  resolution/      submit_result, challenge, vote, finalize
+</code></pre>
+<p>Create is <strong>by family</strong>. Listing recipes (CPI, election, BTC) are <code>topic</code> / <code>tag</code> metadata. Do not add product-named create ixs.</p>
+<ul>
+<li><code>buy_set</code> / <code>sell_set</code> / <code>buy_skellam_set</code> / <code>sell_skellam_set</code> only on <strong>ER</strong> (<code>is_delegated=true</code>); <code>#[session_auth_or]</code>: a valid Session or the main wallet itself. L1 is the pre-Delegate test path.</li>
+<li><code>vault</code> / <code>resolution</code> <strong>never Delegate</strong>, and <strong>never accept Session</strong> as authority</li>
+<li><code>risk.bid</code> lock-collateral: main wallet; Session is rejected</li>
+<li>Close trading: Keeper main wallet <code>commit</code> + <code>undelegate</code>, writing $\theta$, $E$, $L_{\max}$, <code>trades_root</code> back to L1</li>
+<li>Settlement: after <code>finalize</code>, <code>vault.settle</code> reads the same $x^*$</li>
+</ul>
+<p>Every handler hard-codes Anchor constraints: signer, PDA seeds, mint, vault token owner. Remaining LMSR numerics go into <code>crates/math</code>. The IDL is committed to the repo; <code>packages/sdk</code> and <code>crates/client</code> are both generated from the same IDL; hand-written discriminators are forbidden.</p>
+<hr />
+<h2 id="6-core-algorithm-design">6. Core algorithm design</h2>
+<h3 id="61-distribution-containers-forked-by-underlying">6.1 Distribution containers (forked by underlying)</h3>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Create ix</th>
+<th>State</th>
+<th>What is bought</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gaussian</td>
+<td><code>create_gaussian_market</code></td>
+<td>1-D <code>theta[N]</code>, $N\le 1024$</td>
+<td>Interval $[a,b]$</td>
+</tr>
+<tr>
+<td>Lognormal</td>
+<td><code>create_lognormal_market</code></td>
+<td>1-D log grid</td>
+<td>Interval $[a,b]$</td>
+</tr>
+<tr>
+<td>Skellam / 2D score</td>
+<td><code>create_skellam_market</code></td>
+<td>2-D <code>theta[K+1][K+1]</code></td>
+<td>Cell set $S$ (1X2, AH, totals, score)</td>
+</tr>
+<tr>
+<td>Dirichlet</td>
+<td><code>create_dirichlet_market</code></td>
+<td>atoms / $C(K,n)$ / simplex (<code>layout</code>)</td>
+<td>Atoms or unions</td>
+</tr>
+<tr>
+<td>Bernoulli</td>
+<td><code>create_bernoulli_market</code></td>
+<td><code>theta_yes</code>, <code>theta_no</code></td>
+<td>YES / NO</td>
+</tr>
+</tbody>
+</table>
+<p>The family is locked at creation; trading does not switch containers. Football lines share one $\theta$; they are not extra families.</p>
+<h3 id="62-prior-p_0-f_0">6.2 Prior $P_0$ / $f_0$</h3>
+<ul>
+<li>Gaussian: $\mathcal{N}(\mu,\sigma^2)$ truncated to $\Omega$ then renormalized</li>
+<li>Log-normal: $\log X\sim\mathcal{N}(\mu,\sigma^2)$, grid on the log axis</li>
+<li>Independent Poisson: $P_0(i,j)\propto \lambda_H^i\lambda_A^j/(i!j!)$, Dixon–Coles multiplied by a low-score correction</li>
+<li>Dirichlet: $p_i=\alpha_i/\sum\alpha$</li>
+<li>Uniform: the family’s maximum entropy when there is no information</li>
+</ul>
+<p>Computed once at market creation and written into <code>p0_mass[]</code> (prior mass per cell); never changed afterward.</p>
+<h3 id="63-lmsr-fills-hot-path">6.3 LMSR fills (hot path)</h3>
+<p>State:</p>
+<p>$$<br />
+Z=\sum_k p0_k\,e^{\theta_k/\beta},\qquad<br />
+p_S=\frac{\sum_{k\in S}p0_k e^{\theta_k/\beta}}{Z}<br />
+$$</p>
+<p>Cost and marginal price:</p>
+<p>$$<br />
+C_S(q)=\beta\log\bigl((1-p_S)+p_S e^{q/\beta}\bigr)<br />
+$$</p>
+<p>$$<br />
+P_S(q)=\frac{p_S e^{q/\beta}}{1-p_S+p_S e^{q/\beta}}<br />
+$$</p>
+<p>$P_S(q)=\partial C_S/\partial q$ is the <strong>marginal price</strong> (in $(0,1)$), not the settlement payoff. One ordinary share still pays $1$ USDC if $c\in S$ (product §1.2.2). $p_S$ is the probability mass of $S$ (the discrete $\int_I f$). Do not mint $q\leftarrow q/p_S$ or pay $q/p_S$.</p>
+<p>Steps (ER <code>buy_set</code> / <code>buy_skellam_set</code>):</p>
+<ol>
+<li>Resolve $S$:<br />
+   - Gaussian / lognormal interval $[a,b]$: <code>interval_index</code> on both ends (log axis for lognormal), then inclusive node range (product §8.1.2.1). Not $\int_a^b$.<br />
+   - Typed Skellam template → mask via <code>crates/math::football</code><br />
+   - Else caller bitmask</li>
+<li>Validate $S$, balance ≥ $C+\phi C$</li>
+<li>Compute $p_S$, $C_S(q)$ in <code>crates/math</code> (one LMSR)</li>
+<li>For $k\in S$: $\theta_k\leftarrow\theta_k+q$, $E_k\leftarrow E_k+q$</li>
+<li>Update $L_{\max}=\max E_k$ (football: $\max_{ij}E_{ij}$)</li>
+<li>Debit $C$; fee $\phi C$ recorded on the platform fee ledger (<code>fees_accrued</code>). <code>claim_fees</code> credits the platform UserVault at any time. Fees never enter $C_P$.</li>
+<li>Emit event: new $p$, new $L_{\max}$</li>
+</ol>
+<p>Repeated buys of the same $S$ raise $p_S$ and raise $C$. That is the algorithm, not a manual markup and not wall-clock time. Overlapping hot intervals get more expensive; disjoint / cold intervals can get cheaper; sells press $C$ down. Trader copy: product §1.2.4 / FR-UI-47.</p>
+<p>Football-specific (SHALL):</p>
+<ul>
+<li><code>buy_skellam_set</code> is the only typed path; it MUST call the same <code>lmsr_update</code> as <code>buy_set</code></li>
+<li>Buying home MUST raise exact-score prices that sit in ${i&gt;j}$</li>
+<li>A later totals or handicap fill MUST add $q$ on the intersection cells</li>
+<li>Quarter line: two sequential half-fills of $q/2$ on the same book; fee is the sum</li>
+<li>After mixed fills, $p_{\mathrm{1}}+p_{\mathrm{X}}+p_{\mathrm{2}}=1$</li>
+<li>Masks and LMSR live in <code>crates/math</code>. Quote / WASM / programs call that crate only</li>
+</ul>
+<p>Engineering:</p>
+<ul>
+<li>1-D intervals maintain $\sum p0 e^{\theta/\beta}$ with a segment tree; one buy/sell is $O(\log N)$</li>
+<li>Football sets (home-win is about half the table) can even brute-force in $(11\times11)$ blocks and still be enough for ER</li>
+<li>All <code>exp/ln</code> go through LUTs; overflow saturates to the maximum legal Q64.64 value and rejects out-of-range $q$</li>
+<li><strong>Mask → shards (protocol split, not a product disable).</strong> Grid cells live 16 per shard. The fill locks shard 0 plus every extra shard that has a 1-bit (<code>WIDE_EXTRA_LIMIT</code> / <code>WIDE_BATCH</code> = 16). Solana caps a transaction at 64 accounts; MagicBlock allows one commit/undelegate intent per transaction. A typical interval is one <code>buy_set</code>. A mask that spans more than 16 extra shards (e.g. n=1024 full mask → 64 shards) is the <strong>same</strong> fill, split: <code>wide_begin</code> → accum in 16-shard batches → apply → finish. After <code>close_ts</code>, undelegate / L1 writeback is one shard per transaction, in order. This is delay. Quote, $\theta$, $E$, and the frozen $S$ are unchanged.</li>
+</ul>
+<h3 id="64-coverage-and-rho">6.4 Coverage and $\rho$</h3>
+<p>During trading, display:</p>
+<p>$$<br />
+\mathrm{Coverage}=\frac{C_R}{L_{\max}},\qquad<br />
+\hat\rho_S=\min_{k\in S}\min\bigl(1,C_{\max}/E_k\bigr)<br />
+$$</p>
+<p>At settlement (product §8.1 — do not mix $p$, $E$, and ticket face):</p>
+<p>$$<br />
+c=\mathrm{cell}(x^*),\quad<br />
+L=E(c)=\texttt{grid.exposure}[c],\quad<br />
+C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}},\quad<br />
+\rho=\min(1,C_{\max}/L)<br />
+$$</p>
+<p>Implied PDF (quotes / <code>cpm market pdf</code>), never used as $L$:</p>
+<p>$$<br />
+p_k=\mathrm{implied_probs}(p0,\theta,\beta)_k<br />
+$$</p>
+<p>Payout: $\lfloor\rho\cdot\mathrm{face}\rfloor$ with $\mathrm{face}=\mathrm{ticket_face}(q,n_{\mathrm{hit}},n_{\mathrm{parts}})$. Ordinary sets: one part. Quarter lines: same <code>skellam_masks</code> as fill; one of two legs $\Rightarrow q/2$. Dust goes to the reserve. <strong>FIFO is forbidden.</strong> $L$ is one cell, not $\sum_k E_k$.</p>
+<h3 id="65-risk-auction-matching">6.5 Risk-auction matching</h3>
+<p>Each layer has an independent priority queue: key = unit premium ascending, stably broken by timestamp.</p>
+<pre><code class="language-text">remain = D_layer
+while remain &gt; 0 and book not empty:
+    take lowest fee bid
+    fill = min(bid.D, remain)
+    lock collateral, accrue premium
+    remain -= fill
+</code></pre>
+<p>Do not solve CVaR on-chain. The suggested size $D_{\mathrm{required}}=L_{\max}$ is display-only.</p>
+<p>LP payout:</p>
+<p>$$<br />
+H_{A,D}(L)=\min(\max(L-A,0),D)<br />
+$$</p>
+<h3 id="66-settlement-waterfall">6.6 Settlement waterfall</h3>
+<pre><code class="language-text">1. finalize(x*)
+2. L = E(x*)
+3. Draw R_net (trading)
+4. If L ≤ R_net: H=0, do not draw C_P
+5. Else draw H_i on leftover shortfall only, then C_P^alloc if still short
+6. ρ = min(1, C_max / L)
+7. Pay all winners ρ·q
+8. If ρ==1 then S = max(R_net-L, 0)
+9. If C_R^final&gt;0 split S by α_R / α_P; else S to the platform
+10. Fees stay on the platform fee ledger; `claim_fees` credits the platform UserVault. Fees never enter C_P.
+</code></pre>
+<h3 id="67-finalization-not-written-automatically-by-an-oracle">6.7 Finalization (not written automatically by an oracle)</h3>
+<p><code>submit_result(value, evidence?)</code> → challenge window → <code>finalize</code> or <code>vote</code>.</p>
+<p>The algorithmic convention lives in the <code>price_rule</code> text and is executed by the committee; the chain stores only the result scalar. No oracle or feed account is read.</p>
+<hr />
+<h2 id="7-critical-sequences">7. Critical sequences</h2>
+<h3 id="71-placing-an-order">7.1 Placing an order</h3>
+<pre><code class="language-text">UI calls Quote.preview(S,q)     // read-only, may be slightly stale
+UI signs the Session transaction
+Trading Gateway → ER RPC
+ER: buy_set
+Indexer / WS pushes the new PDF
+L1 Vault fees and margin (per account model: bookkeeping inside ER, netted after close; or per-fill CPI debit of L1)
+</code></pre>
+<p>The funds model locks one option: <strong>an ER-internal margin mirror</strong>. The user first <code>vault.deposit</code>s to L1; available balance is mirrored to ER; the hot path only mutates the mirror; close / periodic Commit nets against L1. Per-fill <code>buy_set</code> cross-site CPI debit of L1 is forbidden.</p>
+<h3 id="72-market-creation-through-close">7.2 Market creation through close</h3>
+<pre><code class="language-text">create_* on L1 → open risk layers
+delegate market + grid → ER
+trading + auctions
+Keeper: clock &gt;= close_ts → stop buy_set and stop auction quote/fill
+Keeper: undelegate / commit
+Keeper: clock &gt;= risk_lock_ts → stop bid fill (risk_lock_ts SHALL NOT be after close_ts)
+enter report_window
+</code></pre>
+<h3 id="73-reporting-through-payout">7.3 Reporting through payout</h3>
+<pre><code class="language-text">submit_result → (challenge?) → finalize
+vault.settle(L, ρ)
+notify Indexer → app push
+</code></pre>
+<hr />
+<h2 id="8-precision-testing-and-security">8. Precision, testing, and security</h2>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Approach</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Precision</td>
+<td>On-chain, Quote, and WASM share the same <code>crates/math</code> test vectors</td>
+</tr>
+<tr>
+<td>Property tests</td>
+<td>Normalization $\sum p=1$; after buying $S$, $p_S$ does not fall; $\sum$ actually paid $\le C_{\max}$</td>
+</tr>
+<tr>
+<td>Invariants</td>
+<td>Product-specification section 12, run in CI</td>
+</tr>
+<tr>
+<td>Audit</td>
+<td>Anchor account checks, Vault withdraw authority, Delegate-scope whitelist</td>
+</tr>
+<tr>
+<td>Replay</td>
+<td>Per-user per-market nonce</td>
+</tr>
+<tr>
+<td>Sessions</td>
+<td>Session Key limits, expiry, revocability</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-suggested-directory-layout">9. Suggested directory layout</h2>
+<pre><code class="language-text">apps/web                 Next.js + PWA
+apps/android-twa         Official-site TWA, no independent business
+apps/committee           Committee back office (Next.js)
+crates/cli
+crates/math
+crates/math-wasm
+crates/client
+crates/services/*        gateway, market-api, quote, trading, indexer, keeper
+programs/*               market, risk, vault, resolution
+packages/sdk             TypeScript (Next.js)
+infra/                   k8s, terraform, dashboards
+</code></pre>
+<hr />
+<h2 id="10-credibility-and-tee">10. Credibility and TEE</h2>
+<p><strong>Conclusion: to raise credibility, first harden a verifiable public ledger. Do not treat TEE as a substitute for the committee or settlement. TEE only strengthens the claim that “the high-speed execution layer and automated evidence collection were not privately altered by the operator.”</strong></p>
+<h3 id="101-what-users-are-actually-afraid-of">10.1 What users are actually afraid of</h3>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Can TEE solve it?</th>
+<th>What should actually be relied on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Was the outcome changed by ops?</td>
+<td>No. CPI, elections, football, custom price algorithms — hardware does not know “the truth”</td>
+<td>Committee <code>submit_result</code> + challenge + $M/N$; evidence is public</td>
+</tr>
+<tr>
+<td>Was the Dec 1 BTC price invented after the fact?</td>
+<td>No. Hardware does not know the listing <code>price_rule</code></td>
+<td>Committee <code>submit_result</code> by <code>price_rule</code> + challenge + $M/N$</td>
+</tr>
+<tr>
+<td>Was LMSR on ER altered by the node?</td>
+<td><strong>This is TEE’s proper job.</strong> Prove the audited image is what ran</td>
+<td>Plus: funds on L1, Commit is replayable, <code>crates/math</code> is open source</td>
+</tr>
+<tr>
+<td>Can the high-speed layer abscond with the money?</td>
+<td>TEE alone cannot</td>
+<td><code>vault</code> / <code>resolution</code> never Delegate</td>
+</tr>
+<tr>
+<td>Would hiding the PDF make it more trustworthy?</td>
+<td>The opposite. A prediction book needs a public curve</td>
+<td>Do not use MagicBlock PER’s “default privacy” mode</td>
+</tr>
+</tbody>
+</table>
+<p>MagicBlock’s Private ER (Intel TDX) is primarily <strong>confidential state</strong>; clients call <code>verifyTeeRpcIntegrity</code> to check the TDX quote. This protocol’s PDF, $E$, and $L_{\max}$ <strong>must be public</strong>; do not stuff the whole book into a private ER. If TDX is used, use it for <strong>execution-integrity proofs</strong>, not book encryption.</p>
+<h3 id="102-credibility-main-path-must-exist-first">10.2 Credibility main path (must exist first)</h3>
+<ol>
+<li>Programs and <code>crates/math</code> are open source; Quote / WASM / chain share the same test vectors</li>
+<li>User funds, collateral, and payouts live only in the L1 Vault</li>
+<li>Outcomes can only be <code>submit_result</code>ed on-chain, with challenge and vote</li>
+<li>Anyone can recompute $C$, $L$, $\rho$ from public $\theta$, $E$, $x^*$</li>
+<li>The terminal state Committed back to L1 can be checked against the ER event log</li>
+</ol>
+<p>Without these five, adding TEE is only “another unverifiable box around an unverifiable box.”</p>
+<h3 id="103-tee-is-used-in-only-two-places">10.3 TEE is used in only two places</h3>
+<p><strong>A. ER execution attestation (worth doing)</strong></p>
+<p>Trading nodes run inside Intel TDX (or equivalent). Remote attestation binds:</p>
+<ul>
+<li>Program measurements (consistent with the published <code>market</code> / math-library hashes)</li>
+<li>Current <code>market</code> code version</li>
+<li>Recent state root or Commit hash</li>
+</ul>
+<p>Clients verify the quote before connecting to ER; proofs may be attached when Commit returns to L1, for audit. This answers “did the operator change LMSR,” not “what was the football score.”</p>
+<p><strong>B. Evidence-collection Keeper (optional)</strong></p>
+<p>A keeper may hash off-chain source material for the reporter. That hash is <code>evidence_hash</code> only. The program does not parse it, and it does not write $x^*$. Football / CPI / elections / prices are still submitted by the committee.</p>
+<h3 id="104-things-not-to-use-tee-for">10.4 Things not to use TEE for</h3>
+<ul>
+<li>Replacing committee finalization</li>
+<li>Computing a custom formula inside the enclave as the final $x^*$ and forbidding challenge</li>
+<li>Making user positions and the PDF a privacy book (credibility depends on being able to recompute)</li>
+<li>Assuming TDX has no side channels, Intel revocations, or vendor image-swap risk — proofs must bind measurements, and TCB rotation must be allowed</li>
+</ul>
+<h3 id="105-how-to-connect-with-magicblock">10.5 How to connect with MagicBlock</h3>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>This protocol</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ordinary ER</td>
+<td>Default trading execution layer; state is public</td>
+</tr>
+<tr>
+<td>TDX-hardened ER</td>
+<td>The same public accounts, plus quote verification; recommended for production trading nodes</td>
+</tr>
+<tr>
+<td>Private ER (account encryption + token gating)</td>
+<td>Not used for prediction-book main state</td>
+</tr>
+</tbody>
+</table>
+<p>Client: Trading Gateway / Web call the official integrity check when connecting to production ER; on failure, refuse to place orders rather than silently falling back to an unattested node.</p>
+<h3 id="106-decision">10.6 Decision</h3>
+<ul>
+<li><strong>Introduce TEE: yes, but narrowly scoped</strong> — ER node integrity + optional on-the-spot price evidence.</li>
+<li><strong>Do not</strong> prop up the entire credibility story with TEE, and do not weaken the committee or L1 funds isolation because of it.</li>
+</ul>
+<hr />
+<h2 id="11-relationship-to-system-architecture">11. Relationship to system architecture</h2>
+<ul>
+<li>Machines and networks: <code>system-architecture.md</code></li>
+<li>Product rules: <code>product-specification.md</code></li>
+<li>This document: languages, middleware, implementation constraints for LMSR / auctions / $\rho$, and the TEE boundary</li>
+<li>Read-path DDD / sqlx / associated-type transactions: <code>docs/architecture/ddd-sqlx.md</code></li>
+</ul>
+<p>Choices are locked: the user client is only Next.js (including PWA / TWA / wallet WebView). No native store apps. Contracts must be Anchor. LMSR lives only in <code>crates/math</code>. A parallel Flutter / RN second fill semantics must not grow.</p>
+<p>Funds authority, tiered storage, crash recovery, fill ledgers, Light, and data security are in <code>system-architecture.md</code> sections 9–12: Vault only on L1; receipted fills survive single-node crash, $\theta$ is replayed from the ledger; the book is public and recomputable; Light only archives already-closed books.</p>
+          </div>
+        </article>
+      </div>
+    </div>
+  </body>
+</html>

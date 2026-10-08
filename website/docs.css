@@ -1,0 +1,191 @@
+.docs-body {
+  min-height: 100vh;
+}
+
+.docs-shell {
+  padding-bottom: 3rem;
+}
+
+.docs-layout {
+  display: grid;
+  grid-template-columns: minmax(12rem, 15rem) minmax(0, 1fr);
+  gap: 2rem;
+  padding: 1.5rem 0 3rem;
+  align-items: start;
+}
+
+.docs-side {
+  position: sticky;
+  top: 1rem;
+  padding: 1rem 0;
+}
+
+.docs-nav {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.75rem;
+}
+
+.docs-nav a {
+  display: block;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid transparent;
+  color: var(--paper-dim);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+
+.docs-nav a:hover {
+  color: var(--amber-hot);
+}
+
+.docs-nav a.is-active {
+  color: var(--paper);
+  border-color: var(--rule);
+  background: rgba(212, 162, 74, 0.08);
+}
+
+.docs-article {
+  min-width: 0;
+  padding: 1.25rem 1.4rem 2rem;
+  border: 1px solid var(--rule);
+  background: rgba(23, 21, 15, 0.88);
+}
+
+.docs-status {
+  margin: 0 0 1rem;
+  color: var(--amber);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.markdown-body {
+  color: var(--paper-dim);
+  font-size: 0.9rem;
+  line-height: 1.65;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  color: var(--paper);
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+.markdown-body h1 {
+  font-size: clamp(2rem, 4vw, 2.8rem);
+  margin: 0 0 1rem;
+}
+
+.markdown-body h2 {
+  font-size: 1.7rem;
+  margin: 2.2rem 0 0.8rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--rule);
+}
+
+.markdown-body h3 {
+  font-size: 1.3rem;
+  margin: 1.5rem 0 0.55rem;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.75rem 0;
+}
+
+.markdown-body a {
+  color: var(--amber-hot);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.markdown-body code {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  color: var(--amber-hot);
+  background: rgba(212, 162, 74, 0.08);
+  padding: 0.1em 0.3em;
+}
+
+.markdown-body pre {
+  overflow-x: auto;
+  padding: 1rem;
+  border: 1px solid var(--rule);
+  background: #100e0b;
+}
+
+.markdown-body pre code {
+  background: none;
+  padding: 0;
+  color: var(--paper-dim);
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  margin: 1rem 0;
+  font-size: 0.82rem;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-body th {
+  color: var(--amber);
+  font-weight: 500;
+}
+
+.markdown-body blockquote {
+  margin: 1rem 0;
+  padding: 0.2rem 0 0.2rem 1rem;
+  border-left: 2px solid var(--amber);
+  color: var(--paper-dim);
+}
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 1.75rem 0;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  margin: 1rem 0;
+  border: 1px solid var(--rule);
+  background: #fff;
+}
+
+@media (max-width: 840px) {
+  .docs-layout {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  .docs-side {
+    position: static;
+  }
+
+  .docs-nav {
+    grid-template-columns: 1fr 1fr;
+  }
+}

@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>System architecture — Continuous</title>
+    <meta name="theme-color" content="#0e0d0b" />
+    <link rel="icon" href="../assets/icon-192.png" type="image/png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../styles.css" />
+    <link rel="stylesheet" href="../docs.css" />
+  </head>
+  <body class="docs-body">
+    <div class="site docs-shell">
+      <header class="wrap nav">
+        <a class="brand" href="../index.html">
+          <img
+            class="brand-mark"
+            src="../assets/icon-192.png"
+            width="36"
+            height="36"
+            alt="Continuous"
+          />
+          <span class="brand-text">
+            Continuous
+            <small>docs</small>
+          </span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="../index.html#flow">Flow</a>
+          <a href="../index.html#rules">Rules</a>
+          <a href="../index.html">Landing</a>
+          <a href="https://github.com/bamaao/continuous-pdf-prediction-market">GitHub</a>
+        </nav>
+      </header>
+
+      <div class="docs-layout wrap">
+        <aside class="docs-side" aria-label="Document list">
+          <p class="kicker">Library</p>
+          <nav class="docs-nav">
+          <a href="./readme.html">README</a>
+          <a href="./product-specification.html">Product specification</a>
+          <a href="./software-requirements-specification.html">SRS</a>
+          <a href="./risk-capital-guide.html">Risk capital guide</a>
+          <a href="./system-architecture.html" class="is-active">System architecture</a>
+          <a href="./technical-architecture.html">Technical architecture</a>
+          </nav>
+        </aside>
+        <article class="docs-article">
+          <p class="docs-status">System architecture</p>
+          <div class="markdown-body">
+<h1 id="system-architecture-continuous-pdf-prediction-market">System Architecture — Continuous PDF Prediction Market</h1>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Version</td>
+<td>1.3</td>
+</tr>
+<tr>
+<td>Product counterpart</td>
+<td><code>product-specification.md</code> v1.6</td>
+</tr>
+<tr>
+<td>Scope</td>
+<td>Web / PWA / CLI, business services, network, chain, server resource allocation</td>
+</tr>
+</tbody>
+</table>
+<p>This document only answers “which clients and machines make up the system, and how requests flow.” Frameworks and algorithms are in <code>technical-architecture.md</code>.</p>
+<p><img alt="System architecture" src="system-arch.png" /></p>
+<hr />
+<h2 id="1-overview">1. Overview</h2>
+<p>The system has six layers. Trading uses a low-latency path. Funds and settlement use Solana L1. Business queries use centralized services.</p>
+<pre><code class="language-text">┌─────────────── Access Layer ────────────────┐
+│  Web/PWA  Wallet WebView  CLI  Committee Console │
+└───────────┬──────────────────┬──────────────┘
+            │ HTTPS / WSS      │ Trading Session
+            ▼                  ▼
+┌──────── Edge ────────┐  ┌──────── Trading Path ────────┐
+│ CDN / WAF / Gateway  │  │ MagicBlock ER RPC            │
+└──────────┬───────────┘  └────────────┬─────────────────┘
+           ▼                           ▼
+┌──── Business Service Cluster ────┐     ┌──── On-chain Execution ────┐
+│ Quotes / Accounts / Auctions     │     │ buy_set on ER              │
+│ Market create / Committee / Clear│     │ L1 funds and settlement    │
+│ Index / Notify / Keeper          │     └───────▲────────────────────┘
+└──────────┬───────────────────────┘             │ Commit / submit_result
+           ▼                                     │
+┌──── Data and Middleware ────┐     ┌──── Solana L1 ────────┐
+│ PG / Redis / Object Store   │     │ Vault / Collateral / PDA │
+└─────────────────────────────┘     └───────────────────────┘
+</code></pre>
+<p>Principles:</p>
+<ul>
+<li><strong>Fill truth lives on-chain</strong> (ER trades; L1 funds and finalization)</li>
+<li><strong>Display and search live on the server</strong> (index database, WebSocket push)</li>
+<li><strong>Results must land on-chain via <code>submit_result</code></strong>; there is no off-chain private rewrite of the PDF</li>
+<li>One prediction book maps to one Vault and one risk-auction book</li>
+</ul>
+<hr />
+<h2 id="2-clients">2. Clients</h2>
+<h3 id="21-web-client">2.1 Web client</h3>
+<p>For traders, Risk LPs, and market browsing. In the browser:</p>
+<table>
+<thead>
+<tr>
+<th>Module</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Market lobby <code>/</code></td>
+<td>Search / page every indexed board (family and status, not a second create taxonomy)</td>
+</tr>
+<tr>
+<td>Trading board <code>/m/[id]</code></td>
+<td>Interval pick <strong>and</strong> football typed lines; coverage warning; <strong>implied PDF</strong> $p_k$ / score heatmap (not $E$); pre-bet ticket; rules strip; pending fill; public $x^*$ / $\rho$ after close — product §8.1, §14.6</td>
+</tr>
+<tr>
+<td>Wallet chrome</td>
+<td>Connect → SIWS → deposit → open / renew / revoke Session; revoke ≠ disconnect</td>
+</tr>
+<tr>
+<td>Risk auction <code>/auctions</code>, <code>/auction/[id]</code></td>
+<td>Published layers only; rates; collateral; current $L_{\max}$</td>
+</tr>
+<tr>
+<td>LP book <code>/lp</code></td>
+<td>This wallet’s $D_i$, $H$, premium, surplus claim</td>
+</tr>
+<tr>
+<td>Positions <code>/portfolio</code></td>
+<td>Tickets, Vault cash, estimated $\hat\rho$, settlement / refund claim</td>
+</tr>
+<tr>
+<td>Create <code>/create</code></td>
+<td>Distribution family + full field list; then the reviewer opens the board</td>
+</tr>
+<tr>
+<td>Committee <code>/committee</code></td>
+<td><code>submit_result</code> / evidence / challenge / vote (same Next.js app until it earns a split)</td>
+</tr>
+<tr>
+<td>Ops <code>/ops</code></td>
+<td>Read-only lag, coverage, Vault identity, $C_P$ pool, keeper heartbeat. No Vault withdraw</td>
+</tr>
+</tbody>
+</table>
+<p>Deploy: Next.js. Static assets via CDN; APIs via the gateway. Trades are <strong>client-signed</strong> in the browser, then go <strong>Trading Gateway → ER RPC</strong>; they do not traverse the ordinary business API on the hot path.</p>
+<p><strong>Web wallet integration (locked):</strong></p>
+<ol>
+<li><code>@solana/wallet-adapter-react</code>, Wallet Standard; must integrate Phantom, Solflare, Backpack  </li>
+<li>After connect, do <strong>SIWS</strong>; the BFF issues a JWT (queries / push only; never a substitute for on-chain signatures)  </li>
+<li>Deposit / withdraw / open Session: the main wallet popup signs L1  </li>
+<li>In-play <code>buy_set</code>: the Session Key signs; Trading Gateway only forwards  </li>
+<li>Framework, IDL, and Session details are in <code>technical-architecture.md</code> sections 2 and 5  </li>
+</ol>
+<h3 id="22-mobile-not-a-store-app">2.2 Mobile (not a store App)</h3>
+<p>No App Store / Play, and no Flutter / RN. Phones use <strong>the same Next.js stack</strong>:</p>
+<ul>
+<li>Safari / Chrome, or Add to Home Screen <strong>PWA</strong></li>
+<li><strong>In-wallet browser</strong> (Phantom / Solflare) opening this site — the primary mobile path</li>
+<li>Android home-screen icon: official-site <strong>TWA APK</strong>, not via Play</li>
+<li>In-play boards: WebSocket in the foreground; chrome Inbox for close / commit / settle alerts</li>
+</ul>
+<p>There is only one BFF / gateway contract. Distribution is in <code>technical-architecture.md</code> sections 2.2 / 2.9.</p>
+<h3 id="23-cli">2.3 CLI</h3>
+<p>For ops, market making, Keeper, and committee scripts. It does not replace a wallet App. <strong>Keeper writes</strong> (<code>close</code> / Commit / Undelegate) live here; the Next.js <code>/ops</code> page is read-only (SRS FR-UI-27 / FR-UI-28).</p>
+<table>
+<thead>
+<tr>
+<th>Command group</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>market create-*</code></td>
+<td>Create markets (football / macro / elections / daily price / binary)</td>
+</tr>
+<tr>
+<td><code>market close / undelegate</code></td>
+<td>Halt trading; write state back to L1</td>
+</tr>
+<tr>
+<td><code>trade buy-set</code></td>
+<td>Scripted orders, market making</td>
+</tr>
+<tr>
+<td><code>risk bid</code></td>
+<td>LP quotes and cancels</td>
+</tr>
+<tr>
+<td><code>resolve submit / challenge / vote / finalize</code></td>
+<td>Committee and bots</td>
+</tr>
+<tr>
+<td><code>keeper run</code></td>
+<td>Halt trading, lock risk, remind of the reporting window</td>
+</tr>
+<tr>
+<td><code>index status</code></td>
+<td>Indexer lag, ER health</td>
+</tr>
+</tbody>
+</table>
+<p>The CLI talks directly to chain RPC + the admin API, using the ops hot wallet or a multisig.</p>
+<h3 id="24-committee-console">2.4 Committee console</h3>
+<p>A standalone Web console (can also be embedded in the main site): markets awaiting report, evidence attachments, challenge list, votes, audit log. All writes still end as on-chain <code>submit_result</code> / <code>challenge</code> / <code>vote</code>.</p>
+<hr />
+<h2 id="3-service-split">3. Service split</h2>
+<table>
+<thead>
+<tr>
+<th>Service</th>
+<th>Responsibility</th>
+<th>Hot path?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>API Gateway</strong></td>
+<td>Auth, rate limit, routing, TLS termination</td>
+<td>Yes (queries)</td>
+</tr>
+<tr>
+<td><strong>BFF / Market API</strong></td>
+<td>Market metadata, templates, candlestick-style PDF snapshots, user position queries</td>
+<td>No</td>
+</tr>
+<tr>
+<td><strong>Trading Gateway</strong></td>
+<td>Session Key, assemble ER transactions, quote preview (does not write the final ledger)</td>
+<td><strong>Yes</strong></td>
+</tr>
+<tr>
+<td><strong>Quote Engine</strong></td>
+<td>Read-only $\theta$ snapshot; compute $C_S(q)$, $p_S$, $\hat\rho$</td>
+<td><strong>Yes</strong></td>
+</tr>
+<tr>
+<td><strong>Risk Auction API</strong></td>
+<td>Layers, order book, quote pre-check; fill instructions still go on-chain</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td><strong>Resolution API</strong></td>
+<td>Reporting window, evidence upload, challenge state; assemble on-chain instructions</td>
+<td>No</td>
+</tr>
+<tr>
+<td><strong>Indexer</strong></td>
+<td>Subscribe to ER + L1 logs; write Postgres</td>
+<td>Yes (consume)</td>
+</tr>
+<tr>
+<td><strong>Keeper</strong></td>
+<td>Time-based halt, undelegate, open the reporting window; writes inbox events</td>
+<td>No, but must be highly available</td>
+</tr>
+<tr>
+<td><strong>Object Store gateway</strong></td>
+<td>Committee evidence, event graphics, rules PDFs</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<p>On-chain programs (not traditional microservices, but part of the system):</p>
+<table>
+<thead>
+<tr>
+<th>Program</th>
+<th>Chain</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>continuous_pdf_market</code> (Anchor)</td>
+<td>L1 create / ER trade</td>
+<td>Market create, Delegate, <code>buy_set</code>, $\theta$ / $E$</td>
+</tr>
+<tr>
+<td><code>risk_auction</code></td>
+<td>L1; may use ER during the trading period</td>
+<td>Layers, quotes, lock collateral</td>
+</tr>
+<tr>
+<td><code>vault</code></td>
+<td><strong>L1 only</strong></td>
+<td>USDC custody, fees, payout, draw LP</td>
+</tr>
+<tr>
+<td><code>resolution</code></td>
+<td><strong>L1 only</strong></td>
+<td><code>submit_result</code>, challenge, vote, finalize</td>
+</tr>
+</tbody>
+</table>
+<p>Funds programs are not Delegated to ER, so the high-speed layer never holds withdrawal authority.</p>
+<hr />
+<h2 id="4-network-and-traffic">4. Network and traffic</h2>
+<h3 id="41-paths">4.1 Paths</h3>
+<table>
+<thead>
+<tr>
+<th>Traffic</th>
+<th>Path</th>
+<th>Latency target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pages, images</td>
+<td>User → CDN</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Market list, positions</td>
+<td>User → WAF → Gateway → Market API → PG/Redis</td>
+<td>&lt; 150 ms</td>
+</tr>
+<tr>
+<td>Real-time PDF / book</td>
+<td>User → WSS → Quote / Indexer push</td>
+<td>&lt; 50 ms</td>
+</tr>
+<tr>
+<td><strong>Place order</strong></td>
+<td>User → Trading Gateway → <strong>ER RPC</strong></td>
+<td><strong>&lt; 10 ms in-chain execution</strong> (excludes wallet confirmation)</td>
+</tr>
+<tr>
+<td>Market create</td>
+<td>User / CLI → L1 RPC</td>
+<td>Slot confirmation</td>
+</tr>
+<tr>
+<td>Halt write-back</td>
+<td>Keeper → MagicBlock Commit / Undelegate → L1</td>
+<td>Seconds</td>
+</tr>
+<tr>
+<td>Report / settlement transfer</td>
+<td>Committee / Keeper → L1 RPC</td>
+<td>Slot confirmation</td>
+</tr>
+</tbody>
+</table>
+<h3 id="42-domains-and-isolation">4.2 Domains and isolation</h3>
+<table>
+<thead>
+<tr>
+<th>Domain</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>www</code> / <code>app</code></td>
+<td>Web</td>
+</tr>
+<tr>
+<td><code>api</code></td>
+<td>Queries and non-hot trading</td>
+</tr>
+<tr>
+<td><code>quote</code> / <code>ws</code></td>
+<td>Quote WebSocket</td>
+</tr>
+<tr>
+<td><code>trade</code></td>
+<td>Trading Gateway (may colocate with ER)</td>
+</tr>
+<tr>
+<td><code>er-rpc</code></td>
+<td>MagicBlock nodes (terminals may reach them only via the Gateway)</td>
+</tr>
+<tr>
+<td><code>l1-rpc</code></td>
+<td>Self-hosted or vendor Solana RPC (not exposed naked to public users)</td>
+</tr>
+</tbody>
+</table>
+<p>ER and Trading Gateway deploy in the same region, same-city low latency; no transoceanic hop.</p>
+<h3 id="43-security-boundary">4.3 Security boundary</h3>
+<ul>
+<li>WAF: DDoS, CC, geo and rate</li>
+<li>Gateway: JWT / wallet-signed session, IP rate limit</li>
+<li>Trading: Session Key allowance, per-market rate, anomalous $q$ intercept</li>
+<li>L1 RPC: private network + vendor allowlist only</li>
+<li>Committee: hardware or multisig + audit log</li>
+<li>Keys: ops hot wallets in HSM / cloud KMS; they do not enter application images</li>
+</ul>
+<hr />
+<h2 id="5-data-landing">5. Data landing</h2>
+<table>
+<thead>
+<tr>
+<th>Store</th>
+<th>What it holds</th>
+<th>Who writes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Solana L1 PDA</td>
+<td>Market params, Vault, collateral, $x^*$, payout results</td>
+<td>Chain programs</td>
+</tr>
+<tr>
+<td>ER state</td>
+<td>$\theta$, $E$, in-play order traces</td>
+<td>ER transactions</td>
+</tr>
+<tr>
+<td>PostgreSQL</td>
+<td>Indexed markets, fills, positions, auction book, committee audit</td>
+<td>Indexer</td>
+</tr>
+<tr>
+<td>Redis</td>
+<td>Quote cache, coverage ratio, WS presence, rate limits</td>
+<td>Quote / Gateway</td>
+</tr>
+<tr>
+<td>Object store</td>
+<td>Evidence attachments, static assets</td>
+<td>Resolution / CDN origin</td>
+</tr>
+</tbody>
+</table>
+<p>PG is the query primary, <strong>not</strong> the fill ledger. Reconciliation follows the chain; the index is rebuildable.</p>
+<hr />
+<h2 id="6-servers-and-resource-allocation">6. Servers and resource allocation</h2>
+<p>Size for “50 concurrent live markets, peak 2,000 orders/s, 10,000 quote subscriptions.” Beyond that, scale Trading / Quote / WS horizontally by group.</p>
+<h3 id="61-application-nodes">6.1 Application nodes</h3>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Spec (per box)</th>
+<th>Count</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>API Gateway</td>
+<td>8C 16G, 25G NIC</td>
+<td>3</td>
+<td>Multi-AZ</td>
+</tr>
+<tr>
+<td>Market API / BFF</td>
+<td>8C 16G</td>
+<td>3</td>
+<td>Stateless</td>
+</tr>
+<tr>
+<td>Trading Gateway</td>
+<td>16C 32G, same AZ adjacent to ER</td>
+<td>3+</td>
+<td>Must not contend for cores with indexing</td>
+</tr>
+<tr>
+<td>Quote Engine</td>
+<td>16C 32G</td>
+<td>3</td>
+<td>Memory holds $\theta$ snapshots</td>
+</tr>
+<tr>
+<td>WS gateway</td>
+<td>8C 16G, high connection count</td>
+<td>3</td>
+<td>Separate process from Quote</td>
+</tr>
+<tr>
+<td>Risk / Resolution API</td>
+<td>4C 8G</td>
+<td>2</td>
+<td>May share a cluster with BFF but deploy separately</td>
+</tr>
+<tr>
+<td>Indexer</td>
+<td>8C 32G, NVMe</td>
+<td>2 (primary + hot standby)</td>
+<td>Must not drop slots</td>
+</tr>
+<tr>
+<td>Keeper</td>
+<td>4C 8G</td>
+<td>2 (primary/standby, different AZs)</td>
+<td>Halt and reporting window</td>
+</tr>
+<tr>
+<td>Committee console</td>
+<td>4C 8G</td>
+<td>2</td>
+<td>May fold into BFF</td>
+</tr>
+<tr>
+<td>CLI jump host</td>
+<td>2C 4G</td>
+<td>1</td>
+<td>Ops VPN only</td>
+</tr>
+</tbody>
+</table>
+<h3 id="62-data-nodes">6.2 Data nodes</h3>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Spec</th>
+<th>Count</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PostgreSQL primary</td>
+<td>16C 64G, 1T NVMe</td>
+<td>1</td>
+</tr>
+<tr>
+<td>PostgreSQL replica</td>
+<td>Same as primary</td>
+<td>2 (reads + backup)</td>
+</tr>
+<tr>
+<td>Redis cluster</td>
+<td>8C 32G</td>
+<td>3 primary 3 replica</td>
+</tr>
+<tr>
+<td>Object store</td>
+<td>Cloud OSS / S3</td>
+<td>Cross-region redundancy</td>
+</tr>
+<tr>
+<td>Logs / traces</td>
+<td>Dedicated cluster or managed</td>
+<td>Retain ≥ 30 days</td>
+</tr>
+</tbody>
+</table>
+<h3 id="63-chain-and-rpc">6.3 Chain and RPC</h3>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Config</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Solana L1 RPC</td>
+<td>Paid dedicated nodes from ≥ 2 vendors (primary + standby); do not mix with public free RPCs</td>
+</tr>
+<tr>
+<td>MagicBlock ER</td>
+<td>Production ER nodes per vendor SLA; if self-hosted, 16C 64G, same-city active-active</td>
+</tr>
+<tr>
+<td>Transaction send</td>
+<td>Trading Gateway connection pool pinned to ER; on failure, degrade to a user prompt; do not automatically fall back to L1 for hot trades</td>
+</tr>
+</tbody>
+</table>
+<h3 id="64-network-and-edge">6.4 Network and edge</h3>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Config</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CDN</td>
+<td>Global static; dynamic APIs need not be origin-cached</td>
+</tr>
+<tr>
+<td>WAF / DDoS</td>
+<td>One entry layer; separate policies for trade/ws</td>
+</tr>
+<tr>
+<td>Bandwidth</td>
+<td>Edge ≥ 5 Gbps burst; 10 GbE inside the trading AZ</td>
+</tr>
+<tr>
+<td>Certificates</td>
+<td>Wildcard + automatic rotation</td>
+</tr>
+<tr>
+<td>Timezone / NTP</td>
+<td>NTP on all nodes; <code>observe_ts</code> / <code>close_ts</code> always UTC</td>
+</tr>
+</tbody>
+</table>
+<h3 id="65-capacity-rules-of-thumb">6.5 Capacity rules of thumb</h3>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Rule of thumb</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Per-market grid 1024 + 121 score cells</td>
+<td>Quote memory on the order of tens of MB of snapshots per market</td>
+</tr>
+<tr>
+<td>2,000 tx/s</td>
+<td>Three 16C Trading Gateway boxes can hold; add groups beyond that</td>
+</tr>
+<tr>
+<td>PG</td>
+<td>Trade tables partitioned by <code>market_id</code>, archived monthly</td>
+</tr>
+<tr>
+<td>Redis</td>
+<td>Quote keys have short TTL; Indexer/ER subscriptions are the source</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="7-environments">7. Environments</h2>
+<table>
+<thead>
+<tr>
+<th>Environment</th>
+<th>Chain</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>local</td>
+<td>solana-test-validator + local ER simulation</td>
+<td>Development</td>
+</tr>
+<tr>
+<td>staging</td>
+<td>Solana devnet / testnet + test ER</td>
+<td>Integration, committee drills</td>
+</tr>
+<tr>
+<td>production</td>
+<td>Solana mainnet + production ER</td>
+<td>Real money</td>
+</tr>
+</tbody>
+</table>
+<p>Three isolated config sets: RPC, wallets, PG, Redis, and object buckets must not cross-contaminate.</p>
+<hr />
+<h2 id="8-observability-and-on-call">8. Observability and on-call</h2>
+<ul>
+<li>Metrics: ER latency, order success rate, indexer slot lag, coverage ratio, Vault balance, Keeper heartbeat</li>
+<li>Logs: structured; trace IDs from Web through Gateway</li>
+<li>Tracing: full sample or head-based sample on Trading and Quote</li>
+<li>Alerts: indexer lag, ER unreachable, Keeper missed close, reporting window with no submission, Vault imbalance</li>
+</ul>
+<hr />
+<h2 id="9-funds-safety">9. Funds safety</h2>
+<p>Funds safety is the floor of public trust. It does not rely on TEE, Postgres, or Light compression.</p>
+<h3 id="91-where-the-money-sits">9.1 Where the money sits</h3>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>Custody</th>
+<th>Forbidden</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User margin, trading proceeds</td>
+<td>L1 <code>vault</code> PDA, Circle USDC Token Account <strong>only</strong></td>
+<td>Into ops hot wallets, into ER withdrawable accounts, accept SOL or other coins, in-protocol FX</td>
+</tr>
+<tr>
+<td>Risk LP collateral</td>
+<td>This market’s L1 Risk Vault (same USDC mint)</td>
+<td>Count $C_R$ before lock; fund collateral with SOL or another mint</td>
+</tr>
+<tr>
+<td>Fees</td>
+<td>Booked at trade time on the platform fee ledger; <code>claim_fees</code> to the platform UserVault at any time. Never $C_P$</td>
+<td>Mix a fill’s fee into that same board’s $C_{\max}$ or $C_P$</td>
+</tr>
+<tr>
+<td>Platform adjustment fund <strong>pool</strong> $C_P^{\mathrm{pool}}$</td>
+<td>One protocol L1 vault PDA (Circle USDC). Boards only receive $C_P^{\mathrm{alloc}}$ at settlement</td>
+<td>Per-board $C_P$ wallets; unlimited guarantee; <code>admin_withdraw</code>; bake into LMSR</td>
+</tr>
+<tr>
+<td>Unsettled surplus</td>
+<td>Stay in this market’s Vault; split by $\alpha$ after <code>settle</code></td>
+<td>Arbitrary ops withdrawal</td>
+</tr>
+</tbody>
+</table>
+<p>Users first <code>vault.deposit</code>. ER only mirrors <strong>available balance</strong>; halt and L1 netting follow. An ER crash cannot make money “disappear”: L1 custody remains. In-play $\theta$ must not be discarded on the theory that “if it was not Committed it never happened” — $\theta$ is restored by replaying the trade log (see section 10.5).</p>
+<h3 id="92-authority">9.2 Authority</h3>
+<ul>
+<li>Program upgrades: multisig + timelock (e.g. 48h); pause withdrawals during the <code>vault</code> upgrade window  </li>
+<li>There is no <code>admin_withdraw</code>. The only outflows are: user withdrawal of unused margin, settlement payout, LP draw, $C_P$ allocation, surplus split, platform fee claim, VOID refund  </li>
+<li>Keeper / committee keys can only send allowed instructions; they cannot touch Token account owners  </li>
+<li>Session Key: per-market allowance, expiry, revocable; if lost, loss is capped at the authorized allowance  </li>
+<li>Same invariant tests before and after upgrades: $\sum$ amounts paid $\le C_{\max}$, Vault token balance = sum of the books  </li>
+</ul>
+<h3 id="93-what-happens-to-money-in-an-incident">9.3 What happens to money in an incident</h3>
+<table>
+<thead>
+<tr>
+<th>Incident</th>
+<th>Funds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Trading / Quote / PG down</td>
+<td>Untouched. Money is on L1</td>
+</tr>
+<tr>
+<td>ER node dead</td>
+<td>User principal is on L1; confirmed fills replay from the log per 10.5, restoring $\theta$ and positions. Do not roll receipted fills back to “never happened”</td>
+</tr>
+<tr>
+<td>Program bug</td>
+<td>Timelock pause + multisig; the insurance fund does not replace Vault accounting</td>
+</tr>
+<tr>
+<td>Malicious committee proposal</td>
+<td>Challenge window; after passage, $x^*$ still pays by the rules; no extra back-door transfer</td>
+</tr>
+</tbody>
+</table>
+<p>Reconciliation: hourly, the Indexer aligns each market’s Vault balance with $\sum$ margin $+R_{\mathrm{net}}+$ undrawn collateral. On mismatch, alert and halt that market’s outflows.</p>
+<hr />
+<h2 id="10-data-storage-and-node-crash-recovery">10. Data storage and node-crash recovery</h2>
+<h3 id="101-data-tiers">10.1 Data tiers</h3>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Data</th>
+<th>Storage</th>
+<th>If lost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S0 funds and terminal state</td>
+<td>Vault, collateral, $x^*$, settled payouts</td>
+<td><strong>L1 only</strong></td>
+<td>Must not be lost; the chain provides replicas</td>
+</tr>
+<tr>
+<td>S0.5 confirmed fills</td>
+<td>Each <code>buy_set</code> / auction fill receipt and order</td>
+<td>ER replication log + object-store trade log + Indexer persist; L1 periodically commits <code>trades_root</code></td>
+<td><strong>Must not vanish because a single node crashed</strong>. See 10.5</td>
+</tr>
+<tr>
+<td>S1 in-play hot state</td>
+<td>$\theta$, $E$, $L_{\max}$, ER margin mirror</td>
+<td>ER memory; periodic Commit back to L1</td>
+<td>Process death may lose memory; must be replayable from S0.5</td>
+</tr>
+<tr>
+<td>S2 query projection</td>
+<td>Fill list, position view, auction book, <strong>listing identity</strong>, <strong>listing applications / review log</strong>, <strong>board comments</strong>, <strong>fill-journal $S$</strong></td>
+<td>PG via <strong>sqlx in Rust Market API / Indexer</strong> (DDD repos; Next.js does not connect)</td>
+<td>Rebuildable from S0.5 / chain logs (listings/journal are off-chain helpers). Applications/review/comments are catalog-only (FR-UI-42–45), not settlement. PG down only means temporarily unqueryable</td>
+</tr>
+<tr>
+<td>S3 cache</td>
+<td>Quotes, coverage ratio, sessions</td>
+<td>Redis</td>
+<td>Recompute if lost; RPO is not measured</td>
+</tr>
+<tr>
+<td>S4 evidence and static</td>
+<td>Attachments, rules text</td>
+<td>Object store + hash on L1</td>
+<td>If files are lost, verify by hash; buckets must be cross-region</td>
+</tr>
+</tbody>
+</table>
+<p>Principle: <strong>S2/S3 must never be the ledger.</strong> Recovery order is L1 checkpoint → <strong>replay the trade log</strong> → rebuild PG — not “write balances back from a backup DB,” and not “treat uncommitted fills as never happened.”</p>
+<p>Application persistence is DDD + sqlx + associated-type <code>Context</code>: <code>docs/architecture/ddd-sqlx.md</code>. <code>listing</code>, <code>listing_application</code>, <code>review_log</code>, <code>market_comment</code>, <code>fill_journal</code>, and <code>market_proj</code> live in Postgres (local machine service or production). Memory is a cache; restart reloads from PG. Comments are accepted only for an approved indexed board. Listing applications need reviewer approve, then the reviewer signs on-chain create (reviewer is owner).</p>
+<h3 id="102-backups">10.2 Backups</h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Backup</th>
+<th>RPO / RTO (target)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>L1</td>
+<td>The chain itself + self-hosted RPC from two vendors</td>
+<td>RPO=0 (confirmed transactions)</td>
+</tr>
+<tr>
+<td>ER</td>
+<td>High-frequency state-root snapshots + last L1 Commit</td>
+<td>See 10.3</td>
+</tr>
+<tr>
+<td>PG</td>
+<td>Streaming replica + daily local + cross-region PITR 7 days</td>
+<td>RPO ≤ 1 min, RTO ≤ 15 min (promote replica)</td>
+</tr>
+<tr>
+<td>Redis</td>
+<td>Do not back up as a ledger; AOF only to speed warmup</td>
+<td>RTO ≤ 2 min start with empty cache</td>
+</tr>
+<tr>
+<td>Object store</td>
+<td>Cross-region replication, versioning, deletion protection</td>
+<td>RPO ≈ 0</td>
+</tr>
+<tr>
+<td>Keys</td>
+<td>Multi-region KMS; Keeper primary/standby in different AZs</td>
+<td>If lost, rotate; do not copy private keys from disk</td>
+</tr>
+</tbody>
+</table>
+<h3 id="103-how-each-node-comes-back">10.3 How each node comes back</h3>
+<table>
+<thead>
+<tr>
+<th>Node</th>
+<th>Recovery</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gateway / BFF / App</td>
+<td>Stateless; Kubernetes restart is enough</td>
+</tr>
+<tr>
+<td>Trading Gateway</td>
+<td>No local ledger; reconnect to ER; in-flight signed txs follow chain receipts (at-least-once)</td>
+</tr>
+<tr>
+<td>Quote</td>
+<td>Rebuild memory from Redis or ER/Indexer $\theta$ snapshot; do not treat stale cache as fills</td>
+</tr>
+<tr>
+<td>Indexer</td>
+<td>Replay from <code>last_slot</code> via Yellowstone; drop from read traffic if lag exceeds the threshold</td>
+</tr>
+<tr>
+<td>Keeper</td>
+<td>Standby takes over if primary dies; instructions are idempotent (the same <code>close_ts</code> cannot close twice)</td>
+</tr>
+<tr>
+<td>PG primary</td>
+<td>Promote replica; apps switch connection string</td>
+</tr>
+<tr>
+<td><strong>ER</strong></td>
+<td>Hot standby takes over the same Delegated accounts; if that fails, replay from “$\theta$ at last L1 Commit” + “trade log after that Commit” through the last receipted fill before the crash, then Delegate to a new ER. See 10.5</td>
+</tr>
+<tr>
+<td>Committee console</td>
+<td>Stateless; proposals live on L1</td>
+</tr>
+</tbody>
+</table>
+<p>ER must have a <strong>Commit cadence</strong>: do not wait only for <code>close_ts</code>. In production, at a fixed interval (e.g. every 30–60s or every N fills) checkpoint $\theta$, $E$, <code>trades_root</code>, and the margin mirror back to L1. Commit is a checkpoint that speeds recovery; <strong>it is not the criterion for whether a fill exists</strong>.</p>
+<h3 id="104-drills">10.4 Drills</h3>
+<p>Once a month: kill Indexer, kill Keeper, kill PG primary, kill a single ER. Verify Vault books unchanged, <strong>every receipted fill still present</strong>, $\theta$ matches replay, the index can catch up, and halt still fires. An unrehearsed recovery plan does not exist.</p>
+<h3 id="105-fills-must-survive-node-crashes">10.5 Fills must survive node crashes</h3>
+<p>Nodes can die. <strong>Fills that have already been established for the user cannot.</strong></p>
+<p>$\theta$ is not the raw ledger; it is a function of the prior plus the fill sequence:</p>
+<p>$$\theta_t = \mathrm{Update}(\theta_0,\; \mathrm{trade}_1,\ldots,\mathrm{trade}_t)$$</p>
+<p>So as long as the fill sequence exists, hot state can be replayed. The earlier line that “fills between two L1 Commits may be lost” is withdrawn: the Commit interval only affects where replay starts, not whether a fill exists.</p>
+<h4 id="1051-when-a-fill-is-considered-established">10.5.1 When a fill is considered established</h4>
+<p>All of the following must hold before the user sees “filled” and before the fill enters the log:</p>
+<ol>
+<li>ER (or L1) has executed the <code>buy_set</code> / risk-auction fill instruction  </li>
+<li>A <strong>signed receipt</strong> is returned: <code>tx_sig</code> or ER sequence number, <code>market_id</code>, wallet, <code>nonce</code>, set / quantity, amount paid, $E$ increment, post-execution state root  </li>
+<li>The receipt has been written to a <strong>replication-log majority</strong> (at least 2 copies, different machines; see below)</li>
+</ol>
+<p>Gateway reports only <code>pending</code> until the receipt is durable. If the user refreshes and sees pending, retry with the same <code>nonce</code>; on-chain idempotency prevents double spend. A request without a receipt <strong>was never a fill</strong>; that is not the same as “a fill was lost.”</p>
+<h4 id="1052-the-log-has-at-least-two-paths-that-do-not-share-fate">10.5.2 The log has at least two paths that do not share fate</h4>
+<table>
+<thead>
+<tr>
+<th>Replica</th>
+<th>What it writes</th>
+<th>If it fails alone</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ER replication log (primary + sync standby, or MagicBlock sequencer log)</td>
+<td>Per-fill order, state root</td>
+<td>Standby takes over and continues the same sequence</td>
+</tr>
+<tr>
+<td>Trade-log object store (append-only per <code>market_id</code>)</td>
+<td>The same receipt; history is immutable</td>
+<td>Indexer / new ER replays from here</td>
+</tr>
+<tr>
+<td>Indexer → PG</td>
+<td>Query projection</td>
+<td>Replay from the log; the user’s list is temporarily empty; the fill is still there</td>
+</tr>
+<tr>
+<td>Client receipt</td>
+<td>The user can present it locally</td>
+<td>In a dispute, check against the log / chain</td>
+</tr>
+</tbody>
+</table>
+<p>L1 does not require every fill to land on mainnet immediately. Periodic Commit includes the <code>trades_root</code> (Merkle) up to that point, to audit that “the log was not rewritten after the fact.” Funds still only recognize the Vault.</p>
+<p>Forbidden:</p>
+<ul>
+<li>Store fills only in a single ER’s memory  </li>
+<li>Store fills only in PG and “guess” from the DB when ER dies  </li>
+<li>Tell the user it filled before the receipt is in hand  </li>
+<li>On recovery, revert receipted fills to unfilled (unless the whole market is VOID under product rules, and that is a governance decision, not the crash default)</li>
+</ul>
+<h4 id="1053-how-fills-survive-each-failure">10.5.3 How fills survive each failure</h4>
+<table>
+<thead>
+<tr>
+<th>What failed</th>
+<th>Fills</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gateway / BFF / App</td>
+<td>No books. Receipts live in the ER log and on the client</td>
+</tr>
+<tr>
+<td>Quote</td>
+<td>No fills. Restart and pull $\theta$</td>
+</tr>
+<tr>
+<td>Indexer or PG</td>
+<td>Fills are in the log and ER. Catch up slots and replay; the list comes back</td>
+</tr>
+<tr>
+<td>Redis</td>
+<td>Irrelevant</td>
+</tr>
+<tr>
+<td>Single ER</td>
+<td>Standby continues from the same replication log; or a new ER replays from the L1 $\theta$ checkpoint + the log. User positions, amounts paid, and order are unchanged</td>
+</tr>
+<tr>
+<td>Entire ER cluster + object store gone at once</td>
+<td>This is a dual-active datacenter-class incident. Intervals whose <code>trades_root</code> is already Committed can still be audited; the last few seconds without a committed root require manual reconciliation of client receipts against L1 margin netting. <strong>The design goal is that this never happens</strong>: the log bucket and the ER log must be in different AZs / different vendors</td>
+</tr>
+</tbody>
+</table>
+<p>Replay rule: execute official <code>crates/math</code> in strict <code>nonce</code> / sequence order; the resulting $\theta$, $E$, $L_{\max}$ must match the state root of the last receipt before the crash. On mismatch, halt the market and alert; <strong>do not delete fills to force alignment</strong>.</p>
+<p>Funds side: margin deductions for filled trades follow the receipt; L1 Vault nets at the next Commit / halt. Do not wipe bought positions and refund because a node died, unless the user actively closes under product rules or the whole market is VOID.</p>
+<hr />
+<h2 id="11-light-protocol-rent-savings-for-cold-data-only-not-for-the-hot-path-or-funds">11. Light Protocol: rent savings for cold data only; not for the hot path or funds</h2>
+<p>Light (ZK Compression) puts account data in a compression tree and leaves only a hash on-chain; <strong>updates need a validity proof and UTXO-style invalidation of old leaves</strong>. Throughput and CU fit “many accounts, rarely updated,” not a book that mutates $\theta$ every second.</p>
+<table>
+<thead>
+<tr>
+<th>Data</th>
+<th>Use Light?</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vault / collateral / transfers</td>
+<td><strong>No</strong></td>
+<td>The funds path cannot depend on proof latency, the Forester queue, or RPC-supplied leaf data</td>
+</tr>
+<tr>
+<td>In-trade $\theta$, $E$, <code>buy_set</code></td>
+<td><strong>No</strong></td>
+<td>Every fill would need a proof + a larger transaction, which conflicts with the ER &lt;10 ms target</td>
+</tr>
+<tr>
+<td>Active market-parameter PDA</td>
+<td><strong>No</strong></td>
+<td>Halt, Delegate, and settlement need in-place read/write</td>
+</tr>
+<tr>
+<td><strong>CLOSED</strong> grid archives</td>
+<td><strong>Allowed</strong></td>
+<td>Thousands of historical books with 256–1024 cells occupy rent; compress into compressed accounts, leave the root on-chain, query via Photon / a self-built index</td>
+</tr>
+<tr>
+<td>Settled position receipts / historical fill tickets</td>
+<td><strong>Allowed</strong></td>
+<td>Many users; written once and almost never updated</td>
+</tr>
+<tr>
+<td>Original committee evidence</td>
+<td><strong>Do not use Light</strong></td>
+<td>Put it in object storage; L1 stores only the hash</td>
+</tr>
+</tbody>
+</table>
+<p>Try these cost levers first, then consider Light:</p>
+<ol>
+<li>Keep hot state on ER; do not park large grids on L1 long-term  </li>
+<li>After close and <code>settle</code>, <strong>close accounts and reclaim rent</strong> (<code>close</code> the grid buffer); do not let dead markets occupy rent forever  </li>
+<li>Do not model positions as “one L1 PDA per user per market”  </li>
+<li>If that is still not enough, compress <strong>closed markets</strong> into Light  </li>
+</ol>
+<p>If Light is adopted: only an <code>archive_market</code> instruction that compresses settled read-only state; query recovery goes through the index. <code>buy_set</code> / <code>vault.settle</code> must not touch compressed accounts. The indexer must also subscribe to compression events, or historical markets vanish in the App.</p>
+<hr />
+<h2 id="12-data-security">12. Data security</h2>
+<p>Funds safety answers “can money be moved.” Data security answers “who can read, who can write, and what happens if it leaks.” About half of this protocol’s data <strong>must be public</strong> (otherwise $\rho$ cannot be recomputed); the other half must be locked down.</p>
+<h3 id="121-classification">12.1 Classification</h3>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Examples</th>
+<th>Public?</th>
+<th>Requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Public ledger</td>
+<td>Market params, $f$ / $P$, fills, $E$, $x^*$, $\rho$, payouts</td>
+<td><strong>Must be public</strong></td>
+<td>Recomputable; do not encrypt the book</td>
+</tr>
+<tr>
+<td>Secret</td>
+<td>Program upgrade keys, Keeper / committee hot keys, KMS, RPC tokens, DB passwords</td>
+<td>Not public</td>
+<td>Least privilege, hardware or cloud KMS, audit</td>
+</tr>
+<tr>
+<td>Restricted</td>
+<td>IP, devices, KYC (if any), original committee evidence</td>
+<td>Not on-chain</td>
+<td>Encrypted at rest, access audit, time-limited deletion</td>
+</tr>
+<tr>
+<td>Internal</td>
+<td>Logs, traces, metric tags</td>
+<td>Not public</td>
+<td>Redact: wallets may remain; IP does not enter logs by default</td>
+</tr>
+</tbody>
+</table>
+<p>There is no “private position” on-chain. A user’s order is public. Product copy must say so; do not promise on-chain anonymity.</p>
+<h3 id="122-encryption-in-transit-and-at-rest">12.2 Encryption in transit and at rest</h3>
+<ul>
+<li><strong>In transit</strong>: site-wide TLS 1.2+; ER / L1 RPC, PG, Redis, and NATS all use TLS; no plaintext to the public internet  </li>
+<li><strong>At rest</strong>: cloud disks / PG / object store use KMS-managed encryption (AES-256); backups are encrypted the same way; keys are not stored with the backups  </li>
+<li><strong>Object-store evidence</strong>: SSE-KMS, private bucket, readable only by the Resolution service role; L1 stores only <code>sha256</code>  </li>
+<li><strong>Redis</strong>: AUTH + TLS; no private keys, no Session Key plaintext seeds  </li>
+<li><strong>Laptops / jump hosts</strong>: disk encryption; do not copy production DB dumps home  </li>
+</ul>
+<p>The public ledger is plaintext on L1/ER by design, not a vulnerability. Do not use Light or TEE to encrypt the PDF as a “data-security” measure — that destroys recomputability.</p>
+<h3 id="123-access-control">12.3 Access control</h3>
+<table>
+<thead>
+<tr>
+<th>Who</th>
+<th>What they can touch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Anonymous user</td>
+<td>Public quotes, market params</td>
+</tr>
+<tr>
+<td>Logged-in wallet</td>
+<td>Own deposit / order / position queries (others can also see fills on-chain)</td>
+</tr>
+<tr>
+<td>Committee</td>
+<td>This market’s report / challenge / vote; matching prefix in the evidence bucket</td>
+</tr>
+<tr>
+<td>Ops read-only</td>
+<td>PG read replica, dashboards; no Vault instructions</td>
+</tr>
+<tr>
+<td>Keeper</td>
+<td>Only <code>close</code> / <code>undelegate</code> / open the reporting window</td>
+</tr>
+<tr>
+<td>Upgrade multisig</td>
+<td>Program upgrades, inside the timelock</td>
+</tr>
+</tbody>
+</table>
+<p>PG uses separate roles: Indexer write-only, API read-only on necessary tables; no superuser attached to business processes. Object storage is isolated by the <code>evidence/{market_id}/</code> prefix. Revoke IAM and multisig immediately on departure.</p>
+<h3 id="124-keys-and-sessions">12.4 Keys and sessions</h3>
+<ul>
+<li>Upgrade authority and Vault are never a single-person hot key  </li>
+<li>Keeper / reporting bots: KMS-signed, memory only, never to disk; primary/standby in different AZs with different keys  </li>
+<li>Session Key: one-shot authorization, allowance, expiry, user-revocable; the client does not write plaintext into LocalStorage  </li>
+<li>Seed phrases never enter the server  </li>
+<li>Rotation: rotate RPC tokens and DB passwords on a schedule; on leak, revoke per the incident response  </li>
+</ul>
+<h3 id="125-logs-privacy-compliance">12.5 Logs, privacy, compliance</h3>
+<ul>
+<li>Default log fields: <code>market_id</code>, <code>tx_sig</code>, truncated <code>pubkey</code>, error code; <strong>do not log</strong> phone, government id, or plaintext IP (when risk control needs it: hash + short TTL)  </li>
+<li>If KYC is done: a separate subsystem, isolated from the trading DB; ID numbers never written on-chain  </li>
+<li>Retention: finance and settlement related ≥ regulatory requirement  </li>
+</ul>
+<h3 id="126-injection-privilege-escalation-backup-leaks">12.6 Injection, privilege escalation, backup leaks</h3>
+<ul>
+<li>All API queries are parameterized; no concatenated SQL  </li>
+<li>Object-store files are fetched by hash only, not by user-controlled path traversal  </li>
+<li>Committee uploads: type allowlist, size cap, antivirus / content scan before entering the bucket  </li>
+<li>PG backups and log exports are treated as secret; recovery drills use redacted copies  </li>
+<li>If the index DB is exfiltrated: the attacker gets fills that were already crawlable on-chain  </li>
+</ul>
+<h3 id="127-incidents">12.7 Incidents</h3>
+<p>Key leak: rotate immediately, pause upgrades, inspect Vault instruction logs.<br />
+PG leak: disclose scope (which data was already public on-chain), rotate DB secrets.<br />
+Evidence-bucket leak: notify committee members per market, rotate bucket keys; on-chain hashes still verify authenticity.  </p>
+<p>Data security does not replace section 9 funds safety: even if the DB is stolen, it must not enable one extra USDC transfer.</p>
+<hr />
+<h2 id="13-mapping-to-the-product-flow">13. Mapping to the product flow</h2>
+<table>
+<thead>
+<tr>
+<th>Product step</th>
+<th>System landing</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Choose distribution, create market</td>
+<td>Web/CLI → Market API → L1 <code>create_*</code></td>
+</tr>
+<tr>
+<td>Trading gets more expensive as you buy</td>
+<td>Web / PWA / Wallet WebView → Trading Gateway → ER <code>buy_set</code></td>
+</tr>
+<tr>
+<td>Risk auction</td>
+<td>Web → Risk API + L1/ER quote instructions</td>
+</tr>
+<tr>
+<td>Halt trading</td>
+<td>Keeper → Undelegate / Commit</td>
+</tr>
+<tr>
+<td>Committee report</td>
+<td>Console/CLI → L1 <code>submit_result</code></td>
+</tr>
+<tr>
+<td>Settlement payout</td>
+<td>L1 <code>settle</code> reads $x^*$, transfers from Vault</td>
+</tr>
+</tbody>
+</table>
+<p>Detailed algorithms and framework choices are in <code>technical-architecture.md</code>.</p>
+          </div>
+        </article>
+      </div>
+    </div>
+  </body>
+</html>

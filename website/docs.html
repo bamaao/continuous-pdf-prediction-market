@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="refresh" content="0; url=./docs/readme.html" />
+    <link rel="canonical" href="./docs/readme.html" />
+    <title>Docs — Continuous</title>
+    <script>
+      (function () {
+        var params = new URLSearchParams(window.location.search);
+        var doc = params.get("doc") || "README";
+        var map = {
+          README: "readme",
+          readme: "readme",
+          "product-specification": "product-specification",
+          "software-requirements-specification": "software-requirements-specification",
+          "risk-capital-guide": "risk-capital-guide",
+          "system-architecture": "system-architecture",
+          "technical-architecture": "technical-architecture",
+        };
+        var slug = map[doc] || "readme";
+        window.location.replace("./docs/" + slug + ".html");
+      })();
+    </script>
+  </head>
+  <body>
+    <p><a href="./docs/readme.html">Open docs</a></p>
+  </body>
+</html>
