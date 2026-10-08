@@ -159,3 +159,7 @@ Staging (Linux): prep with `scripts/staging-prep-ubuntu.sh` or `scripts/staging-
 Listing names and the fill journal live in **local Postgres**, not process memory. A Market API restart reloads them. `ALLOW_MEMORY_ONLY=1` is only for unit tests.
 
 Web talks to `market-api` (`:8080`), Trading Gateway (`:8081`), and local RPC. Quotes come from `crates/math` (WASM crate + Market API). Do not reimplement LMSR in TypeScript. Persistence: `docs/architecture/ddd-sqlx.md`.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
