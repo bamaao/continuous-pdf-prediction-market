@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "note": "Realistic English listing copy for Playwright lifecycle / video demos. Stamp placeholders use {stamp}.",
+  "deposit_usdc": 50000,
+  "fund_cp_usdc": 25,
+  "families": {
+    "Skellam": {
+      "title": "EPL Matchday — Arsenal vs Chelsea ({stamp})",
+      "event": "English Premier League: Arsenal (home) vs Chelsea (away), kickoff weekend fixture",
+      "description": "Trade the full-time score difference (Arsenal home minus Chelsea away) as a Skellam outcome. Cover and listing stay on this EPL football match. Committee reports the official FT scoreline from the league feed. Trading closes at kickoff; the committee report window opens at the same time as close (no early YES). Risk LPs may quote published layers for payout coverage after the market opens.",
+      "tags": "football, epl, arsenal, chelsea, skellam",
+      "topic": "epl-ars-che-{stamp}",
+      "tag_release": "md-{stamp}",
+      "category_hint": "sports",
+      "buy_shares": "3",
+      "ticket": "1X2 Home",
+      "outcome": { "home": "2", "away": "1" },
+      "evidence": "Official FT result: Arsenal 2–1 Chelsea (league match centre + broadcast graphic).",
+      "cover": "skellam.jpg",
+      "auction_capacity_hint": "Quote a thin layer so the desk shows a live risk quote after fill."
+    },
+    "Gaussian": {
+      "title": "US CPI — 2026 Q3 YoY % ({stamp})",
+      "event": "United States CPI-U year-over-year percent for 2026 Q3 as published by the Bureau of Labor Statistics",
+      "description": "Continuous scalar market on the US headline CPI YoY print for 2026 Q3 (percent). Cover and listing stay on US inflation / consumer prices. Grid is a coarse n=8 demo for local lifecycle video; production listings may use a finer grid. Committee reports the BLS headline YoY figure for that quarter’s release. Settlement uses the reported scalar x*; risk capital covers peak liability through the auction book.",
+      "tags": "macro, cpi, inflation, us, gaussian",
+      "topic": "us-cpi-q3-2026-{stamp}",
+      "tag_release": "bls-q3-{stamp}",
+      "category_hint": "macro",
+      "cover": "gaussian.jpg",
+      "buy_shares": "2",
+      "n_grid": "8",
+      "outcome": { "scalar": "3.2" },
+      "evidence": "BLS CPI-U YoY for 2026 Q3 release: 3.2% (official news release PDF / API table)."
+    },
+    "Lognormal": {
+      "title": "SOL/USD — 7-day close spot ({stamp})",
+      "event": "Solana (SOL) spot USD price at the 7-day window close (reference: major CEX index mid)",
+      "description": "Lognormal-style continuous market on SOL/USD spot at the scheduled close. Cover and listing stay on crypto / Solana trading. Committee reports the reference index mid agreed in the listing at close_ts. Traders buy density on cells; LPs quote layers for coverage. Coarse n=8 grid for local lifecycle video.",
+      "tags": "crypto, solana, sol, spot, lognormal",
+      "topic": "sol-usd-7d-{stamp}",
+      "tag_release": "spot-{stamp}",
+      "category_hint": "crypto",
+      "cover": "lognormal.jpg",
+      "buy_shares": "1",
+      "n_grid": "8",
+      "outcome": { "scalar": "148500" },
+      "evidence": "SOL/USD reference index mid at close: 148.50 USD (×1000 demo units → 148500 on the coarse grid)."
+    },
+    "Dirichlet": {
+      "title": "City mayoral primary — vote share atoms ({stamp})",
+      "event": "Municipal primary: share of certified votes across the top listed candidates (atoms)",
+      "description": "Dirichlet / categorical demo for a city mayoral primary: each atom is a candidate. Cover and listing stay on municipal voting / ballot day. Traders take sets over atoms; the committee reports the winning atom (certified plurality) after polls close. Bond and report window follow Protocol policy. Integration video only — not a live political product.",
+      "tags": "politics, election, mayoral, primary, dirichlet",
+      "topic": "mayor-primary-{stamp}",
+      "tag_release": "cert-{stamp}",
+      "category_hint": "politics",
+      "cover": "dirichlet.jpg",
+      "buy_shares": "2",
+      "outcome": { "atom": "0" },
+      "evidence": "Certified plurality: atom 0 (Candidate A) per city clerk canvass summary."
+    },
+    "Bernoulli": {
+      "title": "Fed cuts rates at the next FOMC? ({stamp})",
+      "event": "Binary: does the FOMC announce a cut in the target range at the next scheduled meeting?",
+      "description": "YES if the FOMC statement lowers the federal funds target range versus the prior meeting; NO otherwise (hold or hike). Cover and listing stay on Fed / rate-decision day. Early occurrence is off for the happy-path video (use Halt/VOID branch fixtures separately). Committee submits YES/NO with off-chain evidence (statement URL + hash).",
+      "tags": "macro, fed, fomc, rates, bernoulli",
+      "topic": "fomc-cut-{stamp}",
+      "tag_release": "fomc-{stamp}",
+      "category_hint": "macro",
+      "cover": "bernoulli.jpg",
+      "buy_shares": "5",
+      "outcome": { "yes": true },
+      "evidence": "FOMC statement: target range lowered 25 bp vs prior meeting (federalreserve.gov release)."
+    }
+  }
+}

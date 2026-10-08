@@ -6,6 +6,9 @@ For each family (Skellam, Gaussian, Lognormal, Dirichlet, Bernoulli):
   → wait close → resolve Open window → Submit result → Finalize → Lock ρ
 
 Outputs: tmp/playwright-lifecycle/report.md + report.json + per-family screenshots.
+
+Video (optional): set LIFECYCLE_VIDEO=1 — or use scripts/playwright-lifecycle-video.py
+for one family main-flow WebM under tmp/playwright-lifecycle/video/.
 """
 
 from __future__ import annotations
@@ -32,6 +35,53 @@ RPC = os.environ.get("RPC_URL", "http://127.0.0.1:8899")
 OUT = ROOT / "tmp" / "playwright-lifecycle"
 CLOSE_IN = int(os.environ.get("LIFECYCLE_CLOSE_IN", "100"))
 FAMILIES = os.environ.get("LIFECYCLE_FAMILIES", "Skellam,Gaussian,Lognormal,Dirichlet,Bernoulli").split(",")
+# Set LIFECYCLE_VIDEO=1 to record a WebM under OUT/video/ (one family + LIFECYCLE_BRANCHES=0 is best).
+RECORD_VIDEO = os.environ.get("LIFECYCLE_VIDEO", "0") == "1"
+VIDEO_DIR = Path(os.environ.get("LIFECYCLE_VIDEO_DIR", str(OUT / "video")))
+# Typing/click cadence (Playwright slow_mo). Video entry script defaults this higher.
+SLOW_MO_MS = int(os.environ.get("LIFECYCLE_SLOW_MO_MS", "250" if RECORD_VIDEO else "0"))
+# Dwell after a click / fill so the UI is readable on camera.
+VIDEO_ACTION_PAUSE_MS = int(os.environ.get("LIFECYCLE_VIDEO_ACTION_PAUSE_MS", "1800"))
+# Longer beat between major lifecycle stages (create → trade → auction …).
+VIDEO_STEP_PAUSE_MS = int(os.environ.get("LIFECYCLE_VIDEO_STEP_PAUSE_MS", "3500"))
+HEADED = os.environ.get("LIFECYCLE_HEADED", "0") == "1"
+# Realistic listing copy: fixtures/lifecycle-demo.json (on by default for video).
+_DEMO_DEFAULT = "1" if RECORD_VIDEO else "0"
+USE_DEMO_DATA = os.environ.get("LIFECYCLE_DEMO_DATA", _DEMO_DEFAULT) == "1"
+DEMO_DATA_PATH = Path(
+    os.environ.get("LIFECYCLE_DEMO_DATA_PATH", str(ROOT / "fixtures" / "lifecycle-demo.json"))
+)
+DEMO_COVERS_DIR = Path(
+    os.environ.get("LIFECYCLE_DEMO_COVERS_DIR", str(ROOT / "fixtures" / "lifecycle-covers"))
+)
+_DEMO_CACHE: dict | None = None
+
+
+def load_demo_data() -> dict:
+    global _DEMO_CACHE
+    if _DEMO_CACHE is not None:
+        return _DEMO_CACHE
+    if not USE_DEMO_DATA or not DEMO_DATA_PATH.is_file():
+        _DEMO_CACHE = {}
+        return _DEMO_CACHE
+    _DEMO_CACHE = json.loads(DEMO_DATA_PATH.read_text(encoding="utf-8"))
+    return _DEMO_CACHE
+
+
+def demo_family(family: str, stamp: str) -> dict:
+    """Resolved listing fields for one family; empty dict if demo data off/missing."""
+    root = load_demo_data()
+    raw = (root.get("families") or {}).get(family) or {}
+    if not raw:
+        return {}
+    out = dict(raw)
+    for key in ("title", "event", "description", "tags", "topic", "tag_release", "evidence"):
+        if isinstance(out.get(key), str):
+            out[key] = out[key].replace("{stamp}", stamp)
+    topic = str(out.get("topic") or "")
+    if len(topic) > 28:
+        out["topic"] = topic[:28]
+    return out
 
 spec = importlib.util.spec_from_file_location("flow", ROOT / "scripts" / "phase6-flow-playwright.py")
 flow = importlib.util.module_from_spec(spec)
@@ -66,6 +116,35 @@ def fill_label(page, name: str, value: str, *, textarea: bool = False) -> None:
         page.get_by_role("textbox", name=name, exact=True).fill(value)
         return
     page.get_by_label(name, exact=True).fill(value)
+
+
+def human_pause(page, label: str = "", *, step: bool = False) -> None:
+    """Hold the frame so a recording looks like a person reading the screen."""
+    if not RECORD_VIDEO:
+        return
+    ms = VIDEO_STEP_PAUSE_MS if step else VIDEO_ACTION_PAUSE_MS
+    if label:
+        flow.out(f"video pause{' step' if step else ''} {label} {ms}ms")
+    try:
+        page.wait_for_timeout(ms)
+    except Exception:
+        time.sleep(ms / 1000.0)
+
+
+def human_goto(page, url: str, label: str = "") -> None:
+    page.goto(url, wait_until="networkidle")
+    human_pause(page, label or url, step=True)
+
+
+def human_click(locator, page, label: str = "") -> None:
+    target = locator.first if hasattr(locator, "first") else locator
+    try:
+        target.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+    human_pause(page, f"before:{label or 'click'}")
+    target.click()
+    human_pause(page, label or "click")
 
 
 def shot(page, name: str) -> str:
@@ -172,20 +251,25 @@ def wait_buy_confirmed(page) -> None:
         flow.wait_text(page, "confirmed", timeout_ms=45_000)
 
 
-def buy_for_family(page, family: str) -> None:
+def buy_for_family(page, family: str, stamp: str = "") -> None:
+    demo = demo_family(family, stamp or "demo")
+    shares = str(demo.get("buy_shares") or ("5" if family == "Bernoulli" else "1"))
     spins = page.locator("aside input[type='number']")
     if spins.count():
         try:
-            spins.first.fill("5" if family == "Bernoulli" else "1")
+            spins.first.fill(shares)
         except Exception:
             pass
     if family == "Skellam":
+        ticket = str(demo.get("ticket") or "1X2 Home")
         for _ in range(16):
-            if page.get_by_role("button", name="1X2 Home").count() or page.get_by_role("button", name="Home", exact=True).count():
+            if page.get_by_role("button", name=ticket).count() or page.get_by_role("button", name="1X2 Home").count() or page.get_by_role("button", name="Home", exact=True).count():
                 break
             page.wait_for_timeout(400)
             page.reload(wait_until="networkidle")
-        if page.get_by_role("button", name="1X2 Home").count():
+        if page.get_by_role("button", name=ticket).count():
+            page.get_by_role("button", name=ticket).click()
+        elif page.get_by_role("button", name="1X2 Home").count():
             page.get_by_role("button", name="1X2 Home").click()
         else:
             page.get_by_role("button", name="Home", exact=True).click()
@@ -234,20 +318,34 @@ def buy_for_family(page, family: str) -> None:
     wait_buy_confirmed(page)
 
 
-def fill_outcome(page, family: str) -> None:
+def _fill_number(loc, text: str) -> None:
+    """React controlled number inputs need click + clear + type so onChange updates state."""
+    target = loc.first
+    target.click()
+    target.fill("")
+    target.press_sequentially(str(text), delay=40)
+
+
+def fill_outcome(page, family: str, stamp: str = "") -> None:
+    oc = (demo_family(family, stamp or "demo").get("outcome") or {}) if USE_DEMO_DATA else {}
     if family == "Skellam":
-        page.get_by_label("Home", exact=True).fill("1")
-        page.get_by_label("Away", exact=True).fill("0")
+        _fill_number(page.get_by_label("Home", exact=True), str(oc.get("home", "1")))
+        _fill_number(page.get_by_label("Away", exact=True), str(oc.get("away", "0")))
     elif family == "Gaussian":
-        page.get_by_label("Scalar x*", exact=True).fill("2.4")
+        _fill_number(page.get_by_label("Scalar x*", exact=True), str(oc.get("scalar", "2.4")))
     elif family == "Lognormal":
-        page.get_by_label("Scalar x*", exact=True).fill("100000")
+        _fill_number(page.get_by_label("Scalar x*", exact=True), str(oc.get("scalar", "100000")))
     elif family == "Dirichlet":
-        page.get_by_label("Winning atom", exact=True).fill("0")
+        _fill_number(page.get_by_label("Winning atom", exact=True), str(oc.get("atom", "0")))
     elif family == "Bernoulli":
-        # YES is default radio
         yes = page.get_by_label("YES", exact=True)
-        if yes.count():
+        no = page.get_by_label("NO", exact=True)
+        if oc.get("yes", True):
+            if yes.count():
+                yes.check()
+        elif no.count():
+            no.check()
+        elif yes.count():
             yes.check()
 
 
@@ -273,30 +371,33 @@ def submit_application(
     topic: str | None = None,
     early_void: bool = False,
 ) -> str:
-    title = title or f"Life {family} {stamp}"
-    event = event or f"{family} lifecycle event {stamp}"
+    demo = demo_family(family, stamp)
+    title = title or demo.get("title") or f"Life {family} {stamp}"
+    event = event or demo.get("event") or f"{family} lifecycle event {stamp}"
+    desc = demo.get("description") or (
+        f"Playwright lifecycle ({family}): English canonical. Settle on committee submit_result."
+    )
+    tags = demo.get("tags") or f"{family.lower()}, lifecycle"
+    topic_v = (topic or demo.get("topic") or f"lf{family[:2].lower()}{stamp}")[:28]
+    tag_rel = demo.get("tag_release") or "life"
     close_in = CLOSE_IN if close_in is None else close_in
     page.goto(BASE + "/create", wait_until="networkidle")
     page.get_by_role("button", name=family, exact=False).first.click()
     page.wait_for_timeout(400)
+    n_grid = demo.get("n_grid")
     if family in ("Gaussian", "Lognormal") and page.get_by_label("n_grid / atoms").count():
-        page.get_by_label("n_grid / atoms").select_option("8")
+        page.get_by_label("n_grid / atoms").select_option(str(n_grid or "8"))
     if early_void and family == "Bernoulli":
         box = page.get_by_role("checkbox", name=re.compile(r"early occurrence", re.I))
         if box.count() and not box.first.is_checked():
             box.first.check()
     fill_label(page, "Market title", title)
-    fill_label(page, "Tags", f"{family.lower()}, lifecycle")
+    fill_label(page, "Tags", tags)
     fill_label(page, "Trading event", event)
-    fill_label(
-        page,
-        "Description",
-        f"Playwright lifecycle ({family}): English canonical. Settle on committee submit_result.",
-        textarea=True,
-    )
-    fill_label(page, "Topic / series (on-chain id)", (topic or f"lf{family[:2].lower()}{stamp}")[:28])
+    fill_label(page, "Description", desc, textarea=True)
+    fill_label(page, "Topic / series (on-chain id)", topic_v)
     if page.get_by_label("Tag / release", exact=True).count():
-        fill_label(page, "Tag / release", "life")
+        fill_label(page, "Tag / release", str(tag_rel)[:32])
     if page.get_by_label("Or seconds from now", exact=True).count():
         fill_label(page, "Or seconds from now", str(close_in))
     close_at = page.get_by_label("Close at (absolute)")
@@ -306,6 +407,28 @@ def submit_application(
     bond = page.get_by_label("Committee bond (USDC)")
     if bond.count() and bond.first.is_enabled():
         bond.fill("100")
+    cover_name = str(demo.get("cover") or "").strip()
+    if USE_DEMO_DATA and cover_name:
+        cover_path = Path(cover_name)
+        if not cover_path.is_file():
+            cover_path = DEMO_COVERS_DIR / cover_name
+        if cover_path.is_file():
+            file_input = page.locator('input[type="file"][accept*="image"]')
+            expect(file_input.first).to_be_attached(timeout=10_000)
+            file_input.first.set_input_files(str(cover_path))
+            try:
+                page.get_by_text("cover uploaded", exact=False).wait_for(timeout=20_000)
+            except PwTimeout:
+                # Preview img is enough proof the desk accepted the file.
+                if page.locator("img[src^='blob:'], img.max-h-32").count() == 0:
+                    raise RuntimeError(f"cover upload failed for {cover_path}")
+            human_pause(page, "after-cover-upload")
+            flow.out(f"demo cover ← {cover_path.name}")
+        else:
+            flow.out(f"demo cover missing: {cover_path}")
+    if USE_DEMO_DATA and demo:
+        flow.out(f"demo listing: {title[:72]}")
+        human_pause(page, "review-listing-copy", step=True)
     page.get_by_role("button", name="Submit for review").click()
     return title
 
@@ -313,7 +436,8 @@ def submit_application(
 def create_family(
     page, family: str, stamp: str, *, close_in: int | None = None, report_extra_s: int = 0, early_void: bool = False
 ) -> str:
-    title = f"Life {family} {stamp}"
+    demo = demo_family(family, stamp)
+    title = demo.get("title") or f"Life {family} {stamp}"
     submit_application(
         page, family, stamp, title=title, close_in=close_in, report_extra_s=report_extra_s, early_void=early_void
     )
@@ -404,15 +528,18 @@ def try_cover_lp_loss_chain(market: str) -> str:
         return f"FAIL cover_lp_loss={msg[:400]}"
 
 
-def click_if(root, name: str, timeout_ms: int = 8_000) -> str:
+def click_if(root, name: str, timeout_ms: int = 8_000, page=None) -> str:
     _ = timeout_ms
     btn = root.get_by_role("button", name=name, exact=True)
     if btn.count() == 0:
         btn = root.locator("button").filter(has_text=re.compile(rf"^{re.escape(name)}$", re.I))
     if btn.count() == 0 or not btn.first.is_enabled():
         return f"{name}=skip"
-    btn.first.click()
-    time.sleep(1.2)
+    if RECORD_VIDEO and page is not None:
+        human_click(btn, page, name)
+    else:
+        btn.first.click()
+        time.sleep(1.2)
     return f"{name}=ok"
 
 
@@ -420,8 +547,10 @@ def claim_lp(page, market: str) -> str:
     """Draw H / premium / surplus / fund cover on /lp after Lock ρ. Cover is platform-signed."""
     bits: list[str] = []
     settled = False
-    for _ in range(24):
+    for i in range(24):
         page.goto(BASE + "/lp", wait_until="networkidle")
+        if RECORD_VIDEO and i == 0:
+            human_pause(page, "lp-desk", step=True)
         row = page.locator("li").filter(has_text=market[:8])
         if row.count() == 0:
             row = page.locator("li").filter(has_text=market)
@@ -433,17 +562,18 @@ def claim_lp(page, market: str) -> str:
         return "no_quote_row"
     if not settled:
         return "not_settled"
+    human_pause(page, "lp-row", step=True)
     for label in ("Draw H", "Premium", "Surplus", "Fund cover"):
-        bits.append(click_if(row.first, label))
+        bits.append(click_if(row.first, label, page=page))
     page.wait_for_timeout(800)
     page.reload(wait_until="networkidle")
+    human_pause(page, "lp-after-reload", step=True)
     body = page.locator("body").inner_text().lower()
     if "cover paid" not in body:
         bits.append("ui_cover_paid_missing")
     cover = page.get_by_role("button", name="Claim cover")
     if cover.count() and cover.first.is_enabled():
-        cover.first.click()
-        page.wait_for_timeout(1200)
+        human_click(cover, page, "Claim cover")
         bits.append("Claim cover=ok")
     elif cover.count():
         bits.append("Claim cover=disabled")
@@ -470,13 +600,14 @@ def claim_platform(page, market: str) -> str:
         time.sleep(1)
     if not info or not info.get("platform"):
         return "platform_not_indexed"
-    page.goto(BASE + "/create", wait_until="networkidle")
+    human_goto(page, BASE + "/create", "platform-claims")
     # Platform claim section uses the first "market pubkey" placeholder.
     inp = page.get_by_placeholder("market pubkey", exact=True)
     if inp.count() == 0:
         inp = page.get_by_placeholder("market pubkey")
     if inp.count():
         inp.first.fill(market)
+        human_pause(page, "after-fill-platform-market")
     fees = page.get_by_role("button", name="Claim fees (φ)")
     sp = page.get_by_role("button", name="Claim S_P")
     fund = page.get_by_role("button", name="Fund C_P")
@@ -489,7 +620,7 @@ def claim_platform(page, market: str) -> str:
         page.wait_for_timeout(800)
     if fees.count() == 0 or not fees.first.is_enabled():
         return f"fees_disabled platform={info.get('platform')}"
-    fees.first.click()
+    human_click(fees, page, "Claim fees (φ)")
     note_fees = ""
     deadline = time.time() + 45
     while time.time() < deadline:
@@ -512,7 +643,7 @@ def claim_platform(page, market: str) -> str:
         page.wait_for_timeout(500)
     if sp.count() == 0 or not sp.first.is_enabled():
         return f"sp_disabled {note_fees[:80]}"
-    sp.first.click()
+    human_click(sp, page, "Claim S_P")
     note_sp = ""
     deadline = time.time() + 45
     while time.time() < deadline:
@@ -587,24 +718,92 @@ def wait_submit_ready(page, family: str, market: str, timeout_s: int = 130) -> N
     raise RuntimeError("Submit result stayed disabled (report_open_ts not reached)")
 
 
-def resolve_and_settle(page, family: str, market: str) -> None:
-    page.goto(f"{BASE}/resolve/{market}", wait_until="networkidle")
-    page.get_by_role("button", name="Open window").click()
-    flow.wait_any_text(page, ["Propose x*", "Submit result", "Waiting for report open"], timeout_ms=45_000)
-    fill_outcome(page, family)
+def wait_proposed(page, market: str, timeout_s: int = 90) -> None:
+    """Confirm submit_result indexed (has_proposed / Challenge), not just UI copy."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            res = api_json(f"/v1/markets/{market}/resolution")
+            if res.get("has_proposed") or res.get("phase_name") in ("Challenge", "Vote", "Final"):
+                page.reload(wait_until="networkidle")
+                try:
+                    flow.wait_any_text(
+                        page,
+                        ["Proposed x*", "Challenge window", "challenge window", "Finalize"],
+                        timeout_ms=12_000,
+                    )
+                except PwTimeout:
+                    pass
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+        if int(time.time()) % 8 == 0:
+            page.reload(wait_until="networkidle")
+    raise RuntimeError("submit_result never indexed (has_proposed still false)")
+
+
+def wait_report_form(page, market: str, timeout_s: int = 90) -> None:
+    """After resolve_open, indexer lag can leave the UI on 'Open window' even though the sig landed.
+    Poll /resolution and reload until Propose / Submit / Waiting appears."""
+    deadline = time.time() + timeout_s
+    needles = ["Propose x*", "Submit result", "Waiting for report open"]
+    while time.time() < deadline:
+        try:
+            flow.wait_any_text(page, needles, timeout_ms=4_000)
+            return
+        except PwTimeout:
+            pass
+        indexed = False
+        try:
+            res = api_json(f"/v1/markets/{market}/resolution")
+            # phase 0 + members means the record exists (Open), even before a proposal.
+            if res.get("members") is not None or res.get("phase_name") in ("Open", "Propose", "Challenge", "Vote"):
+                indexed = True
+        except Exception:
+            indexed = False
+        if indexed or "resolve_open" in page.locator("body").inner_text().lower():
+            page.reload(wait_until="networkidle")
+            human_pause(page, "reload-after-resolve-open")
+            continue
+        page.wait_for_timeout(1000)
+    raise RuntimeError("report form never appeared after Open window")
+
+
+def resolve_and_settle(page, family: str, market: str, stamp: str = "") -> None:
+    human_goto(page, f"{BASE}/resolve/{market}", "resolve-desk")
+    open_btn = page.get_by_role("button", name="Open window")
+    if open_btn.count() and open_btn.first.is_enabled():
+        human_click(open_btn, page, "Open window")
+    wait_report_form(page, market)
+    human_pause(page, "resolve-form", step=True)
+    fill_outcome(page, family, stamp)
+    human_pause(page, "after-outcome")
     ev = page.get_by_role("textbox", name=re.compile(r"Evidence", re.I))
     if ev.count():
-        ev.first.fill(f"Playwright lifecycle evidence {family} {market[:8]}")
-        page.wait_for_timeout(400)
+        demo = demo_family(family, stamp or "demo")
+        note = demo.get("evidence") or f"Playwright lifecycle evidence {family} {market[:8]}"
+        ev.first.fill(str(note))
+        human_pause(page, "after-evidence")
     wait_submit_ready(page, family, market)
-    page.get_by_role("button", name="Submit result", exact=True).click()
-    flow.wait_any_text(page, ["submit_result", "challenge window", "Proposed x*"], timeout_ms=45_000)
+    # Re-fill immediately before submit — reloads in wait_submit_ready can reset controlled inputs.
+    fill_outcome(page, family, stamp)
+    human_click(page.get_by_role("button", name="Submit result", exact=True), page, "Submit result")
+    # Do NOT match bare "submit_result" — resolve-desk copy contains that token even before the ix.
+    wait_proposed(page, market)
+    human_pause(page, "after-submit", step=True)
 
     _report_s, challenge_s = official_clocks()
     # Finalize after the official challenge length (Protocol PDA), plus indexer lag.
     deadline = time.time() + challenge_s + 40
     fin = page.get_by_role("button", name="Finalize", exact=True)
     while time.time() < deadline:
+        try:
+            res = api_json(f"/v1/markets/{market}/resolution")
+            if res.get("has_final") or res.get("phase_name") == "Finalized" or int(res.get("phase") or 0) >= 3:
+                break
+        except Exception:
+            pass
         fin = page.get_by_role("button", name="Finalize", exact=True)
         if fin.count() == 0:
             fin = page.locator("button").filter(has_text=re.compile(r"^Finalize$", re.I))
@@ -615,35 +814,56 @@ def resolve_and_settle(page, family: str, market: str) -> None:
         if int(time.time()) % 5 == 0:
             page.reload(wait_until="networkidle")
     if fin.count() == 0:
-        raise RuntimeError("Finalize button never appeared after challenge window")
-    last_note = ""
-    for _ in range(6):
-        if fin.count() and fin.first.is_enabled():
-            fin.first.click()
+        # May already be finalized from a prior click / indexer catch-up.
         try:
-            flow.wait_any_text(page, ["finalize ", "Finalized", "Lock ρ"], timeout_ms=12_000)
-        except PwTimeout:
-            pass
-        last_note = flow.note_or_err(page)
-        body = page.locator("body").inner_text()
+            res = api_json(f"/v1/markets/{market}/resolution")
+            if not (res.get("has_final") or int(res.get("phase") or 0) >= 3):
+                raise RuntimeError("Finalize button never appeared after challenge window")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Finalize button never appeared after challenge window ({e})") from e
+
+    for _ in range(8):
+        try:
+            res = api_json(f"/v1/markets/{market}/resolution")
+            if res.get("has_final") or int(res.get("phase") or 0) >= 3:
+                break
+        except Exception:
+            res = {}
+        fin = page.get_by_role("button", name="Finalize", exact=True)
+        if fin.count() == 0:
+            fin = page.locator("button").filter(has_text=re.compile(r"^Finalize$", re.I))
+        if fin.count() and fin.first.is_enabled():
+            human_click(fin, page, "Finalize")
+            page.wait_for_timeout(2000)
+        page.reload(wait_until="networkidle")
+        human_pause(page, "reload-after-finalize")
         if page.get_by_role("button", name="Lock ρ").count():
             break
-        if "does not allow" in last_note.lower() or "0x1774" in last_note:
-            page.wait_for_timeout(2000)
-            page.reload(wait_until="networkidle")
-            fin = page.get_by_role("button", name="Finalize", exact=True)
-            continue
-        if "Finalized" in body or "Lock ρ" in body:
-            break
-        page.wait_for_timeout(1500)
-        fin = page.get_by_role("button", name="Finalize", exact=True)
+    else:
+        # Final API check before giving up on the click loop.
+        res = api_json(f"/v1/markets/{market}/resolution")
+        if not (res.get("has_final") or int(res.get("phase") or 0) >= 3):
+            raise RuntimeError("finalize never indexed | " + flow.note_or_err(page)[:400])
 
+    # Lock ρ only mounts when UI rec.phase >= 3; poll API + reload until the button appears.
+    lock_deadline = time.time() + 60
     lock = page.get_by_role("button", name="Lock ρ")
-    expect(lock.first).to_be_visible(timeout=30_000)
+    while time.time() < lock_deadline:
+        lock = page.get_by_role("button", name="Lock ρ")
+        if lock.count() and lock.first.is_visible():
+            break
+        page.reload(wait_until="networkidle")
+        human_pause(page, "reload-for-lock-rho")
+        page.wait_for_timeout(500)
+    else:
+        raise RuntimeError("Lock ρ never appeared after finalize | " + flow.note_or_err(page)[:400])
+    human_pause(page, "before-lock-rho", step=True)
     last_err = "lock ρ not confirmed"
     for attempt in range(4):
         if lock.count() and lock.first.is_enabled():
-            lock.first.click()
+            human_click(lock, page, "Lock ρ")
         try:
             wait_board_phase(market, timeout_s=20)
             last_err = ""
@@ -679,23 +899,26 @@ def run_family(page, family: str, stamp: str) -> FamilyRun:
         market = create_family(page, family, stamp)
         run.market = market
         record(run, "create+review", True, t0, market, shot(page, f"{family}-01-open"))
+        human_pause(page, "after-create", step=True)
 
         t0 = time.time()
-        page.goto(f"{BASE}/m/{market}", wait_until="networkidle")
+        human_goto(page, f"{BASE}/m/{market}", "market-desk")
         ensure_session(page)
+        human_pause(page, "after-session", step=True)
         record(run, "open-session", True, t0, "", shot(page, f"{family}-02-session"))
 
         t0 = time.time()
-        buy_for_family(page, family)
+        buy_for_family(page, family, stamp)
+        human_pause(page, "after-trade", step=True)
         record(run, "trade", True, t0, "confirmed", shot(page, f"{family}-03-trade"))
 
         t0 = time.time()
-        page.goto(f"{BASE}/auction/{market}", wait_until="networkidle")
+        human_goto(page, f"{BASE}/auction/{market}", "auction-desk")
         quote_btn = page.get_by_role("button", name="Quote pool")
         if quote_btn.count() == 0:
             quote_btn = page.locator("button").filter(has_text=re.compile(r"Quote (pool|layer)", re.I))
         expect(quote_btn.first).to_be_visible(timeout=20_000)
-        quote_btn.first.click()
+        human_click(quote_btn, page, "Quote pool")
         try:
             flow.wait_text(page, "quoted ", timeout_ms=45_000)
         except PwTimeout:
@@ -706,20 +929,24 @@ def run_family(page, family: str, stamp: str) -> FamilyRun:
                 aside = page.locator("body").inner_text()[:480]
             shot(page, f"{family}-04-auction")
             raise RuntimeError("quote not confirmed: " + aside.replace("\n", " "))
+        human_pause(page, "after-quote", step=True)
         record(run, "auction-quote", True, t0, "", shot(page, f"{family}-04-auction"))
 
         t0 = time.time()
-        page.goto(f"{BASE}/m/{market}", wait_until="networkidle")
+        human_goto(page, f"{BASE}/m/{market}", "wait-close")
         wait_trading_closed(page, timeout_s=CLOSE_IN + 40)
+        human_pause(page, "trading-closed", step=True)
         record(run, "wait-close", True, t0, "trading closed", shot(page, f"{family}-05-closed"))
 
         t0 = time.time()
-        resolve_and_settle(page, family, market)
+        resolve_and_settle(page, family, market, stamp)
+        human_pause(page, "after-settle", step=True)
         record(run, "resolve+settle", True, t0, "Lock ρ", shot(page, f"{family}-06-settle"))
 
         t0 = time.time()
         lp_detail = claim_lp(page, market)
         lp_ok = "no_quote_row" not in lp_detail and "not_settled" not in lp_detail and not lp_detail.startswith("FAIL")
+        human_pause(page, "after-lp", step=True)
         record(run, "lp-claims", lp_ok, t0, lp_detail, shot(page, f"{family}-07-lp"))
         if not lp_ok:
             raise RuntimeError(f"lp-claims {lp_detail}")
@@ -735,18 +962,18 @@ def run_family(page, family: str, stamp: str) -> FamilyRun:
             and "sp_no_note" not in plat_detail
             and "fees_no_sig" not in plat_detail
         )
+        human_pause(page, "after-platform", step=True)
         record(run, "platform-claims", plat_ok, t0, plat_detail, shot(page, f"{family}-07b-platform"))
         if not plat_ok:
             raise RuntimeError(f"platform-claims {plat_detail}")
 
         t0 = time.time()
-        page.goto(BASE + "/portfolio", wait_until="networkidle")
+        human_goto(page, BASE + "/portfolio", "portfolio")
         claim = page.get_by_role("button", name=re.compile(r"Claim", re.I))
         detail = f"claim_buttons={claim.count()}"
         if claim.count():
             try:
-                claim.first.click()
-                page.wait_for_timeout(2000)
+                human_click(claim, page, "Claim")
                 detail += " clicked"
             except Exception as e:
                 detail += f" click_err={e}"
@@ -1292,37 +1519,58 @@ def main() -> int:
     flow.out(f"official protocol: {proto}")
     secret = list(bytes(kp))
 
+    video_path = None
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            locale="en-US",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-            viewport={"width": 1500, "height": 960},
-        )
+        launch_kw: dict = {"headless": not HEADED}
+        if SLOW_MO_MS > 0:
+            launch_kw["slow_mo"] = SLOW_MO_MS
+        browser = p.chromium.launch(**launch_kw)
+        ctx_kw: dict = {
+            "locale": "en-US",
+            "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9"},
+            "viewport": {"width": 1500, "height": 960},
+        }
+        if RECORD_VIDEO:
+            VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+            ctx_kw["record_video_dir"] = str(VIDEO_DIR)
+            ctx_kw["record_video_size"] = {"width": 1500, "height": 960}
+            flow.out(f"recording video → {VIDEO_DIR}")
+        ctx = browser.new_context(**ctx_kw)
         page = ctx.new_page()
         flow.connect_wallet(page, secret)
-        page.get_by_role("link", name="Portfolio").click()
+        human_pause(page, "wallet-ready", step=True)
+        human_click(page.get_by_role("link", name="Portfolio"), page, "Portfolio")
         page.wait_for_load_state("networkidle")
-        page.locator("input[type='number']").first.fill("50000")
-        page.get_by_role("button", name="Deposit", exact=True).click()
+        human_pause(page, "portfolio", step=True)
+        demo_root = load_demo_data()
+        deposit_amt = str(demo_root.get("deposit_usdc") or 50000)
+        fund_cp_amt = str(demo_root.get("fund_cp_usdc") or 10)
+        if USE_DEMO_DATA and demo_root:
+            flow.out(f"demo data ← {DEMO_DATA_PATH}")
+        page.locator("input[type='number']").first.fill(deposit_amt)
+        human_pause(page, "after-fill-deposit")
+        human_click(page.get_by_role("button", name="Deposit", exact=True), page, "Deposit")
         try:
             flow.wait_text(page, "deposit", timeout_ms=45_000)
         except PwTimeout:
             flow.out("deposit note timeout — continuing")
+        human_pause(page, "after-deposit", step=True)
         shot(page, "00-deposit")
 
-        page.goto(BASE + "/create", wait_until="networkidle")
+        human_goto(page, BASE + "/create", "create-desk")
         # Separate C_P fund_pool — never mixed with Claim fees / Claim S_P.
         fund = page.get_by_role("button", name="Fund C_P")
         if fund.count():
             inp = fund.locator("xpath=preceding-sibling::input[1]")
             if inp.count():
-                inp.fill("10")
-            fund.click()
+                inp.fill(fund_cp_amt)
+                human_pause(page, "after-fill-fund-cp")
+            human_click(fund, page, "Fund C_P")
             try:
                 flow.wait_any_text(page, ["fund_pool", "init_pool", "already"], timeout_ms=45_000)
             except PwTimeout:
                 flow.out("init/fund pool timeout — continuing")
+        human_pause(page, "after-pool", step=True)
         shot(page, "00-pool")
 
         for fam in families:
@@ -1342,8 +1590,31 @@ def main() -> int:
             RUNS.append(run_admin_slash(page, stamp))
             RUNS.append(run_admin_void(page, stamp))
 
+        if RECORD_VIDEO:
+            try:
+                video_path = page.video.path() if page.video else None
+            except Exception:
+                video_path = None
         ctx.close()
         browser.close()
+
+    if RECORD_VIDEO:
+        # After context close, Playwright finalizes the webm; rename to a stable name.
+        fams = "-".join(f.strip() for f in families if f.strip()) or "lifecycle"
+        dest = VIDEO_DIR / f"lifecycle-{fams}-{stamp}.webm"
+        src = None
+        if video_path and Path(video_path).exists():
+            src = Path(video_path)
+        else:
+            webs = sorted(VIDEO_DIR.glob("*.webm"), key=lambda p: p.stat().st_mtime, reverse=True)
+            src = webs[0] if webs else None
+        if src is not None:
+            if dest.exists():
+                dest.unlink()
+            src.replace(dest)
+            print("VIDEO", dest)
+        else:
+            print("VIDEO_MISSING", VIDEO_DIR)
 
     path = write_report(stack)
     print("REPORT", path)

@@ -110,6 +110,7 @@ function unixFromLocal(v: string): number {
 }
 
 function localFromUnix(ts: number): string {
+  if (!ts || ts <= 0) return "";
   const d = new Date(ts * 1000);
   if (Number.isNaN(d.getTime())) return "";
   const p = (n: number) => String(n).padStart(2, "0");
@@ -122,6 +123,18 @@ function pct(bps: number): string {
 
 function isErrNote(note: string): boolean {
   return /failed|error/i.test(note);
+}
+
+/** Keep out of JSX — SWC can mis-parse `/…|φ|…/i` next to tags during HMR. */
+function isPlatformClaimNote(note: string): boolean {
+  const n = note.toLowerCase();
+  return (
+    n.includes("claim_fees") ||
+    n.includes("pay_surplus_platform") ||
+    n.includes("claim s_p") ||
+    n.includes("platform") ||
+    note.includes("φ")
+  );
 }
 
 export function CreateDesk() {
@@ -137,8 +150,9 @@ export function CreateDesk() {
   const [n, setN] = useState(256);
   const [beta, setBeta] = useState(100);
   const [closeIn, setCloseIn] = useState(86400);
-  const [closeTs, setCloseTs] = useState(() => Math.floor(Date.now() / 1000) + 86400);
-  const [reportOpenTs, setReportOpenTs] = useState(() => Math.floor(Date.now() / 1000) + 86400);
+  // 0 until mount — Date.now() in useState mismatches SSR vs client (hydration error).
+  const [closeTs, setCloseTs] = useState(0);
+  const [reportOpenTs, setReportOpenTs] = useState(0);
   const [committeeBond, setCommitteeBond] = useState(100);
   const [lambdaH, setLambdaH] = useState(1.4);
   const [lambdaA, setLambdaA] = useState(1.1);
@@ -234,6 +248,12 @@ export function CreateDesk() {
         if (rows.length) setCatalogTags(rows.map((t) => t.name));
       })
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const ts = Math.floor(Date.now() / 1000) + 86400;
+    setCloseTs(ts);
+    setReportOpenTs(ts);
   }, []);
 
   useEffect(() => {
@@ -1163,7 +1183,7 @@ export function CreateDesk() {
             <Row k="β" v={String(beta)} />
             <Row k="C_P tap cap" v={`${tapCap} USDC`} />
             <Row k="Fee" v={`${feeBps} bps · ${feeTiming === 1 ? "at claim" : "at fill"}`} />
-            <Row k="Closes at" v={new Date(closeTs * 1000).toISOString()} />
+            <Row k="Closes at" v={closeTs > 0 ? new Date(closeTs * 1000).toISOString() : "—"} />
             <Row k="Market PDA" v={derived ? `${derived.slice(0, 4)}…${derived.slice(-4)}` : "—"} />
           </div>
           <label className="mt-4 block text-[10px] uppercase text-paper/50">
@@ -1258,7 +1278,7 @@ export function CreateDesk() {
           >
             Claim S_P
           </button>
-          {note && /claim_fees|pay_surplus_platform|claim S_P|φ|platform/i.test(note) && (
+          {note && isPlatformClaimNote(note) && (
             <p className={`text-[10px] ${isErrNote(note) ? "text-rust" : "text-paper/60"}`}>{note}</p>
           )}
         </div>

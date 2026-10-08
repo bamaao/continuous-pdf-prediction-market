@@ -254,7 +254,8 @@ export function ResultForm({ market, family }: { market: string; family: number 
       }
       setNote(`${op} ${sig}`);
       if (op === "resolve_open") {
-        for (let i = 0; i < 24; i++) {
+        // Indexer may lag well past a few seconds after the L1 sig confirms.
+        for (let i = 0; i < 60; i++) {
           await new Promise((r) => setTimeout(r, 500));
           const next = await fetchResolution(MARKET_API, market);
           if (next) {

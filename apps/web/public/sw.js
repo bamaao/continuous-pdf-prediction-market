@@ -1,6 +1,13 @@
 /* Minimal offline shell for PWA (FR-UI-02). Icons + manifest only — never HTML or Next chunks. */
 const CACHE = "cpm-shell-v3";
-const SHELL = ["/manifest.json", "/icon-512.png", "/icon-180.png"];
+const SHELL = [
+  "/manifest.json",
+  "/favicon.ico",
+  "/icon-32.png",
+  "/icon-180.png",
+  "/icon-192.png",
+  "/icon-512.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
