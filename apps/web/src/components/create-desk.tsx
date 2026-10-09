@@ -421,8 +421,6 @@ export function CreateDesk() {
       risk_lock_ts: closeTs,
       report_open_ts: Math.max(reportOpenTs, closeTs),
       committee_bond: Math.max(1, committeeBond),
-      fee_bps: feeBps,
-      fee_timing: feeTiming,
       challenge_secs: challengeSecs,
       report_window_secs: reportWindowSecs,
       early_resolve: early,
@@ -1090,40 +1088,21 @@ export function CreateDesk() {
                 }}
               />
             </label>
-            <label className="block text-[10px] uppercase text-paper/50">
-              Platform fee (bps)
-              <input
-                className="mt-1 w-full border border-rule bg-ink px-2 py-1"
-                type="number"
-                min={0}
-                max={10000}
-                value={feeBps}
-                disabled
-                readOnly
-              />
-            </label>
-            <p className="text-[10px] text-paper/45">Official protocol fee. Does not enter C_P.</p>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                disabled
-                className={`border px-2 py-1 text-[10px] uppercase ${feeTiming === 0 ? "border-amber text-amber" : "border-rule text-paper/50"}`}
-              >
-                At fill
-              </button>
-              <button
-                type="button"
-                disabled
-                className={`border px-2 py-1 text-[10px] uppercase ${feeTiming === 1 ? "border-amber text-amber" : "border-rule text-paper/50"}`}
-              >
-                At claim
-              </button>
+            <div className="border border-rule/70 bg-ink/40 px-2 py-2">
+              <p className="text-[10px] uppercase tracking-widest text-paper/50">Protocol fee (platform params)</p>
+              <p className="mt-1 text-[12px] text-paper">
+                {feeBps} bps · {feeTiming === 1 ? "at claim" : "at fill"}
+              </p>
+              <p className="mt-1 text-[10px] text-paper/45">
+                Copied from the Protocol PDA at create — not set on this application. Applicant / reviewer cannot
+                choose φ. Does not enter C_P.
+              </p>
+              <p className="mt-1 text-[10px] text-paper/40">
+                {feeTiming === 0
+                  ? "Trader pays C_S + φ·C_S when they buy. Platform can claim_fees anytime."
+                  : "Trader pays C_S only. φ is taken from the winner’s payout when they claim. Miss / VOID: 0."}
+              </p>
             </div>
-            <p className="text-[10px] text-paper/40">
-              {feeTiming === 0
-                ? "Trader pays C_S + φ·C_S when they buy. Platform can claim_fees anytime."
-                : "Trader pays C_S only. φ is taken from the winner’s payout when they claim. Miss / VOID: 0."}
-            </p>
             <p className="text-[10px] uppercase tracking-widest text-paper/50">
               Committee is protocol-wide. Create does not read or write the roster.
             </p>
@@ -1182,7 +1161,7 @@ export function CreateDesk() {
             )}
             <Row k="β" v={String(beta)} />
             <Row k="C_P tap cap" v={`${tapCap} USDC`} />
-            <Row k="Fee" v={`${feeBps} bps · ${feeTiming === 1 ? "at claim" : "at fill"}`} />
+            <Row k="Fee (protocol)" v={`${feeBps} bps · ${feeTiming === 1 ? "at claim" : "at fill"}`} />
             <Row k="Closes at" v={closeTs > 0 ? new Date(closeTs * 1000).toISOString() : "—"} />
             <Row k="Market PDA" v={derived ? `${derived.slice(0, 4)}…${derived.slice(-4)}` : "—"} />
           </div>
