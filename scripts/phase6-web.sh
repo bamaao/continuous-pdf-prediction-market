@@ -37,7 +37,11 @@ need_so() {
     return
   fi
   echo "building $name.so"
-  cargo-build-sbf --manifest-path "programs/$name/Cargo.toml"
+  if [[ "$name" == "market" ]]; then
+    cargo-build-sbf --manifest-path "programs/$name/Cargo.toml" --features genesis-open
+  else
+    cargo-build-sbf --manifest-path "programs/$name/Cargo.toml"
+  fi
 }
 
 need_session_keys_so() {

@@ -28,7 +28,11 @@ need_so() {
   local name="$1"
   if [[ ! -f "$DEPLOY/$name.so" ]]; then
     echo "building $name.so"
-    cargo-build-sbf --manifest-path "programs/$name/Cargo.toml"
+    if [[ "$name" == "market" ]]; then
+      cargo-build-sbf --manifest-path "programs/$name/Cargo.toml" --features genesis-open
+    else
+      cargo-build-sbf --manifest-path "programs/$name/Cargo.toml"
+    fi
   fi
 }
 

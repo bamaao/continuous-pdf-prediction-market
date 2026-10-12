@@ -2585,6 +2585,7 @@ fn empty_vault(owner: &str, wallet_usdc: u64) -> serde_json::Value {
         "exists": false,
         "available": 0,
         "reserved": 0,
+        "trade_pending": 0,
         "free": 0,
         "risk_pnl": 0,
         "cover_paid": 0,
@@ -2618,12 +2619,16 @@ async fn load_owner_vault(owner: &str) -> Result<serde_json::Value, ()> {
     let Ok(u) = decode_user_vault(&acc.data) else {
         return Ok(empty_vault(owner, wallet_usdc));
     };
-    let free = u.available.saturating_sub(u.reserved);
+    let free = u
+        .available
+        .saturating_sub(u.reserved)
+        .saturating_sub(u.trade_pending);
     Ok(serde_json::json!({
         "owner": owner,
         "exists": true,
         "available": u.available,
         "reserved": u.reserved,
+        "trade_pending": u.trade_pending,
         "free": free,
         "risk_pnl": u.risk_pnl,
         "cover_paid": u.cover_paid,

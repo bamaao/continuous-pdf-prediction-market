@@ -301,7 +301,8 @@ pub fn official_policy() -> Result<OfficialPolicy, StatusCode> {
     let platform = official_platform()?;
     Ok(OfficialPolicy {
         platform,
-        fee_bps: env_u64("PROTOCOL_FEE_BPS", 0).min(10_000) as u16,
+        // Default 1%: covers Keeper `sync_vault` gas after undelegate (see CLI keeper).
+        fee_bps: env_u64("PROTOCOL_FEE_BPS", 100).min(10_000) as u16,
         fee_timing: if env_u64("PROTOCOL_FEE_TIMING", 0) == 1 { 1 } else { 0 },
         report_window_secs: env_i64("PROTOCOL_REPORT_WINDOW_SECS", 86_400).max(1),
         challenge_secs: env_i64("PROTOCOL_CHALLENGE_SECS", 3_600).max(1),

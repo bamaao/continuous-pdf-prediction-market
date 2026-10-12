@@ -1099,7 +1099,7 @@ export function CreateDesk() {
               </p>
               <p className="mt-1 text-[10px] text-paper/40">
                 {feeTiming === 0
-                  ? "Trader pays C_S + φ·C_S when they buy. Platform can claim_fees anytime."
+                  ? "Trader pays C_S + φ·C_S when they buy. Platform claim_fees only after settle/refund."
                   : "Trader pays C_S only. φ is taken from the winner’s payout when they claim. Miss / VOID: 0."}
               </p>
             </div>

@@ -118,7 +118,14 @@ if [[ "$DO_BUILD" == "1" ]]; then
     local_vault_features=(--features devnet)
   fi
   cargo-build-sbf --manifest-path programs/vault/Cargo.toml "${local_vault_features[@]}"
-  cargo-build-sbf --manifest-path programs/market/Cargo.toml
+  # market default features are empty (no genesis-open). Refuse accidental open genesis.
+  if grep -n 'features.*=.*genesis-open\|--features.*genesis-open' \
+      <<<"${MARKET_BUILD_FEATURES:-}" 2>/dev/null | grep -q .; then
+    echo "FATAL: MARKET_BUILD_FEATURES must not enable genesis-open on staging" >&2
+    exit 1
+  fi
+  # MUST replace GENESIS_AUTHORITY in programs/market/src/lib.rs before this build — placeholder is rejected.
+  cargo-build-sbf --manifest-path programs/market/Cargo.toml ${MARKET_BUILD_FEATURES:-}
   cargo-build-sbf --manifest-path programs/resolution/Cargo.toml
   cargo-build-sbf --manifest-path programs/risk/Cargo.toml
 

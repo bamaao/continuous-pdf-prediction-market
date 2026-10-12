@@ -23,7 +23,6 @@ INTEGRAL_ASSET = BRAND / "integral-sign.png"
 BG = (18, 17, 14, 255)
 GOLD = (212, 160, 23, 255)
 CREAM = (243, 234, 212, 255)
-GRID = (243, 234, 212, 12)
 
 _STIX_SRC = Path(
     r"D:\Users\zouyc\anaconda3\lib\site-packages\matplotlib\mpl-data\fonts\ttf\STIXGeneral.ttf"
@@ -140,12 +139,9 @@ def draw_equals_one(height: int) -> Image.Image:
 
 
 def compose(size: int = 1024) -> Image.Image:
+    # Solid brand ink — no blueprint grid (cleaner at favicon / PWA sizes).
     im = Image.new("RGBA", (size, size), BG)
     d = ImageDraw.Draw(im, "RGBA")
-    step = size // 16
-    for i in range(1, 16):
-        d.line([(i * step, 0), (i * step, size)], fill=GRID, width=1)
-        d.line([(0, i * step), (size, i * step)], fill=GRID, width=1)
 
     cx = cy = size // 2
     r = int(size * 0.36)
