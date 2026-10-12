@@ -14,6 +14,9 @@ pub const RES_SEED: &[u8] = b"res";
 pub const VOTE_SEED: &[u8] = b"vote";
 pub const VAULT_ID: Pubkey = pubkey!("VaULt11111111111111111111111111111111111111");
 pub const CBOND_SEED: &[u8] = b"cbond";
+pub const CHBOND_SEED: &[u8] = b"chbond";
+/// Ballot seed for VOID endorsements (distinct from challenge vote ballots).
+pub const VOID_SEED: &[u8] = b"vball";
 
 pub const FAMILY_SKELLAM: u8 = 0;
 pub const FAMILY_GAUSSIAN: u8 = 1;
@@ -41,6 +44,8 @@ pub mod resolution {
             ctx.accounts.committee.member_count >= 1
                 && ctx.accounts.committee.m >= 1
                 && ctx.accounts.committee.m <= ctx.accounts.committee.member_count
+                && (ctx.accounts.committee.m as u16) * 2
+                    > ctx.accounts.committee.member_count as u16
                 && market.report_window_secs > 0
                 && market.challenge_secs > 0,
             ResError::BadCommittee
@@ -78,6 +83,7 @@ pub mod resolution {
         rec.final_outcome = Outcome::default();
         rec.evidence_hash = [0u8; 32];
         rec.slash_due = false;
+        rec.void_votes = 0;
         rec.bump = ctx.bumps.record;
         Ok(())
     }
@@ -91,7 +97,24 @@ pub mod resolution {
         let now = Clock::get()?.unix_timestamp;
         let reporter = ctx.accounts.reporter.key();
         require!(can_propose(rec, &reporter), ResError::NotReporter);
-        require!(bond_is_locked(&ctx.accounts.bond.to_account_info(), rec.market), ResError::BondNotLocked);
+        // Bernoulli early occurrence: once Halted, only VOID — never settle YES.
+        require!(
+            !(rec.early_resolve && ctx.accounts.market.status == Status::Halted as u8),
+            ResError::MustVoid
+        );
+        require!(
+            bond_meets_min(
+                &ctx.accounts.bond.to_account_info(),
+                rec.market,
+                ctx.accounts.market.committee_bond,
+            ),
+            ResError::BondNotLocked
+        );
+        // Proposer must be the cbond holder — blocks ExtendOnce "free ride" on another member's lock.
+        require!(
+            bond_holder_is(&ctx.accounts.bond.to_account_info(), &reporter),
+            ResError::BondNotLocked
+        );
         validate_outcome(rec.family, rec.n_atoms, &outcome)?;
 
         let effect = apply(&snapshot(rec, now), Event::Submit).map_err(|_| error!(ResError::BadPhase))?;
@@ -108,10 +131,24 @@ pub mod resolution {
         Ok(())
     }
 
-    pub fn challenge(ctx: Context<MutRecord>, outcome: Outcome) -> Result<()> {
+    pub fn challenge(ctx: Context<ChallengeRecord>, outcome: Outcome) -> Result<()> {
         let rec = &mut ctx.accounts.record;
         let now = Clock::get()?.unix_timestamp;
+        require!(is_member(rec, &ctx.accounts.reporter.key()), ResError::NotReporter);
         require!(ctx.accounts.reporter.key() != rec.proposer, ResError::SelfChallenge);
+        require!(
+            bond_meets_min(
+                &ctx.accounts.bond.to_account_info(),
+                rec.market,
+                ctx.accounts.market.committee_bond,
+            ),
+            ResError::BondNotLocked
+        );
+        // Challenger bond PDA must be locked by this reporter (not the proposer's cbond).
+        require!(
+            bond_holder_is(&ctx.accounts.bond.to_account_info(), &ctx.accounts.reporter.key()),
+            ResError::BondNotLocked
+        );
         validate_outcome(rec.family, rec.n_atoms, &outcome)?;
         require!(!outcome.same_as(&rec.proposed), ResError::SameOutcome);
         let effect = apply(&snapshot(rec, now), Event::Challenge).map_err(|_| error!(ResError::BadPhase))?;
@@ -128,6 +165,8 @@ pub mod resolution {
     pub fn vote(ctx: Context<CastVote>, for_challenge: bool) -> Result<()> {
         let rec = &mut ctx.accounts.record;
         require!(rec.phase == Phase::Voting as u8, ResError::BadPhase);
+        let now = Clock::get()?.unix_timestamp;
+        require!(now < rec.vote_end, ResError::BadWindow);
         require!(is_member(rec, &ctx.accounts.voter.key()), ResError::NotReporter);
         let ballot = &mut ctx.accounts.ballot;
         require!(!ballot.cast, ResError::AlreadyVoted);
@@ -146,65 +185,104 @@ pub mod resolution {
 
     pub fn finalize(ctx: Context<Finalize>) -> Result<()> {
         require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
-        let rec = &mut ctx.accounts.record;
         let now = Clock::get()?.unix_timestamp;
-        let snap = snapshot(rec, now);
-        let ev = if rec.phase == Phase::Proposed as u8 {
-            Event::FinalizeQuiet
-        } else if rec.phase == Phase::Open as u8 {
-            Event::ReportTimeout
-        } else if rec.votes_proposal >= rec.m {
-            Event::VotePassProposal
-        } else if rec.votes_challenge >= rec.m {
-            Event::VotePassChallenge
-        } else {
-            Event::VoteTimeout
+        let sync_status = {
+            let rec = &mut ctx.accounts.record;
+            let snap = snapshot(rec, now);
+            let ev = if rec.phase == Phase::Proposed as u8 {
+                Event::FinalizeQuiet
+            } else if rec.phase == Phase::Open as u8 {
+                Event::ReportTimeout
+            } else if rec.votes_proposal >= rec.m {
+                Event::VotePassProposal
+            } else if rec.votes_challenge >= rec.m {
+                Event::VotePassChallenge
+            } else {
+                Event::VoteTimeout
+            };
+            let effect = apply(&snap, ev).map_err(|_| error!(ResError::BadPhase))?;
+            match effect {
+                Effect::FinalizeProposal => {
+                    rec.phase = Phase::Finalized as u8;
+                    rec.final_outcome = rec.proposed;
+                    rec.refunds_due = false;
+                    true
+                }
+                Effect::FinalizeChallenge => {
+                    rec.phase = Phase::Finalized as u8;
+                    rec.final_outcome = rec.challenged;
+                    rec.refunds_due = false;
+                    true
+                }
+                Effect::ExtendOnce => {
+                    rec.phase = Phase::Open as u8;
+                    rec.extensions = 1;
+                    rec.report_deadline = now.saturating_add(rec.report_window_secs);
+                    rec.votes_proposal = 0;
+                    rec.votes_challenge = 0;
+                    rec.proposer = Pubkey::default();
+                    rec.challenger = Pubkey::default();
+                    rec.proposed = Outcome::default();
+                    rec.challenged = Outcome::default();
+                    rec.refunds_due = false;
+                    false
+                }
+                Effect::Fail => {
+                    rec.phase = Phase::Failed as u8;
+                    rec.refunds_due = true;
+                    true
+                }
+                _ => return err!(ResError::BadPhase),
+            }
         };
-        let effect = apply(&snap, ev).map_err(|_| error!(ResError::BadPhase))?;
-        match effect {
-            Effect::FinalizeProposal => {
-                rec.phase = Phase::Finalized as u8;
-                rec.final_outcome = rec.proposed;
-                rec.refunds_due = false;
-                ctx.accounts.market.status = Status::Settled as u8;
-            }
-            Effect::FinalizeChallenge => {
-                rec.phase = Phase::Finalized as u8;
-                rec.final_outcome = rec.challenged;
-                rec.refunds_due = false;
-                ctx.accounts.market.status = Status::Settled as u8;
-            }
-            Effect::ExtendOnce => {
-                rec.phase = Phase::Open as u8;
-                rec.extensions = 1;
-                rec.report_deadline = now.saturating_add(rec.report_window_secs);
-                rec.votes_proposal = 0;
-                rec.votes_challenge = 0;
-                rec.proposer = Pubkey::default();
-                rec.challenger = Pubkey::default();
-                rec.proposed = Outcome::default();
-                rec.challenged = Outcome::default();
-                rec.refunds_due = false;
-            }
-            Effect::Fail => {
-                rec.phase = Phase::Failed as u8;
-                rec.refunds_due = true;
-                ctx.accounts.market.status = Status::Void as u8;
-            }
-            _ => return err!(ResError::BadPhase),
+        if sync_status {
+            sync_market_status(
+                ctx.accounts.market_program.to_account_info(),
+                ctx.accounts.market.to_account_info(),
+                ctx.accounts.record.to_account_info(),
+            )?;
         }
         Ok(())
     }
 
-    pub fn void_resolution(ctx: Context<Finalize>) -> Result<()> {
+    /// M-of-N VOID: each member endorses once; transition runs when `void_votes >= m`.
+    pub fn void_resolution(ctx: Context<VoidRecord>) -> Result<()> {
         require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
-        let rec = &mut ctx.accounts.record;
-        require!(is_member(rec, &ctx.accounts.reporter.key()), ResError::NotReporter);
         let now = Clock::get()?.unix_timestamp;
-        apply(&snapshot(rec, now), Event::Void).map_err(|_| error!(ResError::BadPhase))?;
-        rec.phase = Phase::Voided as u8;
-        rec.refunds_due = true;
-        ctx.accounts.market.status = Status::Void as u8;
+        // Early void (before close) requires halt so fills cannot continue.
+        if now < ctx.accounts.record.close_ts {
+            require!(
+                ctx.accounts.market.status == Status::Halted as u8,
+                ResError::BadPhase
+            );
+        }
+        let sync = {
+            let rec = &mut ctx.accounts.record;
+            require!(is_member(rec, &ctx.accounts.reporter.key()), ResError::NotReporter);
+            // Machine must still allow Void (Open, window, early_ok).
+            apply(&snapshot(rec, now), Event::Void).map_err(|_| error!(ResError::BadPhase))?;
+            let ballot = &mut ctx.accounts.ballot;
+            require!(!ballot.cast, ResError::AlreadyVoted);
+            ballot.record = rec.key();
+            ballot.voter = ctx.accounts.reporter.key();
+            ballot.for_challenge = false;
+            ballot.cast = true;
+            ballot.bump = ctx.bumps.ballot;
+            rec.void_votes = rec.void_votes.saturating_add(1);
+            if rec.void_votes < rec.m {
+                return Ok(());
+            }
+            rec.phase = Phase::Voided as u8;
+            rec.refunds_due = true;
+            true
+        };
+        if sync {
+            sync_market_status(
+                ctx.accounts.market_program.to_account_info(),
+                ctx.accounts.market.to_account_info(),
+                ctx.accounts.record.to_account_info(),
+            )?;
+        }
         Ok(())
     }
 
@@ -218,18 +296,30 @@ pub mod resolution {
             ResError::NotAdmin
         );
         require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
-        let rec = &mut ctx.accounts.record;
-        let now = Clock::get()?.unix_timestamp;
-        validate_outcome(rec.family, rec.n_atoms, &outcome)?;
-        apply(&snapshot(rec, now), Event::AdminSubmit).map_err(|_| error!(ResError::AwaitingAdmin))?;
-        rec.phase = Phase::Finalized as u8;
-        rec.proposer = ctx.accounts.reporter.key();
-        rec.proposed = outcome;
-        rec.final_outcome = outcome;
-        rec.evidence_hash = evidence_hash;
-        rec.slash_due = true;
-        rec.refunds_due = false;
-        ctx.accounts.market.status = Status::Settled as u8;
+        // Same gate as submit_result: early_resolve + Halted ⇒ VOID only.
+        require!(
+            !(ctx.accounts.record.early_resolve
+                && ctx.accounts.market.status == Status::Halted as u8),
+            ResError::MustVoid
+        );
+        {
+            let rec = &mut ctx.accounts.record;
+            let now = Clock::get()?.unix_timestamp;
+            validate_outcome(rec.family, rec.n_atoms, &outcome)?;
+            apply(&snapshot(rec, now), Event::AdminSubmit).map_err(|_| error!(ResError::AwaitingAdmin))?;
+            rec.phase = Phase::Finalized as u8;
+            rec.proposer = ctx.accounts.reporter.key();
+            rec.proposed = outcome;
+            rec.final_outcome = outcome;
+            rec.evidence_hash = evidence_hash;
+            rec.slash_due = true;
+            rec.refunds_due = false;
+        }
+        sync_market_status(
+            ctx.accounts.market_program.to_account_info(),
+            ctx.accounts.market.to_account_info(),
+            ctx.accounts.record.to_account_info(),
+        )?;
         Ok(())
     }
 
@@ -239,15 +329,32 @@ pub mod resolution {
             ResError::NotAdmin
         );
         require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
-        let rec = &mut ctx.accounts.record;
-        let now = Clock::get()?.unix_timestamp;
-        apply(&snapshot(rec, now), Event::AdminVoid).map_err(|_| error!(ResError::AwaitingAdmin))?;
-        rec.phase = Phase::Voided as u8;
-        rec.slash_due = false;
-        rec.refunds_due = true;
-        ctx.accounts.market.status = Status::Void as u8;
+        {
+            let rec = &mut ctx.accounts.record;
+            let now = Clock::get()?.unix_timestamp;
+            apply(&snapshot(rec, now), Event::AdminVoid).map_err(|_| error!(ResError::AwaitingAdmin))?;
+            rec.phase = Phase::Voided as u8;
+            rec.slash_due = false;
+            rec.refunds_due = true;
+        }
+        sync_market_status(
+            ctx.accounts.market_program.to_account_info(),
+            ctx.accounts.market.to_account_info(),
+            ctx.accounts.record.to_account_info(),
+        )?;
         Ok(())
     }
+}
+
+fn sync_market_status<'info>(
+    market_program: AccountInfo<'info>,
+    market: AccountInfo<'info>,
+    record: AccountInfo<'info>,
+) -> Result<()> {
+    market::cpi::apply_resolution_status(CpiContext::new(
+        market_program,
+        market::cpi::accounts::ApplyResolutionStatus { market, record },
+    ))
 }
 
 fn snapshot(rec: &Resolution, now: i64) -> Case {
@@ -284,7 +391,7 @@ fn can_propose(rec: &Resolution, who: &Pubkey) -> bool {
         || (rec.authorized_reporter != Pubkey::default() && rec.authorized_reporter == *who)
 }
 
-fn bond_is_locked(bond: &AccountInfo, market: Pubkey) -> bool {
+fn bond_meets_min(bond: &AccountInfo, market: Pubkey, min_bond: u64) -> bool {
     if *bond.owner != VAULT_ID {
         return false;
     }
@@ -302,7 +409,22 @@ fn bond_is_locked(bond: &AccountInfo, market: Pubkey) -> bool {
     }
     let amount = u64::from_le_bytes(data[72..80].try_into().unwrap_or([0; 8]));
     let slashed = data[80] != 0;
-    amount > 0 && !slashed
+    let need = min_bond.max(1);
+    amount >= need && !slashed
+}
+
+/// CommitteeBond layout: disc(8) + market(32) + holder(32) + amount(8) + slashed(1).
+fn bond_holder_is(bond: &AccountInfo, who: &Pubkey) -> bool {
+    let data = match bond.try_borrow_data() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    if data.len() < 72 {
+        return false;
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&data[40..72]);
+    Pubkey::new_from_array(h) == *who
 }
 
 fn validate_outcome(family: u8, n_atoms: u16, o: &Outcome) -> Result<()> {
@@ -320,13 +442,9 @@ fn validate_outcome(family: u8, n_atoms: u16, o: &Outcome) -> Result<()> {
             require!(o.a > 0, ResError::BadOutcome);
         }
         FAMILY_DIRICHLET => {
-            require!(o.kind == 2 || o.kind == 3, ResError::BadOutcome);
-            if o.kind == 2 {
-                require!(o.a >= 0 && o.a < n_atoms as i128, ResError::BadOutcome);
-            } else {
-                require!(o.shares.iter().all(|&s| s >= 0), ResError::BadOutcome);
-                require!(o.shares.iter().any(|&s| s > 0), ResError::BadOutcome);
-            }
+            // kind=3 share-vector cannot map via outcome_cell → begin_settle would stick forever.
+            require!(o.kind == 2, ResError::BadOutcome);
+            require!(o.a >= 0 && o.a < n_atoms as i128, ResError::BadOutcome);
         }
         FAMILY_BERNOULLI => {
             require!(o.kind == 4, ResError::BadOutcome);
@@ -391,6 +509,8 @@ pub struct Resolution {
     pub report_open_ts: i64,
     /// Set when the platform writes $x^*$ after a missed report window.
     pub slash_due: bool,
+    /// Distinct member endorsements toward M-of-N VOID.
+    pub void_votes: u8,
 }
 
 impl Resolution {
@@ -444,7 +564,36 @@ pub struct SubmitRecord<'info> {
     pub reporter: Signer<'info>,
     #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
     pub record: Box<Account<'info, Resolution>>,
+    #[account(
+        owner = market::ID,
+        constraint = market.key() == record.market @ ResError::CommitteeMismatch
+    )]
+    pub market: Box<Account<'info, Market>>,
     /// CHECK: vault `CommitteeBond` PDA for this market.
+    #[account(
+        seeds = [CBOND_SEED, record.market.as_ref()],
+        bump,
+        seeds::program = VAULT_ID
+    )]
+    pub bond: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ChallengeRecord<'info> {
+    pub reporter: Signer<'info>,
+    #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
+    pub record: Box<Account<'info, Resolution>>,
+    #[account(
+        owner = market::ID,
+        constraint = market.key() == record.market @ ResError::CommitteeMismatch
+    )]
+    pub market: Box<Account<'info, Market>>,
+    /// CHECK: vault challenger bond PDA `["chbond", market]`.
+    #[account(
+        seeds = [CHBOND_SEED, record.market.as_ref()],
+        bump,
+        seeds::program = VAULT_ID
+    )]
     pub bond: UncheckedAccount<'info>,
 }
 
@@ -455,6 +604,27 @@ pub struct Finalize<'info> {
     pub record: Box<Account<'info, Resolution>>,
     #[account(mut, constraint = market.key() == record.market @ ResError::CommitteeMismatch)]
     pub market: Box<Account<'info, Market>>,
+    pub market_program: Program<'info, market::program::Market>,
+}
+
+#[derive(Accounts)]
+pub struct VoidRecord<'info> {
+    #[account(mut)]
+    pub reporter: Signer<'info>,
+    #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
+    pub record: Box<Account<'info, Resolution>>,
+    #[account(mut, constraint = market.key() == record.market @ ResError::CommitteeMismatch)]
+    pub market: Box<Account<'info, Market>>,
+    pub market_program: Program<'info, market::program::Market>,
+    #[account(
+        init,
+        payer = reporter,
+        space = Ballot::SIZE,
+        seeds = [VOID_SEED, record.key().as_ref(), reporter.key().as_ref()],
+        bump
+    )]
+    pub ballot: Account<'info, Ballot>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -509,6 +679,8 @@ pub enum ResError {
     CommitteeMismatch,
     #[msg("committee bond is not locked")]
     BondNotLocked,
+    #[msg("early_resolve market is Halted; only VOID is allowed")]
+    MustVoid,
 }
 
 #[cfg(test)]
@@ -625,7 +797,8 @@ mod tests {
 
     #[test]
     fn resolution_account_fits() {
-        let rec = Resolution::default();
+        let mut rec = Resolution::default();
+        rec.phase = Phase::Finalized as u8;
         let mut data = Vec::new();
         rec.try_serialize(&mut data).unwrap();
         assert!(
@@ -634,5 +807,8 @@ mod tests {
             data.len(),
             Resolution::SIZE
         );
+        // market::apply_resolution_status reads phase at disc+market+members+reporter+family.
+        const PHASE_OFF: usize = 8 + 32 + 512 + 32 + 1;
+        assert_eq!(data[PHASE_OFF], Phase::Finalized as u8);
     }
 }

@@ -85,6 +85,7 @@ fn pack_market(platform: Pubkey) -> (Pubkey, Account) {
         wide_flags: 0,
         report_open_ts: 1,
         committee_bond: 0,
+        cost_basis: 0,
     };
     let mut data = Vec::new();
     m.try_serialize(&mut data).unwrap();

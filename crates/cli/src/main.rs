@@ -546,7 +546,9 @@ fn protocol_args(platform: Pubkey) -> client::market::state::ProtocolArgs {
     }
     client::market::state::ProtocolArgs {
         platform,
-        fee_bps: u64_env("PROTOCOL_FEE_BPS", 0).min(10_000) as u16,
+        // Default 1% (100 bps): platform fee pool funds Keeper SOL for post-close
+        // `sync_vault` backstop (users may self-sync; Keeper covers no-shows).
+        fee_bps: u64_env("PROTOCOL_FEE_BPS", 100).min(10_000) as u16,
         fee_timing: if u64_env("PROTOCOL_FEE_TIMING", 0) == 1 { 1 } else { 0 },
         report_window_secs: i64_env("PROTOCOL_REPORT_WINDOW_SECS", 86_400).max(1),
         challenge_secs: i64_env("PROTOCOL_CHALLENGE_SECS", 3_600).max(1),
@@ -737,6 +739,13 @@ fn ensure_session(url: &str, kp: &Keypair, owner: Pubkey) -> Result<()> {
     Ok(())
 }
 
+fn market_platform(l1: &str, market: &Pubkey) -> Result<Pubkey> {
+    let rpc = RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed());
+    let mkt = client::decode_market(&rpc.get_account(market).context("market")?.data)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(mkt.platform)
+}
+
 fn undelegate_seat_on_er(
     l1: &str,
     er: &str,
@@ -752,7 +761,12 @@ fn undelegate_seat_on_er(
         &RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed()),
         &pos,
     ) {
-        let sig = send(er_url, kp, client::undelegate_seat(kp.pubkey(), owner, market, set_hash))?;
+        let platform = market_platform(l1, &market)?;
+        let sig = send(
+            er_url,
+            kp,
+            client::undelegate_seat(kp.pubkey(), owner, market, platform, set_hash),
+        )?;
         println!("undelegate_seat {sig}");
         wait_owned_by_market(l1, &[pos, nonce], 80)?;
     }
@@ -764,16 +778,86 @@ fn undelegate_seats_for_market(l1: &str, er: &str, kp: &Keypair, market: Pubkey)
         return Ok(());
     }
     let er_rpc_c = RpcClient::new_with_commitment(er.to_string(), CommitmentConfig::confirmed());
+    let l1_rpc = RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed());
     let Ok(rows) = er_rpc_c.get_program_accounts(&client::market::ID) else {
         return Ok(());
     };
+    let mut seats: Vec<(Pubkey, [u8; 32], Pubkey, Pubkey)> = Vec::new();
     for (_, acc) in rows {
         let Ok(pos) = client::decode_position(&acc.data) else { continue };
         if pos.market != market {
             continue;
         }
-        if let Err(e) = undelegate_seat_on_er(l1, er, kp, pos.owner, market, pos.set_hash) {
-            eprintln!("undelegate_seat {} {market}: {e}", pos.owner);
+        let pda = client::position_pda(&market, &pos.owner, &pos.set_hash);
+        if !account_delegated(&l1_rpc, &pda) {
+            continue;
+        }
+        let nonce = client::nonce_pda(&pos.owner, &market);
+        seats.push((pos.owner, pos.set_hash, pda, nonce));
+    }
+    if seats.is_empty() {
+        return Ok(());
+    }
+    let platform = market_platform(l1, &market)?;
+    let er_url = er_rpc(l1, er);
+    const CHUNK: usize = 8;
+    for chunk in seats.chunks(CHUNK) {
+        let pairs: Vec<(Pubkey, [u8; 32])> = chunk.iter().map(|(o, h, _, _)| (*o, *h)).collect();
+        match send(
+            er_url,
+            kp,
+            client::undelegate_seats(kp.pubkey(), market, platform, &pairs),
+        ) {
+            Ok(sig) => {
+                println!("undelegate_seats {sig} n={}", pairs.len());
+                let mut wait: Vec<Pubkey> = chunk
+                    .iter()
+                    .flat_map(|(_, _, pos, nonce)| [*pos, *nonce])
+                    .collect();
+                for (owner, _, _, _) in chunk {
+                    wait.push(client::session_pda(owner));
+                }
+                if let Err(e) = wait_owned_by_market(l1, &wait, 80) {
+                    eprintln!("undelegate_seats wait {market}: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("undelegate_seats {market}: {e}; falling back per-seat");
+                for (owner, set_hash, _, _) in chunk {
+                    if let Err(e2) = undelegate_seat_on_er(l1, er, kp, *owner, market, *set_hash) {
+                        eprintln!("undelegate_seat {} {market}: {e2}", owner);
+                    }
+                    // Batch path embeds sync; single-seat fallback still needs L1 sync.
+                    if let Err(e2) = sync_vault_on_l1(l1, kp, *owner, market, *set_hash) {
+                        eprintln!("sync_vault {} {market}: {e2}", owner);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// After seats are home on L1, debit `vault_owed_*` into Board / trade_pending.
+/// Keeper pays SOL gas; funded by Protocol `fee_bps` (claim_fees → platform).
+fn sync_vaults_for_market(l1: &str, kp: &Keypair, market: Pubkey) -> Result<()> {
+    let rpc = RpcClient::new_with_commitment(l1.to_string(), CommitmentConfig::confirmed());
+    let Ok(rows) = rpc.get_program_accounts(&client::market::ID) else {
+        return Ok(());
+    };
+    for (_, acc) in rows {
+        if acc.owner != client::market::ID {
+            continue;
+        }
+        let Ok(pos) = client::decode_position(&acc.data) else { continue };
+        if pos.market != market {
+            continue;
+        }
+        if pos.vault_owed_cost == 0 && pos.vault_owed_fee == 0 && pos.vault_owed_credit == 0 {
+            continue;
+        }
+        if let Err(e) = sync_vault_on_l1(l1, kp, pos.owner, market, pos.set_hash) {
+            eprintln!("sync_vault {} {market}: {e}", pos.owner);
         }
     }
     Ok(())
@@ -804,8 +888,22 @@ fn sync_vault_on_l1(
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
-    wait_owned_by_market(l1, &[pos, market], 80)?;
-    let sig = send(l1, kp, client::sync_vault(kp.pubkey(), owner, market, set_hash))?;
+    let session = client::session_pda(&owner);
+    wait_owned_by_market(l1, &[pos, market, session], 80)?;
+    // Skip when post-undelegate sync already cleared debt (avoids double SYNC_SEAT_FEE).
+    if let Ok(acc) = rpc.get_account(&pos) {
+        if let Ok(p) = client::decode_position(&acc.data) {
+            if p.vault_owed_cost == 0 && p.vault_owed_fee == 0 && p.vault_owed_credit == 0 {
+                return Ok(());
+            }
+        }
+    }
+    let platform = market_platform(l1, &market)?;
+    let sig = send(
+        l1,
+        kp,
+        client::sync_vault_ex(kp.pubkey(), owner, market, platform, set_hash),
+    )?;
     println!("sync_vault {sig}");
     Ok(())
 }
@@ -1402,6 +1500,9 @@ fn keeper_once(
                     if let Err(e) = undelegate_seats_for_market(url, er_url, kp, market) {
                         eprintln!("seats {market}: {e}");
                     }
+                    if let Err(e) = sync_vaults_for_market(url, kp, market) {
+                        eprintln!("sync_vaults {market}: {e}");
+                    }
                     if !record_open(&rpc, &market) {
                         if let Err(e) = send(url, kp, client::resolve_open(me, market)) {
                             let msg = e.to_string();
@@ -1446,6 +1547,14 @@ fn keeper_once(
             }
             if let Err(e) = undelegate_seats_for_market(url, er_url, kp, market) {
                 eprintln!("seats {market}: {e}");
+            }
+            if let Err(e) = sync_vaults_for_market(url, kp, market) {
+                eprintln!("sync_vaults {market}: {e}");
+            }
+        } else if !mkt.delegated && (halted || now >= mkt.close_ts) {
+            // Book already home: still drain any leftover vault_owed from prior ER fills.
+            if let Err(e) = sync_vaults_for_market(url, kp, market) {
+                eprintln!("sync_vaults {market}: {e}");
             }
         }
     }
@@ -2116,7 +2225,12 @@ fn main() -> Result<()> {
                     .context("mask required (no local ticket for this market)")?,
             };
             let set_hash = client::market::ids::set_hash(&mask_bytes(&mask, n)?);
-            let sig = send(&opt.url, &kp, client::sync_vault(me, me, market, set_hash))?;
+            let platform = market_platform(&opt.url, &market)?;
+            let sig = send(
+                &opt.url,
+                &kp,
+                client::sync_vault_ex(me, me, market, platform, set_hash),
+            )?;
             println!("ok {sig} synced vault for mask={mask}");
         }
         Cmd::Settle(SettleCmd::Begin { market, risk, pool }) => {

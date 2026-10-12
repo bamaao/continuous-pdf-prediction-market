@@ -3,8 +3,10 @@
 
 use anchor_lang::prelude::*;
 use market::state::{Market, Status};
-use vault::cpi::accounts::MutUser;
+use vault::cpi::accounts::{MutUser, ReleaseReserve};
 use vault::cpi::{release, reserve};
+
+pub const VAULT_AUTH_SEED: &[u8] = b"vault_auth";
 
 pub mod matching;
 
@@ -58,7 +60,7 @@ pub mod risk {
         require!(capacity >= book.d_unit && premium > 0, RiskError::BadSize);
         require!(profit_share_bps <= 10_000, RiskError::BadSize);
         require!(
-            market.status != Status::Settled as u8 && market.status != Status::Void as u8,
+            market.status == Status::Trading as u8,
             RiskError::Locked
         );
         let now = Clock::get()?.unix_timestamp;
@@ -142,7 +144,7 @@ pub mod risk {
         require!(seat.market == market.key() && seat.owner == quote.lp, RiskError::WrongBook);
         require!(!quote.cancelled, RiskError::Cancelled);
         require!(
-            market.status != Status::Settled as u8 && market.status != Status::Void as u8,
+            market.status == Status::Trading as u8,
             RiskError::Locked
         );
         let now = Clock::get()?.unix_timestamp;
@@ -161,13 +163,17 @@ pub mod risk {
         require!(leftover > 0, RiskError::AlreadyFilled);
         quote.cancelled = true;
         drop_quote(&mut layer, quote.key());
+        let bump = [ctx.bumps.vault_auth];
+        let seeds: &[&[u8]] = &[VAULT_AUTH_SEED, &bump];
         release(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.vault_program.to_account_info(),
-                MutUser {
+                ReleaseReserve {
+                    authority: ctx.accounts.vault_auth.to_account_info(),
                     owner: ctx.accounts.lp.to_account_info(),
                     user: ctx.accounts.user_vault.to_account_info(),
                 },
+                &[seeds],
             ),
             leftover,
         )?;
@@ -446,6 +452,9 @@ pub struct CancelUnfilled<'info> {
         bump
     )]
     pub layer: AccountLoader<'info, Layer>,
+    /// CHECK: signs vault.release CPI; no data account required.
+    #[account(seeds = [VAULT_AUTH_SEED], bump)]
+    pub vault_auth: UncheckedAccount<'info>,
     #[account(
         mut,
         seeds = [vault::USER_SEED, lp.key().as_ref()],

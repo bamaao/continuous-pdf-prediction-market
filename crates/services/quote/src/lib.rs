@@ -58,7 +58,7 @@ impl Book {
 
     /// Pure LMSR cost $C_S(q)$. Fees are applied by the chain, not here.
     pub fn c_s(&self, in_set: &[bool], q: Q64) -> Q64 {
-        buy_cost(&self.state, in_set, q)
+        buy_cost(&self.state, in_set, q).expect("q/β within exp domain")
     }
 
     pub fn r_net(&self) -> u64 {
@@ -283,7 +283,7 @@ mod tests {
         let mut cell0 = vec![false; 8];
         cell0[0] = true;
         let before = book.p_s(&cell0);
-        math::lmsr_update(&mut book.state, &cell0, Q64::from_int(10));
+        math::lmsr_update(&mut book.state, &cell0, Q64::from_int(10)).unwrap();
         let after = book.p_s(&cell0);
         assert!(after > before);
     }

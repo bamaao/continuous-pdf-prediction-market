@@ -10,7 +10,7 @@ pub const RISK_ID: Pubkey = pubkey!("Rsk1111111111111111111111111111111111111111
 
 pub const FAMILY_SKELLAM: u8 = 0;
 
-/// First 8 bytes are the defining program's discriminator. Owner is checked via `Owner`.
+/// Foreign views skip disc equality (owner + PDA seeds bind accounts). Keep 8-byte header.
 pub fn account_disc(_name: &str) -> [u8; 8] {
     [0u8; 8]
 }
@@ -19,7 +19,6 @@ macro_rules! foreign_account {
     ($name:ident, $owner:expr) => {
         impl AccountSerialize for $name {
             fn try_serialize<W: std::io::Write>(&self, writer: &mut W) -> Result<()> {
-                // Keep the original 8-byte discriminator; caller writes via load+store of the account.
                 writer
                     .write_all(&[0u8; 8])
                     .map_err(|_| error!(ErrorCode::AccountDidNotSerialize))?;
@@ -31,6 +30,7 @@ macro_rules! foreign_account {
         impl AccountDeserialize for $name {
             fn try_deserialize(buf: &mut &[u8]) -> Result<Self> {
                 require!(buf.len() >= 8, ErrorCode::AccountDidNotDeserialize);
+                // Owner checked via `Owner`; payout/refund also bind Position PDA seeds.
                 Self::try_deserialize_unchecked(buf)
             }
             fn try_deserialize_unchecked(buf: &mut &[u8]) -> Result<Self> {
@@ -89,6 +89,23 @@ pub struct Market {
     pub id_hash: [u8; 32],
     pub extra: FamilyExtra,
     pub fee_timing: u8,
+    pub delegated: bool,
+    pub trades_root: [u8; 32],
+    pub commit_ts: i64,
+    pub p0_sum: i128,
+    pub seal_bits: u128,
+    pub wide_z0: i128,
+    pub wide_z: i128,
+    pub wide_q: i128,
+    pub wide_nonce: u64,
+    pub wide_read: u128,
+    pub wide_write: u128,
+    pub wide_tag: u64,
+    pub wide_flags: u8,
+    pub report_open_ts: i64,
+    pub committee_bond: u64,
+    /// Σ outstanding `cost_paid`. Appended after `committee_bond` (offset 540 unchanged).
+    pub cost_basis: u64,
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
@@ -159,6 +176,7 @@ pub struct Resolution {
     pub evidence_hash: [u8; 32],
     pub report_open_ts: i64,
     pub slash_due: bool,
+    pub void_votes: u8,
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
@@ -243,13 +261,30 @@ pub struct Quote {
     pub bump: u8,
 }
 
+/// Market `["session", owner]` — `er_owed_usdc` locks withdrawable free margin.
+#[derive(Clone, AnchorSerialize, AnchorDeserialize)]
+pub struct ProtocolSession {
+    pub owner: Pubkey,
+    pub authority: Pubkey,
+    pub expires_ts: i64,
+    pub remaining_usdc: u64,
+    pub allowed_ix: u8,
+    pub status: u8,
+    pub bump: u8,
+    pub whitelist: Pubkey,
+    pub er_owed_usdc: u64,
+    pub unsynced_seats: u16,
+}
+
 foreign_account!(Market, MARKET_ID);
 foreign_account!(Grid, MARKET_ID);
 foreign_account!(Position, MARKET_ID);
+foreign_account!(ProtocolSession, MARKET_ID);
 foreign_account!(Resolution, RESOLUTION_ID);
 foreign_account!(RiskBook, RISK_ID);
 foreign_account!(Quote, RISK_ID);
 
+pub const PHASE_OPEN: u8 = 0;
 pub const PHASE_FINALIZED: u8 = 3;
 pub const PHASE_FAILED: u8 = 4;
 pub const PHASE_VOIDED: u8 = 5;

@@ -149,12 +149,6 @@ async fn fund_owner(ctx: &mut ProgramTestContext, mint_auth: &Keypair, owner: &K
     send(ctx, vec![client::deposit(owner.pubkey(), 50_000)], &[owner]).await;
     send(
         ctx,
-        vec![client::init_committee(owner.pubkey(), vec![owner.pubkey()], 1)],
-        &[owner],
-    )
-    .await;
-    send(
-        ctx,
         vec![client::init_protocol(
             owner.pubkey(),
             market::state::ProtocolArgs {
@@ -168,6 +162,12 @@ async fn fund_owner(ctx: &mut ProgramTestContext, mint_auth: &Keypair, owner: &K
                 alpha_r_bps: 7_000,
             },
         )],
+        &[owner],
+    )
+    .await;
+    send(
+        ctx,
+        vec![client::init_committee(owner.pubkey(), vec![owner.pubkey()], 1)],
         &[owner],
     )
     .await;

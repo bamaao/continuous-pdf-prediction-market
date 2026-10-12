@@ -95,10 +95,11 @@ fn ata(owner: &Pubkey) -> Pubkey {
 fn halt_ix(authority: Pubkey, market: Pubkey, committee: Pubkey, data: Vec<u8>) -> Instruction {
     Instruction {
         program_id: market::ID,
-        accounts: market::accounts::Halt {
+        accounts: market::accounts::WideCancel {
             authority,
             market,
             committee,
+            grid: client::grid_pda(&market),
         }
         .to_account_metas(None),
         data,

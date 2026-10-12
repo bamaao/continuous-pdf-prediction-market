@@ -145,20 +145,20 @@ pub fn lmsr_update_quarter(
     first: &[bool],
     second: &[bool],
     q: Q64,
-) -> (Q64, Q64) {
-    let half = q.checked_div(Q64::from_int(2)).unwrap_or(Q64::ZERO);
-    let c0 = lmsr_update(state, first, half);
-    let c1 = lmsr_update(state, second, half);
-    (c0, c1)
+) -> Option<(Q64, Q64)> {
+    let half = q.checked_div(Q64::from_int(2))?;
+    let c0 = lmsr_update(state, first, half)?;
+    let c1 = lmsr_update(state, second, half)?;
+    Some((c0, c1))
 }
 
-pub fn cost_quarter(state: &LmsrState, first: &[bool], second: &[bool], q: Q64) -> Q64 {
-    let half = q.checked_div(Q64::from_int(2)).unwrap_or(Q64::ZERO);
-    let c0 = buy_cost(state, first, half);
+pub fn cost_quarter(state: &LmsrState, first: &[bool], second: &[bool], q: Q64) -> Option<Q64> {
+    let half = q.checked_div(Q64::from_int(2))?;
+    let c0 = buy_cost(state, first, half)?;
     let mut mid = state.clone();
-    lmsr_update(&mut mid, first, half);
-    let c1 = buy_cost(&mid, second, half);
-    c0.saturating_add(c1)
+    lmsr_update(&mut mid, first, half)?;
+    let c1 = buy_cost(&mid, second, half)?;
+    Some(c0.saturating_add(c1))
 }
 
 #[cfg(test)]
@@ -242,7 +242,7 @@ mod tests {
         let p_h0 = set_prob(&s, &home);
         let p_a0 = set_prob(&s, &away);
         let p_e0 = set_prob(&s, &exact);
-        let cost = lmsr_update(&mut s, &home, Q64::ONE);
+        let cost = lmsr_update(&mut s, &home, Q64::ONE).unwrap();
         assert!(cost.raw() > 0);
         assert!(set_prob(&s, &home) > p_h0);
         assert!(set_prob(&s, &away) < p_a0);
@@ -255,11 +255,11 @@ mod tests {
         let mut s = book();
         let exact = mask_exact(K_MAX, 2, 1);
         let home = mask_home(K_MAX);
-        lmsr_update(&mut s, &exact, Q64::from_int(2));
+        lmsr_update(&mut s, &exact, Q64::from_int(2)).unwrap();
         assert_eq!(s.exposure[cell(2, 1, K_MAX)], Q64::from_int(2));
         assert_eq!(s.exposure[cell(1, 0, K_MAX)], Q64::ZERO);
         let p_home = set_prob(&s, &home);
-        lmsr_update(&mut s, &home, Q64::ONE);
+        lmsr_update(&mut s, &home, Q64::ONE).unwrap();
         assert_eq!(s.exposure[cell(2, 1, K_MAX)], Q64::from_int(3));
         assert_eq!(s.exposure[cell(1, 0, K_MAX)], Q64::ONE);
         assert!(set_prob(&s, &home) > p_home);
@@ -271,8 +271,8 @@ mod tests {
         let mut s = book();
         let over = mask_over(K_MAX, 5);
         let ah = mask_home_handicap(K_MAX, -3);
-        lmsr_update(&mut s, &over, Q64::ONE);
-        lmsr_update(&mut s, &ah, Q64::ONE);
+        lmsr_update(&mut s, &over, Q64::ONE).unwrap();
+        lmsr_update(&mut s, &ah, Q64::ONE).unwrap();
         // (3,0): 3-0 is over 2.5 and home -1.5
         assert_eq!(s.exposure[cell(3, 0, K_MAX)], Q64::from_int(2));
         // (2,0): 2-0 is not over 2.5, is home -1.5
@@ -290,7 +290,7 @@ mod tests {
         let mut s = book();
         let m0 = mask_home_handicap(K_MAX, a);
         let m1 = mask_home_handicap(K_MAX, b);
-        let (c0, c1) = lmsr_update_quarter(&mut s, &m0, &m1, Q64::from_int(2));
+        let (c0, c1) = lmsr_update_quarter(&mut s, &m0, &m1, Q64::from_int(2)).unwrap();
         assert!(c0.raw() > 0 && c1.raw() > 0);
         // -1.0 wins on i-j>=2; -0.5 wins on i-j>=1
         assert_eq!(s.exposure[cell(2, 0, K_MAX)], Q64::from_int(2));
@@ -301,9 +301,9 @@ mod tests {
     #[test]
     fn after_any_mix_1x2_still_sums_to_one() {
         let mut s = book();
-        lmsr_update(&mut s, &mask_home(K_MAX), Q64::from_ratio(3, 2));
-        lmsr_update(&mut s, &mask_over(K_MAX, 5), Q64::ONE);
-        lmsr_update(&mut s, &mask_exact(K_MAX, 0, 0), Q64::from_ratio(1, 2));
+        lmsr_update(&mut s, &mask_home(K_MAX), Q64::from_ratio(3, 2)).unwrap();
+        lmsr_update(&mut s, &mask_over(K_MAX, 5), Q64::ONE).unwrap();
+        lmsr_update(&mut s, &mask_exact(K_MAX, 0, 0), Q64::from_ratio(1, 2)).unwrap();
         let p = set_prob(&s, &mask_home(K_MAX))
             .saturating_add(set_prob(&s, &mask_draw(K_MAX)))
             .saturating_add(set_prob(&s, &mask_away(K_MAX)));
@@ -315,16 +315,17 @@ mod tests {
         let mut s = book();
         let k = K_MAX;
         // Home q=2, over 2.5 q=1, exact 2-1 q=1, home -0.75 q=2.
-        lmsr_update(&mut s, &mask_home(k), Q64::from_int(2));
-        lmsr_update(&mut s, &mask_over(k, 5), Q64::ONE);
-        lmsr_update(&mut s, &mask_exact(k, 2, 1), Q64::ONE);
+        lmsr_update(&mut s, &mask_home(k), Q64::from_int(2)).unwrap();
+        lmsr_update(&mut s, &mask_over(k, 5), Q64::ONE).unwrap();
+        lmsr_update(&mut s, &mask_exact(k, 2, 1), Q64::ONE).unwrap();
         let (h0, h1) = quarter_to_halves(-3);
         lmsr_update_quarter(
             &mut s,
             &mask_home_handicap(k, h0),
             &mask_home_handicap(k, h1),
             Q64::from_int(2),
-        );
+        )
+        .unwrap();
         let cell = cell(2, 1, k);
         let mut face = 0u64;
         for (kind, a, b, q) in [(0, 0, 0, 2u64), (3, 5, 0, 1), (7, 2, 1, 1), (10, -3, 0, 2)] {

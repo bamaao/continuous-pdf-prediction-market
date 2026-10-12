@@ -67,6 +67,7 @@ export function withdrawIx(owner: PublicKey, amount: bigint): TransactionInstruc
       w(ata(config)),
       w(ata(owner)),
       w(userVault(owner)),
+      r(sessionPda(owner)),
       r(TOKEN_PROGRAM),
     ],
     data: Buffer.concat([disc("withdraw"), u64(amount)]),

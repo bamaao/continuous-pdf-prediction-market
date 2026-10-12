@@ -160,19 +160,28 @@ pub fn interval_prob(state: &LmsrState, in_set: &[bool]) -> Q64 {
 }
 
 /// $C_S(q) = \beta \ln((1-p)+p e^{q/\beta})$.
-pub fn lmsr_cost(beta: Q64, p: Q64, q: Q64) -> Q64 {
-    let e = q.checked_div(beta).unwrap_or(Q64::ZERO).exp();
+/// `None` when `|q/β| > 16` (exp domain) — callers must reject the fill.
+pub fn lmsr_cost(beta: Q64, p: Q64, q: Q64) -> Option<Q64> {
+    let e = q.checked_div(beta)?.try_exp()?;
     let inner = Q64::ONE
         .saturating_sub(p)
         .saturating_add(p.saturating_mul(e));
-    beta.saturating_mul(inner.ln())
+    Some(beta.saturating_mul(inner.ln()))
 }
 
-pub fn buy_cost(state: &LmsrState, in_set: &[bool], q: Q64) -> Q64 {
+pub fn buy_cost(state: &LmsrState, in_set: &[bool], q: Q64) -> Option<Q64> {
     lmsr_cost(state.beta, interval_prob(state, in_set), q)
 }
 
+/// Reject fills whose `|q/β|` exceeds the exp Taylor domain.
+pub fn q_over_beta_in_domain(beta: Q64, q: Q64) -> bool {
+    q.checked_div(beta)
+        .map(|r| r.exp_in_domain())
+        .unwrap_or(false)
+}
+
 /// In-place fill on the on-chain cache (`weights` / `z`). No extra $n$-vectors.
+/// `None` when `|q/β|` is outside the exp domain.
 pub fn lmsr_apply_cached(
     beta: Q64,
     weights: &mut [i128],
@@ -181,7 +190,7 @@ pub fn lmsr_apply_cached(
     z: &mut i128,
     in_set: &[bool],
     q: Q64,
-) -> Q64 {
+) -> Option<Q64> {
     let n = weights.len();
     assert_eq!(theta.len(), n);
     assert_eq!(exposure.len(), n);
@@ -195,8 +204,8 @@ pub fn lmsr_apply_cached(
         }
     }
     let p = num.checked_div(z0).unwrap_or(Q64::ZERO);
-    let cost = lmsr_cost(beta, p, q);
-    let e = q.checked_div(beta).unwrap_or(Q64::ZERO).exp();
+    let cost = lmsr_cost(beta, p, q)?;
+    let e = q.checked_div(beta)?.try_exp()?;
     let mut z_now = z0;
     for i in 0..n {
         if in_set[i] {
@@ -209,22 +218,22 @@ pub fn lmsr_apply_cached(
         }
     }
     *z = z_now.raw();
-    cost
+    Some(cost)
 }
 
 /// Instantaneous marginal price after a buy of size `q` (end of the trade).
-pub fn marginal_price(state: &LmsrState, in_set: &[bool], q: Q64) -> Q64 {
+pub fn marginal_price(state: &LmsrState, in_set: &[bool], q: Q64) -> Option<Q64> {
     let p = interval_prob(state, in_set);
-    let e = q.checked_div(state.beta).unwrap_or(Q64::ZERO).exp();
+    let e = q.checked_div(state.beta)?.try_exp()?;
     let num = p.saturating_mul(e);
     let den = Q64::ONE.saturating_sub(p).saturating_add(num);
-    num.checked_div(den).unwrap_or(Q64::ZERO)
+    num.checked_div(den)
 }
 
 /// Apply a buy of `q` on set `S`. Returns cost $C_S(q)$ (fee is applied by the caller).
-pub fn lmsr_update(state: &mut LmsrState, in_set: &[bool], q: Q64) -> Q64 {
-    let cost = buy_cost(state, in_set, q);
-    let e = q.checked_div(state.beta).unwrap_or(Q64::ZERO).exp();
+pub fn lmsr_update(state: &mut LmsrState, in_set: &[bool], q: Q64) -> Option<Q64> {
+    let cost = buy_cost(state, in_set, q)?;
+    let e = q.checked_div(state.beta)?.try_exp()?;
     let live = state.cache_live();
     for i in 0..state.n() {
         if in_set[i] {
@@ -237,7 +246,7 @@ pub fn lmsr_update(state: &mut LmsrState, in_set: &[bool], q: Q64) -> Q64 {
             state.exposure[i] = state.exposure[i].saturating_add(q);
         }
     }
-    cost
+    Some(cost)
 }
 
 /// Uniform prior on `n` atoms.
@@ -277,7 +286,7 @@ mod tests {
         let mut exposure: Vec<i128> = s.exposure.iter().map(|q| q.raw()).collect();
         let mut z = s.z.raw();
         let m = mask(32, 4, 12);
-        let c1 = lmsr_update(&mut s, &m, Q64::ONE);
+        let c1 = lmsr_update(&mut s, &m, Q64::ONE).unwrap();
         let c2 = lmsr_apply_cached(
             Q64::from_int(10),
             &mut weights,
@@ -286,7 +295,8 @@ mod tests {
             &mut z,
             &m,
             Q64::ONE,
-        );
+        )
+        .unwrap();
         assert!(c1.approx_eq(c2, 1 << 32));
         for i in 0..32 {
             assert_eq!(weights[i], s.weights[i].raw());
@@ -301,7 +311,7 @@ mod tests {
         let mut s = LmsrState::new(Q64::from_int(10), uniform_prior(4));
         let m = mask(4, 0, 2);
         let p0 = interval_prob(&s, &m);
-        let _c = lmsr_update(&mut s, &m, Q64::ONE);
+        let _c = lmsr_update(&mut s, &m, Q64::ONE).unwrap();
         let p1 = interval_prob(&s, &m);
         assert!(p1 > p0, "p should rise: {} vs {}", p1.raw(), p0.raw());
     }
@@ -309,7 +319,7 @@ mod tests {
     #[test]
     fn masses_sum_to_one() {
         let mut s = LmsrState::new(Q64::from_int(8), uniform_prior(5));
-        lmsr_update(&mut s, &mask(5, 1, 3), Q64::from_ratio(1, 2));
+        lmsr_update(&mut s, &mask(5, 1, 3), Q64::from_ratio(1, 2)).unwrap();
         let mut acc = Q64::ZERO;
         for i in 0..5 {
             let mut m = vec![false; 5];
@@ -322,8 +332,17 @@ mod tests {
     #[test]
     fn cost_positive() {
         let s = LmsrState::new(Q64::from_int(10), uniform_prior(4));
-        let c = buy_cost(&s, &mask(4, 0, 1), Q64::ONE);
+        let c = buy_cost(&s, &mask(4, 0, 1), Q64::ONE).unwrap();
         assert!(c.raw() > 0);
+    }
+
+    #[test]
+    fn rejects_q_beyond_exp_domain() {
+        let beta = Q64::ONE;
+        let p = Q64::ONE;
+        assert!(lmsr_cost(beta, p, Q64::from_int(16)).is_some());
+        assert!(lmsr_cost(beta, p, Q64::from_int(17)).is_none());
+        assert!(!q_over_beta_in_domain(beta, Q64::from_int(100)));
     }
 
     #[test]
@@ -331,7 +350,7 @@ mod tests {
         let mut s = LmsrState::new(Q64::from_int(10), uniform_prior(8));
         for k in 0..80 {
             let start = k % 8;
-            lmsr_update(&mut s, &mask(8, start, start + 1), Q64::from_ratio(1, 5));
+            lmsr_update(&mut s, &mask(8, start, start + 1), Q64::from_ratio(1, 5)).unwrap();
         }
         let rebuilt = LmsrState::from_vecs(s.beta, s.p0.clone(), s.theta.clone(), s.exposure.clone());
         assert!(s.z.approx_eq(rebuilt.z, 1 << 40), "z {} vs {}", s.z.raw(), rebuilt.z.raw());
@@ -349,8 +368,8 @@ mod tests {
     #[test]
     fn peak_is_hottest_atom_not_interval_sum() {
         let mut s = LmsrState::new(Q64::from_int(10), uniform_prior(5));
-        lmsr_update(&mut s, &mask(5, 1, 4), Q64::from_int(2));
-        lmsr_update(&mut s, &mask(5, 2, 3), Q64::from_int(3));
+        lmsr_update(&mut s, &mask(5, 1, 4), Q64::from_int(2)).unwrap();
+        lmsr_update(&mut s, &mask(5, 2, 3), Q64::from_int(3)).unwrap();
         let peak = s.peak_exposure();
         assert_eq!(peak.cell, 2);
         assert_eq!(peak.value, Q64::from_int(5));

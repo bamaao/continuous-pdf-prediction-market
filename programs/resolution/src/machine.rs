@@ -154,6 +154,9 @@ pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
             Err("awaiting admin")
         }
         Event::Void => {
+            if case.phase != Phase::Open {
+                return Err("cannot void");
+            }
             if case.now < case.close_ts && !case.early_ok {
                 return Err("void only after close");
             }
@@ -300,5 +303,15 @@ mod tests {
         assert_eq!(apply(&c, Event::Void), Err("void only after close"));
         c.now = 100;
         assert_eq!(apply(&c, Event::Void), Ok(Effect::Void));
+    }
+
+    #[test]
+    fn void_rejected_outside_open() {
+        let mut c = base();
+        c.now = 100;
+        c.phase = Phase::Proposed;
+        assert_eq!(apply(&c, Event::Void), Err("cannot void"));
+        c.phase = Phase::Voting;
+        assert_eq!(apply(&c, Event::Void), Err("cannot void"));
     }
 }

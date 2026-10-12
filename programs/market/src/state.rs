@@ -90,10 +90,15 @@ pub struct Market {
     pub report_open_ts: i64,
     /// USDC locked by the committee. Slashed if the platform writes $x^*$ after a missed report.
     pub committee_bond: u64,
+    /// Σ position `cost_paid` (buy +, sell −min(cost_paid, proceeds)). VOID ρ = min(1, R / basis).
+    pub cost_basis: u64,
+    /// Active wide fill's set_mask (bit-packed, `ceil(n/8)` used). Lets halt/cancel revert without off-chain mask.
+    pub wide_mask: [u8; 128],
 }
 
 impl Market {
-    pub const SIZE: usize = 8 + 592;
+    /// disc + body; room for `wide_mask` after `cost_basis` (committee_bond offset 540 unchanged).
+    pub const SIZE: usize = 8 + 700;
 
     pub fn report_opens_at(&self) -> i64 {
         if self.report_open_ts > 0 {
@@ -493,11 +498,19 @@ mod tests {
             wide_tag: 0,
             wide_flags: 0,
             report_open_ts: 0,
-            committee_bond: 0,
+            committee_bond: 99_001,
+            cost_basis: 0,
+            wide_mask: [0; 128],
         };
         let mut buf = Vec::new();
         m.try_serialize(&mut buf).unwrap();
         assert!(buf.len() <= Market::SIZE, "serialized {} > SIZE {}", buf.len(), Market::SIZE);
         assert_eq!(u16::from_le_bytes(buf[12..14].try_into().unwrap()), 256);
+        // vault `lock_committee_bond` reads committee_bond at fixed Borsh offset 540.
+        assert_eq!(buf.len(), 684);
+        assert_eq!(
+            u64::from_le_bytes(buf[540..548].try_into().unwrap()),
+            99_001
+        );
     }
 }

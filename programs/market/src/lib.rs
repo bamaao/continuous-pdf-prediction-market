@@ -4,16 +4,18 @@
 //! Session PDA authorizes in-board fills (FR-WAL-04–06). After `delegate_book`, L1 fills return `Delegated`.
 
 use anchor_lang::prelude::*;
+use anchor_lang::InstructionData;
 use ephemeral_rollups_sdk::anchor::{delegate, ephemeral};
 use ephemeral_rollups_sdk::cpi::{cpi_delegate, DelegateConfig};
-use ephemeral_rollups_sdk::ephem::{FoldableIntentBuilder, MagicIntentBundleBuilder};
+use ephemeral_rollups_sdk::ephem::{CallHandler, FoldableIntentBuilder, MagicIntentBundleBuilder};
 use ephemeral_rollups_sdk::types::DelegateAccountArgs;
 use ephemeral_rollups_sdk::utils::close_pda_with_system_transfer;
+use ephemeral_rollups_sdk::{ActionArgs, ShortAccountMeta};
 use math::prior;
 use math::settle::{usdc, usdc_charge};
 use math::Q64;
-use vault::cpi::accounts::CreditTrade;
-use vault::cpi::{credit_trade, refund_trade};
+use vault::cpi::accounts::{CreditTrade, LockTrade, PaySyncFee, UnlockTrade};
+use vault::cpi::{credit_er_trade, credit_trade, lock_trade, pay_sync_fee, refund_trade, unlock_trade};
 
 pub mod ids;
 pub mod mask;
@@ -31,8 +33,18 @@ use state::*;
 
 declare_id!("Market1111111111111111111111111111111111111");
 
+/// Must match `resolution::ID`.
+pub const RESOLUTION_PROGRAM_ID: Pubkey = pubkey!("Rso1111111111111111111111111111111111111111");
+
 /// Local `ephemeral-validator` identity (docs: localhost:7799).
 pub const LOCAL_ER_VALIDATOR: Pubkey = pubkey!("mAGicPQYBMvcYveUZA5F5UNNwyHvfYh5xkLS2Fr1mev");
+
+/// Per-seat USDC (6 decimals) taken on `sync_vault` → `Market.platform` vault.
+/// Rebates Keeper SOL for undelegate/sync; 0.01 USDC per seat.
+/// Locked into `trade_pending` on open/renew (not part of `session.remaining`) so it cannot be withdrawn or spent on fills.
+pub const SYNC_SEAT_FEE_USDC: u64 = 10_000;
+/// Max seats reserved for sync fees at open (matches undelegate batch cap). Prevents fee grief.
+pub const SYNC_FEE_SEATS_MAX: u8 = 8;
 /// MagicBlock Delegation program (loaded on localnet from the validator dump).
 pub const DELEGATION_PROGRAM_ID: Pubkey = pubkey!("DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh");
 /// MagicBlock magic program id used by `ephemeral-rollups-sdk` 0.17 CPI.
@@ -40,12 +52,38 @@ pub const MAGIC_PROGRAM_ID: Pubkey = pubkey!("Magic11111111111111111111111111111
 /// MagicBlock magic context account (present and owned by the magic program on ER).
 pub const MAGIC_CONTEXT_ID: Pubkey = pubkey!("MagicContext1111111111111111111111111111111");
 
+/// Genesis authority for `init_protocol` when built without `genesis-open`.
+/// Replace with the official deployer / multisig before mainnet (disable `genesis-open`).
+pub const GENESIS_AUTHORITY: Pubkey = pubkey!("Gen1111111111111111111111111111111111111111");
+
+fn require_genesis_authority(authority: &Pubkey) -> Result<()> {
+    #[cfg(feature = "genesis-open")]
+    {
+        let _ = authority;
+        Ok(())
+    }
+    #[cfg(not(feature = "genesis-open"))]
+    {
+        // Fail closed if the placeholder was left in a production build.
+        const PLACEHOLDER: Pubkey = pubkey!("Gen1111111111111111111111111111111111111111");
+        require!(GENESIS_AUTHORITY != PLACEHOLDER, MarketError::NotOfficial);
+        require_keys_eq!(*authority, GENESIS_AUTHORITY, MarketError::NotOfficial);
+        Ok(())
+    }
+}
+
 #[ephemeral]
 #[program]
 pub mod market {
     use super::*;
 
+    /// One-time committee. Signer MUST be `protocol.platform` (init protocol first).
     pub fn init_committee(ctx: Context<InitCommittee>, members: Vec<Pubkey>, m: u8) -> Result<()> {
+        require_keys_eq!(
+            ctx.accounts.authority.key(),
+            ctx.accounts.protocol.platform,
+            MarketError::NotOfficial
+        );
         write_roster(&mut ctx.accounts.committee, ctx.accounts.authority.key(), ctx.bumps.committee, members, m)
     }
 
@@ -61,7 +99,9 @@ pub mod market {
     }
 
     /// One-time official policy. Signer MUST be `args.platform`.
+    /// Without `genesis-open`, signer MUST also be `GENESIS_AUTHORITY`.
     pub fn init_protocol(ctx: Context<InitProtocol>, args: ProtocolArgs) -> Result<()> {
+        require_genesis_authority(&ctx.accounts.authority.key())?;
         require!(ctx.accounts.authority.key() == args.platform, MarketError::NotOfficial);
         require!(args.platform != Pubkey::default(), MarketError::BadCapital);
         require!(args.fee_bps <= 10_000, MarketError::BadFee);
@@ -296,6 +336,26 @@ pub mod market {
         if s.status == SESSION_LIVE && now < s.expires_ts {
             return err!(MarketError::SessionLive);
         }
+        require_session_debt_clear(&ctx.accounts.owner.key(), &s, ctx.remaining_accounts)?;
+        // Never unlock-all here (was an ER double-spend window). Sync seats, then
+        // `reclaim_trade_pending` for leftover fee dust, then reopen with pending == 0.
+        let pending = vault_trade_pending_or_zero(
+            &ctx.accounts.user_vault.to_account_info(),
+            &ctx.accounts.owner.key(),
+        )?;
+        require!(pending == 0, MarketError::SyncVaultFirst);
+        // Lock spendable budget + sync-fee reserve for up to SYNC_FEE_SEATS_MAX seats.
+        let fee_reserve = SYNC_SEAT_FEE_USDC.saturating_mul(SYNC_FEE_SEATS_MAX as u64);
+        let lock_amt = remaining_usdc.saturating_add(fee_reserve);
+        if lock_amt > 0 {
+            cpi_lock_trade(
+                &ctx.accounts.vault_program,
+                &ctx.accounts.protocol,
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.user_vault.to_account_info(),
+                lock_amt,
+            )?;
+        }
         s.owner = ctx.accounts.owner.key();
         s.authority = authority;
         s.expires_ts = expires_ts;
@@ -304,24 +364,113 @@ pub mod market {
         s.status = SESSION_LIVE;
         s.bump = ctx.bumps.session;
         s.whitelist = whitelist;
+        s.er_owed_usdc = 0;
+        s.unsynced_seats = 0;
+        require_trade_pending_covers_budget(
+            &ctx.accounts.user_vault.to_account_info(),
+            &ctx.accounts.owner.key(),
+            remaining_usdc,
+            0,
+        )?;
         Ok(())
     }
 
     pub fn renew_session(ctx: Context<MutSession>, expires_ts: i64, remaining_usdc: u64) -> Result<()> {
+        require_session_on_l1(&ctx.accounts.session.to_account_info())?;
+        require_er_debt_matches(
+            &ctx.accounts.owner.key(),
+            ctx.remaining_accounts,
+            ctx.accounts.session.er_owed_usdc,
+        )?;
         let now = Clock::get()?.unix_timestamp;
         require!(expires_ts > now, MarketError::BadClock);
         let s = &mut ctx.accounts.session;
         require!(s.status == SESSION_LIVE, MarketError::SessionUnauthorized);
+        let old = s.remaining_usdc;
+        if remaining_usdc > old {
+            let delta = remaining_usdc - old;
+            cpi_lock_trade(
+                &ctx.accounts.vault_program,
+                &ctx.accounts.protocol,
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.user_vault.to_account_info(),
+                delta,
+            )?;
+        } else if remaining_usdc < old {
+            cpi_unlock_trade(
+                &ctx.accounts.vault_program,
+                &ctx.accounts.protocol,
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.user_vault.to_account_info(),
+                old - remaining_usdc,
+            )?;
+        }
         s.expires_ts = expires_ts;
         s.remaining_usdc = remaining_usdc;
+        // Invariant: pending covers unspent remaining + unsynced ER debt.
+        require_trade_pending_covers_budget(
+            &ctx.accounts.user_vault.to_account_info(),
+            &ctx.accounts.owner.key(),
+            remaining_usdc,
+            s.er_owed_usdc,
+        )?;
         Ok(())
     }
 
     pub fn revoke_session(ctx: Context<MutSession>) -> Result<()> {
+        require_session_on_l1(&ctx.accounts.session.to_account_info())?;
+        require_session_debt_clear(
+            &ctx.accounts.owner.key(),
+            &ctx.accounts.session,
+            ctx.remaining_accounts,
+        )?;
         let s = &mut ctx.accounts.session;
+        let unused = s.remaining_usdc;
+        if unused > 0 {
+            cpi_unlock_trade(
+                &ctx.accounts.vault_program,
+                &ctx.accounts.protocol,
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.user_vault.to_account_info(),
+                unused,
+            )?;
+        }
         s.status = SESSION_REVOKED;
         s.authority = Pubkey::default();
         s.remaining_usdc = 0;
+        Ok(())
+    }
+
+    /// Unlock leftover `trade_pending` after session is dead and seats are synced.
+    /// Fee dust up to `SYNC_FEE_SEATS_MAX` seat fees — unsynced spend must be cleared via `sync_vault` first.
+    pub fn reclaim_trade_pending(ctx: Context<MutSession>) -> Result<()> {
+        require_session_on_l1(&ctx.accounts.session.to_account_info())?;
+        require_session_debt_clear(
+            &ctx.accounts.owner.key(),
+            &ctx.accounts.session,
+            ctx.remaining_accounts,
+        )?;
+        let now = Clock::get()?.unix_timestamp;
+        let s = &ctx.accounts.session;
+        require!(
+            s.status != SESSION_LIVE || now >= s.expires_ts,
+            MarketError::SessionLive
+        );
+        let pending = vault_trade_pending_or_zero(
+            &ctx.accounts.user_vault.to_account_info(),
+            &ctx.accounts.owner.key(),
+        )?;
+        let max_fee = SYNC_SEAT_FEE_USDC.saturating_mul(SYNC_FEE_SEATS_MAX as u64);
+        require!(pending <= max_fee, MarketError::SyncVaultFirst);
+        if pending > 0 {
+            cpi_unlock_trade(
+                &ctx.accounts.vault_program,
+                &ctx.accounts.protocol,
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.user_vault.to_account_info(),
+                pending,
+            )?;
+        }
         Ok(())
     }
 
@@ -599,16 +748,122 @@ pub mod market {
     }
 
     /// Creator or roster member stops fills (VOID, including Bernoulli early occurrence, or after close).
-    pub fn halt(ctx: Context<Halt>) -> Result<()> {
+    /// If a wide fill already wrote shards, reverts from on-chain `wide_mask` (pass grid + shards).
+    pub fn halt(ctx: Context<WideCancel>) -> Result<()> {
         require_book_keys(
             &ctx.accounts.authority.key(),
             &ctx.accounts.market,
             &ctx.accounts.committee,
             &ctx.accounts.committee.key(),
         )?;
+        require!(
+            ctx.accounts.market.status == Status::Trading as u8,
+            MarketError::NotTrading
+        );
+        if ctx.accounts.market.wide_write != 0 {
+            let market_key = ctx.accounts.market.key();
+            let mask = wide_stored_mask(&ctx.accounts.market);
+            let q_raw = ctx.accounts.market.wide_q;
+            let nonce = ctx.accounts.market.wide_nonce;
+            let is_buy = ctx.accounts.market.wide_flags & WIDE_BUY != 0;
+            wide_revert_written(
+                &ctx.accounts.market,
+                market_key,
+                &ctx.accounts.grid.to_account_info(),
+                ctx.remaining_accounts,
+                &mask,
+                q_raw,
+                nonce,
+                is_buy,
+            )?;
+        }
         let market = &mut ctx.accounts.market;
-        require!(market.status == Status::Trading as u8, MarketError::NotTrading);
         market.status = Status::Halted as u8;
+        wide_clear(market);
+        Ok(())
+    }
+
+    /// Clear stuck `wide_*`. Uses on-chain `wide_mask`/q/nonce when shards were written.
+    /// Before `close_ts`: creator/committee. After close: permissionless.
+    pub fn wide_cancel(ctx: Context<WideCancel>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        {
+            let market = &ctx.accounts.market;
+            require!(market.wide_flags & WIDE_ACTIVE != 0, MarketError::GridNotReady);
+            if now < market.close_ts {
+                require_book_keys(
+                    &ctx.accounts.authority.key(),
+                    market,
+                    &ctx.accounts.committee,
+                    &ctx.accounts.committee.key(),
+                )?;
+            }
+        }
+        if ctx.accounts.market.wide_write != 0 {
+            let market_key = ctx.accounts.market.key();
+            let mask = wide_stored_mask(&ctx.accounts.market);
+            let q_raw = ctx.accounts.market.wide_q;
+            let nonce = ctx.accounts.market.wide_nonce;
+            let is_buy = ctx.accounts.market.wide_flags & WIDE_BUY != 0;
+            wide_revert_written(
+                &ctx.accounts.market,
+                market_key,
+                &ctx.accounts.grid.to_account_info(),
+                ctx.remaining_accounts,
+                &mask,
+                q_raw,
+                nonce,
+                is_buy,
+            )?;
+        }
+        wide_clear(&mut ctx.accounts.market);
+        Ok(())
+    }
+
+    /// Trader path: reverse applied wide fill then clear. Same accounts as `wide_apply`.
+    #[session_auth_or(
+        ctx.accounts.trader.key() == ctx.accounts.owner.key()
+            || ctx
+                .accounts
+                .session
+                .as_ref()
+                .map(|s| s.authority == ctx.accounts.trader.key())
+                .unwrap_or(false),
+        SessionError::InvalidToken
+    )]
+    pub fn wide_abort(
+        mut ctx: Context<Trade>,
+        set_mask: Vec<u8>,
+        q_raw: i128,
+        nonce: u64,
+        is_buy: bool,
+    ) -> Result<()> {
+        wide_abort_fill(&mut ctx, &set_mask, q_raw, nonce, is_buy)
+    }
+
+    /// Permissionless / CPI from resolution: set Settled or Void from a terminal resolution record.
+    /// Resolution must not write `Market` itself (wrong program owner → whole finalize reverts).
+    pub fn apply_resolution_status(ctx: Context<ApplyResolutionStatus>) -> Result<()> {
+        let market = &mut ctx.accounts.market;
+        let data = ctx.accounts.record.try_borrow_data()?;
+        // disc(8) + market(32) + members(512) + authorized_reporter(32) + family(1) + phase(1)
+        const PHASE_OFF: usize = 8 + 32 + 512 + 32 + 1;
+        const MARKET_OFF: usize = 8;
+        require!(data.len() >= PHASE_OFF + 1, MarketError::BadGrid);
+        let rec_market = Pubkey::try_from(&data[MARKET_OFF..MARKET_OFF + 32])
+            .map_err(|_| error!(MarketError::IdMismatch))?;
+        require_keys_eq!(rec_market, market.key(), MarketError::IdMismatch);
+        let phase = data[PHASE_OFF];
+        let next = match phase {
+            3 => Status::Settled as u8, // Finalized
+            4 | 5 => Status::Void as u8, // Failed | Voided
+            _ => return err!(MarketError::NotTrading),
+        };
+        require!(
+            market.status == Status::Trading as u8 || market.status == Status::Halted as u8,
+            MarketError::NotTrading
+        );
+        market.status = next;
         Ok(())
     }
 
@@ -908,28 +1163,240 @@ pub mod market {
         )
     }
 
-    /// Commits and undelegates a seat so L1 `sync_vault` can run.
-    pub fn undelegate_seat(ctx: Context<CommitSeat>, set_hash: [u8; 32]) -> Result<()> {
-        let _ = set_hash;
-        invoke_magic_commit(
-            &ctx.accounts.trader,
-            &ctx.accounts.magic_context,
-            &ctx.accounts.magic_program,
-            &[
-                ctx.accounts.position.to_account_info(),
-                ctx.accounts.nonce_acc.to_account_info(),
+    /// Commits and undelegates a seat, then post-undelegate `sync_vault` (+ `SYNC_SEAT_FEE_USDC`).
+    pub fn undelegate_seat<'info>(
+        ctx: Context<'_, '_, 'info, 'info, UndelegateSeat<'info>>,
+        set_hash: [u8; 32],
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.magic_program.executable,
+            MarketError::MagicProgramMissing
+        );
+        require_sync_platform(
+            &ctx.accounts.market.to_account_info(),
+            &ctx.accounts.platform.key(),
+        )?;
+        let ix_data = crate::instruction::SyncVault {
+            set_hash,
+        }
+        .data();
+        let action = CallHandler {
+            destination_program: crate::ID,
+            accounts: vec![
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.trader.key(),
+                    is_writable: false,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.owner.key(),
+                    is_writable: false,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.market.key(),
+                    is_writable: true,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.position.key(),
+                    is_writable: true,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.board.key(),
+                    is_writable: true,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.user_vault.key(),
+                    is_writable: true,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.platform.key(),
+                    is_writable: false,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.platform_vault.key(),
+                    is_writable: true,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.vault_program.key(),
+                    is_writable: false,
+                },
+                ShortAccountMeta {
+                    pubkey: ctx.accounts.session.key(),
+                    is_writable: true,
+                },
             ],
-            true,
+            args: ActionArgs::new(ix_data),
+            escrow_authority: ctx.accounts.trader.to_account_info(),
+            compute_units: 400_000,
+        };
+        // Session must be home before post-undelegate `sync_vault` (Anchor Account owner check).
+        let mut commit = vec![
+            ctx.accounts.position.to_account_info(),
+            ctx.accounts.nonce_acc.to_account_info(),
+        ];
+        if *ctx.accounts.session.owner != crate::ID {
+            commit.push(ctx.accounts.session.to_account_info());
+        }
+        MagicIntentBundleBuilder::new(
+            ctx.accounts.trader.to_account_info(),
+            ctx.accounts.magic_context.clone(),
+            ctx.accounts.magic_program.clone(),
         )
+        .commit_and_undelegate(&commit)
+        .add_post_undelegate_actions(vec![action])
+        .build_and_invoke()?;
+        Ok(())
     }
 
-    /// After undelegate, debit `user_vault` for ER fills recorded in `vault_owed_*`.
+    /// Batch commit+undelegate seats and schedule post-undelegate `sync_vault` (+ sync fee).
+    /// `remaining_accounts`: repeating `(owner, position, nonce, user_vault, session)` per `set_hashes[i]`.
+    /// Book should already be home before L1 actions run. Max 8 seats / tx.
+    pub fn undelegate_seats<'info>(
+        ctx: Context<'_, '_, 'info, 'info, UndelegateSeats<'info>>,
+        set_hashes: Vec<[u8; 32]>,
+    ) -> Result<()> {
+        const MAX_SEATS: usize = 8;
+        require!(!set_hashes.is_empty(), MarketError::BadGrid);
+        require!(set_hashes.len() <= MAX_SEATS, MarketError::BadGrid);
+        require!(
+            ctx.remaining_accounts.len() == set_hashes.len() * 5,
+            MarketError::BadGrid
+        );
+        require!(
+            ctx.accounts.magic_program.executable,
+            MarketError::MagicProgramMissing
+        );
+        require_sync_platform(
+            &ctx.accounts.market.to_account_info(),
+            &ctx.accounts.platform.key(),
+        )?;
+        let market_key = ctx.accounts.market.key();
+        let rem = ctx.remaining_accounts;
+        let mut commit: Vec<AccountInfo<'info>> = Vec::with_capacity(set_hashes.len() * 3);
+        let mut actions: Vec<CallHandler<'info>> = Vec::with_capacity(set_hashes.len());
+        let mut seen_nonce: Vec<Pubkey> = Vec::new();
+        let mut seen_pos: Vec<Pubkey> = Vec::new();
+        let mut seen_session: Vec<Pubkey> = Vec::new();
+
+        for (i, set_hash) in set_hashes.iter().enumerate() {
+            let base = i * 5;
+            let owner = &rem[base];
+            let position = &rem[base + 1];
+            let nonce = &rem[base + 2];
+            let user_vault = &rem[base + 3];
+            let session = &rem[base + 4];
+
+            let (pos_pda, _) = Pubkey::find_program_address(
+                &[
+                    POS_SEED,
+                    market_key.as_ref(),
+                    owner.key.as_ref(),
+                    set_hash.as_ref(),
+                ],
+                &crate::ID,
+            );
+            require_keys_eq!(*position.key, pos_pda, MarketError::IdMismatch);
+            require!(
+                !seen_pos.iter().any(|k| k == position.key),
+                MarketError::BadGrid
+            );
+            seen_pos.push(*position.key);
+            let (nonce_pda, _) = Pubkey::find_program_address(
+                &[NONCE_SEED, owner.key.as_ref(), market_key.as_ref()],
+                &crate::ID,
+            );
+            require_keys_eq!(*nonce.key, nonce_pda, MarketError::IdMismatch);
+            let (uv_pda, _) =
+                Pubkey::find_program_address(&[vault::USER_SEED, owner.key.as_ref()], &vault::ID);
+            require_keys_eq!(*user_vault.key, uv_pda, MarketError::BadVault);
+            let (session_pda, _) =
+                Pubkey::find_program_address(&[SESSION_SEED, owner.key.as_ref()], &crate::ID);
+            require_keys_eq!(*session.key, session_pda, MarketError::IdMismatch);
+
+            commit.push(position.clone());
+            if !seen_nonce.iter().any(|k| k == nonce.key) {
+                seen_nonce.push(*nonce.key);
+                commit.push(nonce.clone());
+            }
+            // Bring Session home with the seat so post-undelegate sync can load it.
+            if *session.owner != crate::ID && !seen_session.iter().any(|k| k == session.key) {
+                seen_session.push(*session.key);
+                commit.push(session.clone());
+            }
+
+            let ix_data = crate::instruction::SyncVault {
+                set_hash: *set_hash,
+            }
+            .data();
+            actions.push(CallHandler {
+                destination_program: crate::ID,
+                accounts: vec![
+                    ShortAccountMeta {
+                        pubkey: ctx.accounts.trader.key(),
+                        is_writable: false,
+                    },
+                    ShortAccountMeta {
+                        pubkey: *owner.key,
+                        is_writable: false,
+                    },
+                    ShortAccountMeta {
+                        pubkey: market_key,
+                        is_writable: true,
+                    },
+                    ShortAccountMeta {
+                        pubkey: *position.key,
+                        is_writable: true,
+                    },
+                    ShortAccountMeta {
+                        pubkey: ctx.accounts.board.key(),
+                        is_writable: true,
+                    },
+                    ShortAccountMeta {
+                        pubkey: *user_vault.key,
+                        is_writable: true,
+                    },
+                    ShortAccountMeta {
+                        pubkey: ctx.accounts.platform.key(),
+                        is_writable: false,
+                    },
+                    ShortAccountMeta {
+                        pubkey: ctx.accounts.platform_vault.key(),
+                        is_writable: true,
+                    },
+                    ShortAccountMeta {
+                        pubkey: ctx.accounts.vault_program.key(),
+                        is_writable: false,
+                    },
+                    ShortAccountMeta {
+                        pubkey: *session.key,
+                        is_writable: true,
+                    },
+                ],
+                args: ActionArgs::new(ix_data),
+                escrow_authority: ctx.accounts.trader.to_account_info(),
+                compute_units: 400_000,
+            });
+        }
+
+        MagicIntentBundleBuilder::new(
+            ctx.accounts.trader.to_account_info(),
+            ctx.accounts.magic_context.clone(),
+            ctx.accounts.magic_program.clone(),
+        )
+        .commit_and_undelegate(&commit)
+        .add_post_undelegate_actions(actions)
+        .build_and_invoke()?;
+        Ok(())
+    }
+
+    /// Debit `user_vault` for ER fills in `vault_owed_*`, then take `SYNC_SEAT_FEE_USDC`
+    /// into `Market.platform`'s vault (Keeper gas rebate). Permissionless (`trader` need not sign).
+    /// Debits require `trade_pending` (no free fallback). Fee only on debit seats, and only from
+    /// pre-locked pending (never free — blocks permissionless fee grief).
     pub fn sync_vault(ctx: Context<SyncVault>, set_hash: [u8; 32]) -> Result<()> {
         let _ = set_hash;
-        require!(
-            !ctx.accounts.market.delegated,
-            MarketError::Delegated
-        );
+        require!(!ctx.accounts.market.delegated, MarketError::Delegated);
+        // `Session` is `Account<>` → must be market-owned. Callers (undelegate_* / Keeper)
+        // commit+undelegate the session with the seat before this runs.
         let cost = ctx.accounts.position.vault_owed_cost;
         let fee = ctx.accounts.position.vault_owed_fee;
         let credit = ctx.accounts.position.vault_owed_credit;
@@ -938,15 +1405,27 @@ pub mod market {
         }
         let owner_key = ctx.accounts.owner.key();
         require_keys_eq!(ctx.accounts.position.owner, owner_key, MarketError::BadVault);
-        require_keys_eq!(ctx.accounts.position.market, ctx.accounts.market.key(), MarketError::IdMismatch);
+        require_keys_eq!(
+            ctx.accounts.position.market,
+            ctx.accounts.market.key(),
+            MarketError::IdMismatch
+        );
+        require_keys_eq!(
+            ctx.accounts.platform_vault_owner.key(),
+            ctx.accounts.market.platform,
+            MarketError::BadVault
+        );
         let need = cost.saturating_add(fee);
-        if need > 0 {
+        let charged_debit = need > 0;
+        if charged_debit {
+            // Pending must cover debit (no free-margin heal).
             require_user_vault_cover(
                 &ctx.accounts.user_vault.to_account_info(),
                 &owner_key,
                 need,
+                true,
             )?;
-            charge_vault(
+            charge_er_vault(
                 ctx.accounts.vault_program.to_account_info(),
                 ctx.accounts.owner.to_account_info(),
                 ctx.accounts.market.to_account_info(),
@@ -957,8 +1436,14 @@ pub mod market {
                 cost,
                 fee,
             )?;
+            let s = &mut ctx.accounts.session;
+            require_keys_eq!(s.owner, owner_key, MarketError::SessionUnauthorized);
+            require!(s.er_owed_usdc >= need, MarketError::SyncVaultFirst);
+            s.er_owed_usdc = s.er_owed_usdc.saturating_sub(need);
         }
         if credit > 0 {
+            // Legacy credit (pre ErSellExceedsOwed): refund from Board revenue only.
+            // basis_cut=0: profit credit must not shrink VOID cost_basis (already cut on fill).
             refund_vault(
                 ctx.accounts.vault_program.to_account_info(),
                 ctx.accounts.owner.to_account_info(),
@@ -968,11 +1453,37 @@ pub mod market {
                 ctx.accounts.market.id_hash,
                 ctx.accounts.market.bump,
                 credit,
+                0,
             )?;
         }
+        let had = position_has_vault_owed(&ctx.accounts.position);
         ctx.accounts.position.vault_owed_cost = 0;
         ctx.accounts.position.vault_owed_fee = 0;
         ctx.accounts.position.vault_owed_credit = 0;
+        if had && (charged_debit || credit > 0) {
+            let s = &mut ctx.accounts.session;
+            s.unsynced_seats = s.unsynced_seats.saturating_sub(1);
+        }
+        // Fee is best-effort: missing platform UserVault must not block Board sync.
+        if charged_debit && SYNC_SEAT_FEE_USDC > 0 {
+            let pending = vault_trade_pending_or_zero(
+                &ctx.accounts.user_vault.to_account_info(),
+                &owner_key,
+            )?;
+            if pending >= SYNC_SEAT_FEE_USDC {
+                let _ = charge_sync_fee_vault(
+                    ctx.accounts.vault_program.to_account_info(),
+                    ctx.accounts.owner.to_account_info(),
+                    ctx.accounts.market.to_account_info(),
+                    ctx.accounts.platform_vault_owner.to_account_info(),
+                    ctx.accounts.user_vault.to_account_info(),
+                    ctx.accounts.platform_vault.to_account_info(),
+                    ctx.accounts.market.id_hash,
+                    ctx.accounts.market.bump,
+                    SYNC_SEAT_FEE_USDC,
+                );
+            }
+        }
         Ok(())
     }
 
@@ -990,6 +1501,28 @@ pub mod market {
             )?;
         }
         Ok(())
+    }
+
+    /// Commits delegated Session state to L1 (does not undelegate).
+    pub fn commit_session(ctx: Context<CommitSession>) -> Result<()> {
+        invoke_magic_commit(
+            &ctx.accounts.owner,
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+            &[ctx.accounts.session.to_account_info()],
+            false,
+        )
+    }
+
+    /// Commits and undelegates Session so L1 renew/revoke see fresh `remaining_usdc`.
+    pub fn undelegate_session(ctx: Context<CommitSession>) -> Result<()> {
+        invoke_magic_commit(
+            &ctx.accounts.owner,
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+            &[ctx.accounts.session.to_account_info()],
+            true,
+        )
     }
 }
 
@@ -1097,6 +1630,7 @@ fn open_board(
     market.c_m = 0;
     market.fees_accrued = 0;
     market.trading_revenue = 0;
+    market.cost_basis = 0;
     market.alpha_r_bps = alpha_r_bps;
     market.platform = platform;
     market.l_max = 0;
@@ -1274,8 +1808,11 @@ fn apply_cached_on_bytes(
         }
     }
     let p = num.checked_div(z0).unwrap_or(Q64::ZERO);
-    let cost = math::lmsr::lmsr_cost(beta, p, q);
-    let e = q.checked_div(beta).unwrap_or(Q64::ZERO).exp();
+    let cost = math::lmsr::lmsr_cost(beta, p, q).ok_or_else(|| error!(MarketError::QtyTooLarge))?;
+    let e = q
+        .checked_div(beta)
+        .and_then(|r| r.try_exp())
+        .ok_or_else(|| error!(MarketError::QtyTooLarge))?;
     let mut z_now = z0;
     for i in 0..n {
         if in_set(i) {
@@ -1449,8 +1986,11 @@ fn apply_cached_on_shards(
     require!(z0.raw() != 0, MarketError::GridNotReady);
     let q = Q64::from_raw(signed_q);
     let p = num.checked_div(z0).unwrap_or(Q64::ZERO);
-    let cost = math::lmsr::lmsr_cost(beta, p, q);
-    let e = q.checked_div(beta).unwrap_or(Q64::ZERO).exp();
+    let cost = math::lmsr::lmsr_cost(beta, p, q).ok_or_else(|| error!(MarketError::QtyTooLarge))?;
+    let e = q
+        .checked_div(beta)
+        .and_then(|r| r.try_exp())
+        .ok_or_else(|| error!(MarketError::QtyTooLarge))?;
     let mut z_now = z0;
     let mut l_max = 0i128;
     {
@@ -1822,6 +2362,7 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_b
     let cost_usdc = fill_usdc(is_buy, cost);
     let fee_usdc = fill_usdc(is_buy, fee);
     if is_buy {
+        require!(cost_usdc > 0, MarketError::ZeroQty);
         ctx.accounts.market.fees_accrued = ctx
             .accounts
             .market
@@ -1845,6 +2386,7 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_b
     pos.owner = owner_key;
     pos.set_hash = ids::set_hash(set_mask);
     pos.bump = ctx.bumps.position;
+    let basis_cut = apply_fill_cost_basis(&mut ctx.accounts.market, pos, is_buy, cost_usdc);
     if is_buy {
         pos.q = pos.q.checked_add(q_raw).ok_or(MarketError::Overflow)?;
         pos.cost_paid = pos.cost_paid.saturating_add(cost_usdc);
@@ -1855,6 +2397,7 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_b
 
     let id_hash = ctx.accounts.market.id_hash;
     let bump = ctx.accounts.market.bump;
+    let on_er = ctx.accounts.market.delegated;
     settle_vault_fill(
         &mut ctx.accounts.session,
         ctx.accounts.owner.to_account_info(),
@@ -1862,14 +2405,14 @@ fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_b
         ctx.accounts.board.to_account_info(),
         ctx.accounts.user_vault.to_account_info(),
         ctx.accounts.vault_program.to_account_info(),
-        ctx.remaining_accounts,
+        on_er,
         &mut **pos,
         id_hash,
         bump,
         is_buy,
         cost_usdc,
         fee_usdc,
-        trader_key,
+        basis_cut,
         owner_key,
     )?;
     ctx.accounts.nonce_acc.last = nonce;
@@ -1909,6 +2452,19 @@ fn wide_clear(m: &mut Market) {
     m.wide_write = 0;
     m.wide_tag = 0;
     m.wide_flags = 0;
+    m.wide_mask = [0; 128];
+}
+
+fn wide_store_mask(m: &mut Market, set_mask: &[u8]) -> Result<()> {
+    require!(set_mask.len() <= m.wide_mask.len(), MarketError::BadMask);
+    m.wide_mask = [0; 128];
+    m.wide_mask[..set_mask.len()].copy_from_slice(set_mask);
+    Ok(())
+}
+
+fn wide_stored_mask(m: &Market) -> Vec<u8> {
+    let nbytes = ((m.n as usize + 7) / 8).min(m.wide_mask.len());
+    m.wide_mask[..nbytes].to_vec()
 }
 
 fn wide_params_ok(m: &Market, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: bool) -> Result<()> {
@@ -1918,6 +2474,16 @@ fn wide_params_ok(m: &Market, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: 
     require!(m.wide_nonce == nonce, MarketError::NonceReplay);
     require!((m.wide_flags & WIDE_BUY != 0) == is_buy, MarketError::BadMask);
     Ok(())
+}
+
+/// Reject |q/β| outside try_exp domain before any shard mutation.
+fn wide_qty_ok(beta_raw: i128, q_raw: i128, is_buy: bool) -> Result<Q64> {
+    let signed = if is_buy { q_raw } else { -q_raw };
+    let q = Q64::from_raw(signed);
+    let beta = Q64::from_raw(beta_raw);
+    q.checked_div(beta)
+        .and_then(|r| r.try_exp())
+        .ok_or_else(|| error!(MarketError::QtyTooLarge))
 }
 
 fn wide_gate(ctx: &Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: bool) -> Result<bool> {
@@ -1993,6 +2559,7 @@ fn wide_begin_fill(
     if wide_gate(ctx, set_mask, q_raw, nonce, is_buy)? {
         return Ok(());
     }
+    let _ = wide_qty_ok(ctx.accounts.market.beta, q_raw, is_buy)?;
     {
         let m = &ctx.accounts.market;
         if m.wide_flags & WIDE_ACTIVE != 0 {
@@ -2007,6 +2574,7 @@ fn wide_begin_fill(
             m.wide_write = 0;
             m.wide_z = 0;
             m.p0_sum = 0;
+            wide_store_mask(m, set_mask)?;
         }
     }
     wide_accum_extras(ctx, set_mask)
@@ -2043,18 +2611,28 @@ fn wide_apply_fill(
         ctx.accounts.market.wide_read == need,
         MarketError::GridNotReady
     );
-    let market_key = ctx.accounts.market.key();
-    let extra = extras_end(ctx.remaining_accounts, market_key, n);
+    let e = wide_qty_ok(ctx.accounts.market.beta, q_raw, is_buy)?;
     let signed = if is_buy { q_raw } else { -q_raw };
     let q = Q64::from_raw(signed);
     let beta = Q64::from_raw(ctx.accounts.market.beta);
-    let e = q.checked_div(beta).unwrap_or(Q64::ZERO).exp();
+    // Before first shard write: cost must be in-domain (same gate as finish).
+    if ctx.accounts.market.wide_write == 0 {
+        let z0 = Q64::from_raw(ctx.accounts.market.wide_z0);
+        require!(z0.raw() != 0, MarketError::GridNotReady);
+        let p = Q64::from_raw(ctx.accounts.market.p0_sum)
+            .checked_div(z0)
+            .unwrap_or(Q64::ZERO);
+        let _ = math::lmsr::lmsr_cost(beta, p, q).ok_or_else(|| error!(MarketError::QtyTooLarge))?;
+    }
+    let market_key = ctx.accounts.market.key();
+    let extra = extras_end(ctx.remaining_accounts, market_key, n);
     let in_set = |i: usize| mask::bit(set_mask, i);
     let mut z_now = if ctx.accounts.market.wide_write == 0 {
         Q64::from_raw(ctx.accounts.market.wide_z0)
     } else {
         Q64::from_raw(ctx.accounts.market.wide_z)
     };
+    // Do not bump `market.l_max` until finish — abort must not leave a raised ceiling.
     let mut l_max = ctx.accounts.market.l_max;
     for shard in &ctx.remaining_accounts[..extra] {
         let ix = parse_extra_ix(shard, market_key, n)?;
@@ -2100,7 +2678,101 @@ fn wide_apply_fill(
         ctx.accounts.market.wide_write |= 1;
     }
     ctx.accounts.market.wide_z = z_now.raw();
-    ctx.accounts.market.l_max = ctx.accounts.market.l_max.max(l_max);
+    let _ = l_max;
+    Ok(())
+}
+
+fn wide_revert_written(
+    market: &Market,
+    market_key: Pubkey,
+    grid: &AccountInfo,
+    remaining: &[AccountInfo],
+    set_mask: &[u8],
+    q_raw: i128,
+    nonce: u64,
+    is_buy: bool,
+) -> Result<()> {
+    wide_params_ok(market, set_mask, q_raw, nonce, is_buy)?;
+    let n = market.n;
+    let need = wide_need(n, set_mask);
+    let written = market.wide_write;
+    require!(written != 0, MarketError::GridNotReady);
+    // Inverse: −q with e = exp(−q/β) restores w/θ/E on written shards.
+    let signed = if is_buy { -q_raw } else { q_raw };
+    let q = Q64::from_raw(signed);
+    let e = q
+        .checked_div(Q64::from_raw(market.beta))
+        .and_then(|r| r.try_exp())
+        .ok_or_else(|| error!(MarketError::QtyTooLarge))?;
+    let extra = extras_end(remaining, market_key, n);
+    let in_set = |i: usize| mask::bit(set_mask, i);
+    let mut z_now = Q64::from_raw(market.wide_z);
+    let l_max = market.l_max;
+    for shard in &remaining[..extra] {
+        let ix = parse_extra_ix(shard, market_key, n)?;
+        let bit = shard_bit(ix);
+        if written & bit == 0 {
+            continue;
+        }
+        require!(need & bit != 0, MarketError::WrongGrid);
+        let mut data = shard.try_borrow_mut_data()?;
+        let out = apply_one_shard_write(
+            &mut data,
+            market_key,
+            n as usize,
+            ix,
+            in_set,
+            q,
+            e,
+            z_now,
+            l_max,
+        )?;
+        z_now = out.0;
+    }
+    if written & 1 != 0 {
+        let mut data = grid.try_borrow_mut_data()?;
+        let _ = apply_one_shard_write(
+            &mut data,
+            market_key,
+            n as usize,
+            0,
+            in_set,
+            q,
+            e,
+            z_now,
+            l_max,
+        )?;
+    }
+    Ok(())
+}
+
+fn wide_abort_fill(
+    ctx: &mut Context<Trade>,
+    set_mask: &[u8],
+    q_raw: i128,
+    nonce: u64,
+    is_buy: bool,
+) -> Result<()> {
+    require!(
+        ctx.accounts.market.status == Status::Trading as u8
+            || ctx.accounts.market.status == Status::Halted as u8,
+        MarketError::NotTrading
+    );
+    require!(ctx.accounts.market.wide_flags & WIDE_ACTIVE != 0, MarketError::GridNotReady);
+    if ctx.accounts.market.wide_write != 0 {
+        let market_key = ctx.accounts.market.key();
+        wide_revert_written(
+            &ctx.accounts.market,
+            market_key,
+            &ctx.accounts.grid.to_account_info(),
+            ctx.remaining_accounts,
+            set_mask,
+            q_raw,
+            nonce,
+            is_buy,
+        )?;
+    }
+    wide_clear(&mut ctx.accounts.market);
     Ok(())
 }
 
@@ -2131,8 +2803,23 @@ fn wide_finish_fill(
     let num = Q64::from_raw(ctx.accounts.market.p0_sum);
     let p = num.checked_div(z0).unwrap_or(Q64::ZERO);
     let beta = Q64::from_raw(ctx.accounts.market.beta);
-    let cost = math::lmsr::lmsr_cost(beta, p, q);
-    let l_max = ctx.accounts.market.l_max;
+    let cost = math::lmsr::lmsr_cost(beta, p, q).ok_or_else(|| error!(MarketError::QtyTooLarge))?;
+    // `wide_apply` defers `l_max`; take max exposure from written shards now that charge succeeds.
+    let mut l_max = ctx.accounts.market.l_max;
+    {
+        let data = ctx.accounts.grid.try_borrow_data()?;
+        let local = Grid::shard_len(n, 0) as usize;
+        let (_, exp_off, _) = require_sealed_bytes(&data, market_key, local as u16)?;
+        l_max = l_max.max(grid_l_max_bytes(&data, exp_off, local)?);
+    }
+    for shard in &ctx.remaining_accounts[..extra] {
+        let ix = parse_extra_ix(shard, market_key, n)?;
+        let data = shard.try_borrow_data()?;
+        let local = Grid::shard_len(n, ix as u16) as usize;
+        let (_, exp_off, _) = require_sealed_bytes(&data, market_key, local as u16)?;
+        l_max = l_max.max(grid_l_max_bytes(&data, exp_off, local)?);
+    }
+    ctx.accounts.market.l_max = l_max;
     let fee_bps = ctx.accounts.market.fee_bps;
     let fee = if is_buy && ctx.accounts.market.fee_on_fill() && fee_bps > 0 {
         cost.saturating_mul(Q64::from_int(fee_bps as i64))
@@ -2144,6 +2831,7 @@ fn wide_finish_fill(
     let cost_usdc = fill_usdc(is_buy, cost);
     let fee_usdc = fill_usdc(is_buy, fee);
     if is_buy {
+        require!(cost_usdc > 0, MarketError::ZeroQty);
         ctx.accounts.market.fees_accrued = ctx
             .accounts
             .market
@@ -2162,12 +2850,12 @@ fn wide_finish_fill(
             .saturating_sub(cost_usdc);
     }
     let owner_key = ctx.accounts.owner.key();
-    let trader_key = ctx.accounts.trader.key();
     let pos = &mut ctx.accounts.position;
     pos.market = market_key;
     pos.owner = owner_key;
     pos.set_hash = ids::set_hash(set_mask);
     pos.bump = ctx.bumps.position;
+    let basis_cut = apply_fill_cost_basis(&mut ctx.accounts.market, pos, is_buy, cost_usdc);
     if is_buy {
         pos.q = pos.q.checked_add(q_raw).ok_or(MarketError::Overflow)?;
         pos.cost_paid = pos.cost_paid.saturating_add(cost_usdc);
@@ -2177,6 +2865,7 @@ fn wide_finish_fill(
     }
     let id_hash = ctx.accounts.market.id_hash;
     let bump = ctx.accounts.market.bump;
+    let on_er = ctx.accounts.market.delegated;
     settle_vault_fill(
         &mut ctx.accounts.session,
         ctx.accounts.owner.to_account_info(),
@@ -2184,14 +2873,14 @@ fn wide_finish_fill(
         ctx.accounts.board.to_account_info(),
         ctx.accounts.user_vault.to_account_info(),
         ctx.accounts.vault_program.to_account_info(),
-        ctx.remaining_accounts,
+        on_er,
         &mut **pos,
         id_hash,
         bump,
         is_buy,
         cost_usdc,
         fee_usdc,
-        trader_key,
+        basis_cut,
         owner_key,
     )?;
     ctx.accounts.nonce_acc.last = nonce;
@@ -2297,24 +2986,6 @@ fn fill_skellam(
         } else {
             Q64::ZERO
         };
-        if is_buy {
-            ctx.accounts.market.fees_accrued = ctx
-                .accounts
-                .market
-                .fees_accrued
-                .saturating_add(usdc_charge(fee));
-            ctx.accounts.market.trading_revenue = ctx
-                .accounts
-                .market
-                .trading_revenue
-                .saturating_add(usdc_charge(cost));
-        } else {
-            ctx.accounts.market.trading_revenue = ctx
-                .accounts
-                .market
-                .trading_revenue
-                .saturating_sub(fill_usdc(false, cost));
-        }
         cost_sum = cost_sum.checked_add(cost.raw()).ok_or(MarketError::Overflow)?;
         fee_sum = fee_sum.checked_add(fee.raw()).ok_or(MarketError::Overflow)?;
     }
@@ -2329,15 +3000,36 @@ fn fill_skellam(
     let fee_q = Q64::from_raw(fee_sum);
     let cost_usdc = fill_usdc(is_buy, cost_q);
     let fee_usdc = fill_usdc(is_buy, fee_q);
+    // One usdc_charge on the summed legs — per-leg ceil would desync Market vs Board.
+    let basis_cut;
     if is_buy {
+        require!(cost_usdc > 0, MarketError::ZeroQty);
+        ctx.accounts.market.fees_accrued = ctx
+            .accounts
+            .market
+            .fees_accrued
+            .saturating_add(fee_usdc);
+        ctx.accounts.market.trading_revenue = ctx
+            .accounts
+            .market
+            .trading_revenue
+            .saturating_add(cost_usdc);
+        basis_cut = apply_fill_cost_basis(&mut ctx.accounts.market, pos, true, cost_usdc);
         pos.q = pos.q.checked_add(q_raw).ok_or(MarketError::Overflow)?;
         pos.cost_paid = pos.cost_paid.saturating_add(cost_usdc);
     } else {
+        ctx.accounts.market.trading_revenue = ctx
+            .accounts
+            .market
+            .trading_revenue
+            .saturating_sub(cost_usdc);
+        basis_cut = apply_fill_cost_basis(&mut ctx.accounts.market, pos, false, cost_usdc);
         pos.q = pos.q.checked_sub(q_raw).ok_or(MarketError::NoInventory)?;
         pos.cost_paid = pos.cost_paid.saturating_sub(cost_usdc);
     }
     let id_hash = ctx.accounts.market.id_hash;
     let bump = ctx.accounts.market.bump;
+    let on_er = ctx.accounts.market.delegated;
     settle_vault_fill(
         &mut ctx.accounts.session,
         ctx.accounts.owner.to_account_info(),
@@ -2345,14 +3037,14 @@ fn fill_skellam(
         ctx.accounts.board.to_account_info(),
         ctx.accounts.user_vault.to_account_info(),
         ctx.accounts.vault_program.to_account_info(),
-        ctx.remaining_accounts,
+        on_er,
         &mut **pos,
         id_hash,
         bump,
         is_buy,
         cost_usdc,
         fee_usdc,
-        trader_key,
+        basis_cut,
         owner_key,
     )?;
     ctx.accounts.nonce_acc.last = nonce;
@@ -2417,12 +3109,182 @@ fn executing_on_er(remaining: &[AccountInfo]) -> bool {
         .any(|a| a.key == &MAGIC_PROGRAM_ID && a.executable)
 }
 
-fn require_user_vault_cover(user_vault: &AccountInfo, owner: &Pubkey, need: u64) -> Result<()> {
+fn load_user_vault(user_vault: &AccountInfo, owner: &Pubkey) -> Result<vault::UserVault> {
     let data = user_vault.try_borrow_data()?;
     let mut cur: &[u8] = &data;
     let uv = vault::UserVault::try_deserialize(&mut cur).map_err(|_| error!(MarketError::BadVault))?;
     require_keys_eq!(uv.owner, *owner, MarketError::BadVault);
-    require!(uv.available >= need, MarketError::InsufficientVault);
+    Ok(uv)
+}
+
+fn vault_trade_pending(user_vault: &AccountInfo, owner: &Pubkey) -> Result<u64> {
+    Ok(load_user_vault(user_vault, owner)?.trade_pending)
+}
+
+fn vault_trade_pending_or_zero(user_vault: &AccountInfo, owner: &Pubkey) -> Result<u64> {
+    if user_vault.owner == &System::id() || user_vault.data_is_empty() {
+        return Ok(0);
+    }
+    vault_trade_pending(user_vault, owner)
+}
+
+fn require_session_on_l1(session_ai: &AccountInfo) -> Result<()> {
+    require_keys_eq!(*session_ai.owner, crate::ID, MarketError::SessionDelegated);
+    Ok(())
+}
+
+/// `platform` must match `Market.platform` so post-undelegate sync fee cannot be misdirected.
+fn require_sync_platform(market_ai: &AccountInfo, platform: &Pubkey) -> Result<()> {
+    let data = market_ai.try_borrow_data()?;
+    let mut cur: &[u8] = &data;
+    let market =
+        Market::try_deserialize(&mut cur).map_err(|_| error!(MarketError::IdMismatch))?;
+    require_keys_eq!(market.platform, *platform, MarketError::BadVault);
+    Ok(())
+}
+
+fn cpi_lock_trade<'info>(
+    vault_program: &Program<'info, vault::program::Vault>,
+    protocol: &Account<'info, Protocol>,
+    owner: AccountInfo<'info>,
+    user_vault: AccountInfo<'info>,
+    amount: u64,
+) -> Result<()> {
+    let bump = [protocol.bump];
+    let seeds: &[&[u8]] = &[PROTOCOL_SEED, &bump];
+    lock_trade(
+        CpiContext::new_with_signer(
+            vault_program.to_account_info(),
+            LockTrade {
+                authority: protocol.to_account_info(),
+                owner,
+                user: user_vault,
+            },
+            &[seeds],
+        ),
+        amount,
+    )
+}
+
+fn cpi_unlock_trade<'info>(
+    vault_program: &Program<'info, vault::program::Vault>,
+    protocol: &Account<'info, Protocol>,
+    owner: AccountInfo<'info>,
+    user_vault: AccountInfo<'info>,
+    amount: u64,
+) -> Result<()> {
+    let bump = [protocol.bump];
+    let seeds: &[&[u8]] = &[PROTOCOL_SEED, &bump];
+    unlock_trade(
+        CpiContext::new_with_signer(
+            vault_program.to_account_info(),
+            UnlockTrade {
+                authority: protocol.to_account_info(),
+                owner,
+                user: user_vault,
+            },
+            &[seeds],
+        ),
+        amount,
+    )
+}
+
+fn require_trade_pending_covers_budget(
+    user_vault: &AccountInfo,
+    owner: &Pubkey,
+    remaining_usdc: u64,
+    er_owed_usdc: u64,
+) -> Result<()> {
+    let pending = vault_trade_pending_or_zero(user_vault, owner)?;
+    let budget = remaining_usdc
+        .checked_add(er_owed_usdc)
+        .ok_or(error!(MarketError::Overflow))?;
+    require!(pending >= budget, MarketError::InsufficientVault);
+    Ok(())
+}
+
+fn require_user_vault_cover(
+    user_vault: &AccountInfo,
+    owner: &Pubkey,
+    need: u64,
+    from_trade_pending: bool,
+) -> Result<()> {
+    let uv = load_user_vault(user_vault, owner)?;
+    if from_trade_pending {
+        // ER path: budget must already be locked via Session / lock_trade.
+        require!(uv.trade_pending >= need, MarketError::InsufficientVault);
+    } else {
+        let locked = uv
+            .reserved
+            .checked_add(uv.trade_pending)
+            .ok_or(error!(MarketError::Overflow))?;
+        let free = uv
+            .available
+            .checked_sub(locked)
+            .ok_or(error!(MarketError::InsufficientVault))?;
+        require!(free >= need, MarketError::InsufficientVault);
+    }
+    Ok(())
+}
+
+fn position_has_vault_owed(pos: &Position) -> bool {
+    pos.vault_owed_cost > 0 || pos.vault_owed_fee > 0 || pos.vault_owed_credit > 0
+}
+
+/// Sum `vault_owed_cost+fee`, seat count, and credit across unique owner Positions in `remaining`.
+fn sum_position_vault_owed(owner: &Pubkey, remaining: &[AccountInfo]) -> Result<(u64, u16, u64)> {
+    let mut debt: u64 = 0;
+    let mut credit: u64 = 0;
+    let mut seats: u16 = 0;
+    let mut seen: Vec<Pubkey> = Vec::new();
+    for ai in remaining {
+        if ai.owner != &crate::ID || ai.data_is_empty() {
+            continue;
+        }
+        if seen.iter().any(|k| k == ai.key) {
+            continue;
+        }
+        seen.push(*ai.key);
+        let data = ai.try_borrow_data()?;
+        let mut cur: &[u8] = &data;
+        let Ok(pos) = Position::try_deserialize(&mut cur) else {
+            continue;
+        };
+        if pos.owner != *owner {
+            continue;
+        }
+        let seat = pos
+            .vault_owed_cost
+            .checked_add(pos.vault_owed_fee)
+            .ok_or(error!(MarketError::Overflow))?;
+        debt = debt.checked_add(seat).ok_or(error!(MarketError::Overflow))?;
+        credit = credit
+            .checked_add(pos.vault_owed_credit)
+            .ok_or(error!(MarketError::Overflow))?;
+        if position_has_vault_owed(&pos) {
+            seats = seats.checked_add(1).ok_or(error!(MarketError::Overflow))?;
+        }
+    }
+    Ok((debt, seats, credit))
+}
+
+/// Listed Positions' Σ(cost+fee) must equal `er_owed` (blocks omit-seat under-report).
+fn require_er_debt_matches(owner: &Pubkey, remaining: &[AccountInfo], er_owed: u64) -> Result<()> {
+    let (debt, _seats, credit) = sum_position_vault_owed(owner, remaining)?;
+    require!(credit == 0, MarketError::SyncVaultFirst);
+    require!(debt == er_owed, MarketError::DebtMismatch);
+    Ok(())
+}
+
+/// Clear to unlock/reopen: no unknown flag, counters zero, listed debt matches (empty⇔0).
+fn require_session_debt_clear(
+    owner: &Pubkey,
+    session: &ProtocolSession,
+    remaining: &[AccountInfo],
+) -> Result<()> {
+    require!(session.er_owed_usdc == 0, MarketError::SyncVaultFirst);
+    require!(session.unsynced_seats == 0, MarketError::SyncVaultFirst);
+    require_er_debt_matches(owner, remaining, 0)?;
     Ok(())
 }
 
@@ -2523,6 +3385,35 @@ fn invoke_magic_commit<'info>(
     Ok(())
 }
 
+fn charge_sync_fee_vault<'info>(
+    vault_program: AccountInfo<'info>,
+    owner: AccountInfo<'info>,
+    market: AccountInfo<'info>,
+    platform: AccountInfo<'info>,
+    user: AccountInfo<'info>,
+    platform_user: AccountInfo<'info>,
+    id_hash: [u8; 32],
+    bump: u8,
+    amount: u64,
+) -> Result<()> {
+    let bump_seed = [bump];
+    let seeds: &[&[u8]] = &[MARKET_SEED, id_hash.as_ref(), &bump_seed];
+    pay_sync_fee(
+        CpiContext::new_with_signer(
+            vault_program,
+            PaySyncFee {
+                market,
+                owner,
+                platform,
+                user,
+                platform_user,
+            },
+            &[seeds],
+        ),
+        amount,
+    )
+}
+
 fn require_book_keys(
     authority: &Pubkey,
     market: &Market,
@@ -2542,7 +3433,9 @@ fn require_live_committee(committee: &Committee) -> Result<()> {
     require!(
         committee.member_count >= 1
             && committee.m >= 1
-            && committee.m <= committee.member_count,
+            && committee.m <= committee.member_count
+            // Strict majority so both sides cannot both reach quorum.
+            && (committee.m as u16) * 2 > committee.member_count as u16,
         MarketError::BadCommittee
     );
     Ok(())
@@ -2557,7 +3450,11 @@ fn write_roster(
 ) -> Result<()> {
     let n = members.len();
     require!(
-        n >= 1 && n <= MAX_COMMITTEE && m >= 1 && (m as usize) <= n,
+        n >= 1
+            && n <= MAX_COMMITTEE
+            && m >= 1
+            && (m as usize) <= n
+            && (m as u16) * 2 > n as u16,
         MarketError::BadCommittee
     );
     for (i, member) in members.iter().enumerate() {
@@ -2580,6 +3477,21 @@ fn write_roster(
     Ok(())
 }
 
+/// Update `Market.cost_basis` for a fill. Returns sell `basis_cut` = min(cost_paid, proceeds).
+fn apply_fill_cost_basis(market: &mut Market, pos: &Position, is_buy: bool, cost_usdc: u64) -> u64 {
+    if cost_usdc == 0 {
+        return 0;
+    }
+    if is_buy {
+        market.cost_basis = market.cost_basis.saturating_add(cost_usdc);
+        0
+    } else {
+        let cut = pos.cost_paid.min(cost_usdc);
+        market.cost_basis = market.cost_basis.saturating_sub(cut);
+        cut
+    }
+}
+
 fn settle_vault_fill<'info>(
     session: &mut Option<Box<Account<'info, ProtocolSession>>>,
     owner: AccountInfo<'info>,
@@ -2587,31 +3499,73 @@ fn settle_vault_fill<'info>(
     board: AccountInfo<'info>,
     user_vault: AccountInfo<'info>,
     vault_program: AccountInfo<'info>,
-    remaining: &[AccountInfo],
+    on_er: bool,
     pos: &mut Position,
     id_hash: [u8; 32],
     bump: u8,
     is_buy: bool,
     cost_usdc: u64,
     fee_usdc: u64,
-    trader_key: Pubkey,
+    basis_cut: u64,
     owner_key: Pubkey,
 ) -> Result<()> {
     if is_buy && (cost_usdc > 0 || fee_usdc > 0) {
-        if trader_key != owner_key {
+        let need = cost_usdc.saturating_add(fee_usdc);
+        let pending = vault_trade_pending_or_zero(&user_vault, &owner_key)?;
+        // Any live trade_pending or ER fill requires the Session spend ledger.
+        // Owner cannot omit session on L1 to burn pending without debiting remaining.
+        // `on_er` is `market.delegated` — not forgeable via remaining Magic program metas.
+        let must_use_session = on_er || pending > 0 || session.is_some();
+        if must_use_session {
             let s = session
                 .as_mut()
                 .ok_or_else(|| error!(MarketError::SessionUnauthorized))?;
-            let need = cost_usdc.saturating_add(fee_usdc);
+            require!(s.status == SESSION_LIVE, MarketError::SessionUnauthorized);
+            require!(s.owner == owner_key, MarketError::SessionUnauthorized);
             require!(s.remaining_usdc >= need, MarketError::SessionUnauthorized);
             s.remaining_usdc = s.remaining_usdc.saturating_sub(need);
         }
-        let need = cost_usdc.saturating_add(fee_usdc);
-        require_user_vault_cover(&user_vault, &owner_key, need)?;
-        if executing_on_er(remaining) {
-            pos.vault_owed_cost = pos.vault_owed_cost.saturating_add(cost_usdc);
-            pos.vault_owed_fee = pos.vault_owed_fee.saturating_add(fee_usdc);
+        if on_er {
+            // ER: Session is mandatory; trade_pending stays locked until sync/revoke unused.
+            require_user_vault_cover(&user_vault, &owner_key, need, true)?;
+            let s = session
+                .as_mut()
+                .ok_or_else(|| error!(MarketError::SessionUnauthorized))?;
+            let had = position_has_vault_owed(pos);
+            pos.vault_owed_cost = pos
+                .vault_owed_cost
+                .checked_add(cost_usdc)
+                .ok_or(error!(MarketError::Overflow))?;
+            pos.vault_owed_fee = pos
+                .vault_owed_fee
+                .checked_add(fee_usdc)
+                .ok_or(error!(MarketError::Overflow))?;
+            s.er_owed_usdc = s
+                .er_owed_usdc
+                .checked_add(need)
+                .ok_or(error!(MarketError::Overflow))?;
+            if !had {
+                s.unsynced_seats = s
+                    .unsynced_seats
+                    .checked_add(1)
+                    .ok_or(error!(MarketError::Overflow))?;
+            }
+        } else if must_use_session {
+            // Session budget path on L1 — consume trade_pending (remaining already debited).
+            require_user_vault_cover(&user_vault, &owner_key, need, true)?;
+            charge_er_vault(
+                vault_program,
+                owner,
+                market,
+                board,
+                user_vault,
+                id_hash,
+                bump,
+                cost_usdc,
+                fee_usdc,
+            )?;
         } else {
+            require_user_vault_cover(&user_vault, &owner_key, need, false)?;
             charge_vault(
                 vault_program,
                 owner,
@@ -2627,14 +3581,37 @@ fn settle_vault_fill<'info>(
         return Ok(());
     }
     if !is_buy && cost_usdc > 0 {
-        if executing_on_er(remaining) {
-            let against = pos.vault_owed_cost.min(cost_usdc);
-            pos.vault_owed_cost -= against;
-            pos.vault_owed_credit = pos
-                .vault_owed_credit
-                .saturating_add(cost_usdc.saturating_sub(against));
+        if on_er {
+            // Session mandatory; ER sells may only unwind unsynced buys (no ER profit credit).
+            let s = session
+                .as_mut()
+                .ok_or_else(|| error!(MarketError::SessionUnauthorized))?;
+            require!(s.owner == owner_key, MarketError::SessionUnauthorized);
+            require!(
+                cost_usdc <= pos.vault_owed_cost,
+                MarketError::ErSellExceedsOwed
+            );
+            let had = position_has_vault_owed(pos);
+            pos.vault_owed_cost -= cost_usdc;
+            s.remaining_usdc = s.remaining_usdc.saturating_add(cost_usdc);
+            s.er_owed_usdc = s.er_owed_usdc.saturating_sub(cost_usdc);
+            if had && !position_has_vault_owed(pos) {
+                s.unsynced_seats = s.unsynced_seats.saturating_sub(1);
+            }
         } else {
-            refund_vault(vault_program, owner, market, board, user_vault, id_hash, bump, cost_usdc)?;
+            // L1 sell: credit available only. Do not bump `session.remaining` without
+            // re-locking `trade_pending` (would brick revoke when remaining > pending).
+            refund_vault(
+                vault_program,
+                owner,
+                market,
+                board,
+                user_vault,
+                id_hash,
+                bump,
+                cost_usdc,
+                basis_cut,
+            )?;
         }
     }
     Ok(())
@@ -2669,6 +3646,35 @@ fn charge_vault<'info>(
     )
 }
 
+fn charge_er_vault<'info>(
+    vault_program: AccountInfo<'info>,
+    owner: AccountInfo<'info>,
+    market: AccountInfo<'info>,
+    board: AccountInfo<'info>,
+    user: AccountInfo<'info>,
+    id_hash: [u8; 32],
+    bump: u8,
+    cost: u64,
+    fee: u64,
+) -> Result<()> {
+    let bump_seed = [bump];
+    let seeds: &[&[u8]] = &[MARKET_SEED, id_hash.as_ref(), &bump_seed];
+    credit_er_trade(
+        CpiContext::new_with_signer(
+            vault_program,
+            CreditTrade {
+                market,
+                owner,
+                board,
+                user,
+            },
+            &[seeds],
+        ),
+        cost,
+        fee,
+    )
+}
+
 fn refund_vault<'info>(
     vault_program: AccountInfo<'info>,
     owner: AccountInfo<'info>,
@@ -2678,6 +3684,7 @@ fn refund_vault<'info>(
     id_hash: [u8; 32],
     bump: u8,
     cost: u64,
+    basis_cut: u64,
 ) -> Result<()> {
     let bump_seed = [bump];
     let seeds: &[&[u8]] = &[MARKET_SEED, id_hash.as_ref(), &bump_seed];
@@ -2693,6 +3700,7 @@ fn refund_vault<'info>(
             &[seeds],
         ),
         cost,
+        basis_cut,
     )
 }
 
@@ -2820,6 +3828,18 @@ pub struct OpenSession<'info> {
         bump
     )]
     pub session: Account<'info, ProtocolSession>,
+    /// Protocol PDA signs vault.lock_trade / unlock_trade CPI.
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+    /// CHECK: vault user PDA — Session budget locked into trade_pending.
+    #[account(
+        mut,
+        seeds = [vault::USER_SEED, owner.key().as_ref()],
+        bump,
+        seeds::program = vault::ID
+    )]
+    pub user_vault: UncheckedAccount<'info>,
+    pub vault_program: Program<'info, vault::program::Vault>,
     pub system_program: Program<'info, System>,
 }
 
@@ -2833,6 +3853,18 @@ pub struct MutSession<'info> {
         constraint = session.owner == owner.key() @ MarketError::SessionUnauthorized
     )]
     pub session: Account<'info, ProtocolSession>,
+    /// Protocol PDA signs vault.unlock_trade CPI (users cannot unlock trade_pending directly).
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+    /// CHECK: vault user PDA — adjust / release trade_pending with Session remaining.
+    #[account(
+        mut,
+        seeds = [vault::USER_SEED, owner.key().as_ref()],
+        bump,
+        seeds::program = vault::ID
+    )]
+    pub user_vault: UncheckedAccount<'info>,
+    pub vault_program: Program<'info, vault::program::Vault>,
 }
 
 #[derive(Accounts)]
@@ -2924,8 +3956,107 @@ pub struct CommitSeat<'info> {
 
 #[derive(Accounts)]
 #[instruction(set_hash: [u8; 32])]
-pub struct SyncVault<'info> {
+pub struct UndelegateSeat<'info> {
+    #[account(mut)]
     pub trader: Signer<'info>,
+    /// CHECK: position owner.
+    pub owner: UncheckedAccount<'info>,
+    /// CHECK: market key for PDA seeds.
+    pub market: UncheckedAccount<'info>,
+    /// CHECK: delegated position committed / undelegated with the nonce.
+    #[account(
+        mut,
+        seeds = [POS_SEED, market.key().as_ref(), owner.key().as_ref(), set_hash.as_ref()],
+        bump
+    )]
+    pub position: AccountInfo<'info>,
+    /// CHECK: delegated fill nonce.
+    #[account(
+        mut,
+        seeds = [NONCE_SEED, owner.key().as_ref(), market.key().as_ref()],
+        bump
+    )]
+    pub nonce_acc: AccountInfo<'info>,
+    /// CHECK: `Market.platform` — sync fee destination owner.
+    pub platform: UncheckedAccount<'info>,
+    /// CHECK: vault board (post-undelegate sync).
+    #[account(
+        mut,
+        seeds = [vault::BOARD_SEED, market.key().as_ref()],
+        bump,
+        seeds::program = vault::ID
+    )]
+    pub board: UncheckedAccount<'info>,
+    /// CHECK: owner user vault — ER fill debit + sync fee source.
+    #[account(
+        mut,
+        seeds = [vault::USER_SEED, owner.key().as_ref()],
+        bump,
+        seeds::program = vault::ID
+    )]
+    pub user_vault: UncheckedAccount<'info>,
+    /// CHECK: platform user vault — sync gas rebate destination.
+    #[account(
+        mut,
+        seeds = [vault::USER_SEED, platform.key().as_ref()],
+        bump,
+        seeds::program = vault::ID
+    )]
+    pub platform_vault: UncheckedAccount<'info>,
+    pub vault_program: Program<'info, vault::program::Vault>,
+    /// CHECK: owner session — post-sync decrements `er_owed_usdc`.
+    #[account(
+        mut,
+        seeds = [SESSION_SEED, owner.key().as_ref()],
+        bump
+    )]
+    pub session: AccountInfo<'info>,
+    /// CHECK: MagicBlock magic program.
+    #[account(address = MAGIC_PROGRAM_ID)]
+    pub magic_program: AccountInfo<'info>,
+    /// CHECK: MagicBlock magic context.
+    #[account(mut, address = MAGIC_CONTEXT_ID)]
+    pub magic_context: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+pub struct UndelegateSeats<'info> {
+    #[account(mut)]
+    pub trader: Signer<'info>,
+    /// CHECK: market key for PDA seeds.
+    pub market: UncheckedAccount<'info>,
+    /// CHECK: `Market.platform` — sync fee destination owner.
+    pub platform: UncheckedAccount<'info>,
+    /// CHECK: vault board (post-undelegate sync).
+    #[account(
+        mut,
+        seeds = [vault::BOARD_SEED, market.key().as_ref()],
+        bump,
+        seeds::program = vault::ID
+    )]
+    pub board: UncheckedAccount<'info>,
+    /// CHECK: platform user vault — sync gas rebate destination.
+    #[account(
+        mut,
+        seeds = [vault::USER_SEED, platform.key().as_ref()],
+        bump,
+        seeds::program = vault::ID
+    )]
+    pub platform_vault: UncheckedAccount<'info>,
+    pub vault_program: Program<'info, vault::program::Vault>,
+    /// CHECK: MagicBlock magic program.
+    #[account(address = MAGIC_PROGRAM_ID)]
+    pub magic_program: AccountInfo<'info>,
+    /// CHECK: MagicBlock magic context.
+    #[account(mut, address = MAGIC_CONTEXT_ID)]
+    pub magic_context: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(set_hash: [u8; 32])]
+pub struct SyncVault<'info> {
+    /// CHECK: historical fee-payer / Magic escrow slot; need not sign.
+    pub trader: UncheckedAccount<'info>,
     /// CHECK: vault / position owner.
     pub owner: UncheckedAccount<'info>,
     #[account(
@@ -2956,8 +4087,28 @@ pub struct SyncVault<'info> {
         seeds::program = vault::ID
     )]
     pub user_vault: UncheckedAccount<'info>,
+    /// CHECK: must equal `market.platform` (sync fee destination owner).
+    pub platform_vault_owner: UncheckedAccount<'info>,
+    /// CHECK: platform user vault ledger.
+    #[account(
+        mut,
+        seeds = [vault::USER_SEED, platform_vault_owner.key().as_ref()],
+        bump,
+        seeds::program = vault::ID
+    )]
+    pub platform_vault: UncheckedAccount<'info>,
     pub vault_program: Program<'info, vault::program::Vault>,
+    /// Session ledger: decrement `er_owed_usdc` on debit sync.
+    /// Must be market-owned — undelegate session with the seat before syncing.
+    #[account(
+        mut,
+        seeds = [SESSION_SEED, owner.key().as_ref()],
+        bump = session.bump,
+        constraint = session.owner == owner.key() @ MarketError::SessionUnauthorized
+    )]
+    pub session: Account<'info, ProtocolSession>,
 }
+
 
 #[delegate]
 #[derive(Accounts)]
@@ -2974,6 +4125,25 @@ pub struct DelegateSession<'info> {
     pub session: AccountInfo<'info>,
 }
 
+#[derive(Accounts)]
+pub struct CommitSession<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    /// CHECK: delegated session PDA committed / undelegated.
+    #[account(
+        mut,
+        seeds = [SESSION_SEED, owner.key().as_ref()],
+        bump
+    )]
+    pub session: AccountInfo<'info>,
+    /// CHECK: MagicBlock magic program.
+    #[account(address = MAGIC_PROGRAM_ID)]
+    pub magic_program: AccountInfo<'info>,
+    /// CHECK: MagicBlock magic context.
+    #[account(mut, address = MAGIC_CONTEXT_ID)]
+    pub magic_context: AccountInfo<'info>,
+}
+
 #[derive(Accounts, Session)]
 #[instruction(set_mask: Vec<u8>)]
 pub struct Trade<'info> {
@@ -2981,8 +4151,12 @@ pub struct Trade<'info> {
     pub trader: Signer<'info>,
     /// CHECK: main wallet. Position and vault seeds bind to this key.
     pub owner: UncheckedAccount<'info>,
-    /// Protocol limit PDA (remaining_usdc / allowed_ix). Optional when trader == owner.
-    #[account(mut)]
+    /// Protocol limit PDA (remaining_usdc / allowed_ix). Required on ER and whenever trade_pending > 0.
+    #[account(
+        mut,
+        seeds = [SESSION_SEED, owner.key().as_ref()],
+        bump,
+    )]
     pub session: Option<Box<Account<'info, ProtocolSession>>>,
     /// MagicBlock SessionTokenV2. Optional; when absent, `#[session_auth_or]` falls back to owner or protocol Session.
     #[session(signer = trader, authority = owner.key())]
@@ -3041,7 +4215,11 @@ pub struct TradeSkellam<'info> {
     pub trader: Signer<'info>,
     /// CHECK: main wallet. Position and vault seeds bind to this key.
     pub owner: UncheckedAccount<'info>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [SESSION_SEED, owner.key().as_ref()],
+        bump,
+    )]
     pub session: Option<Box<Account<'info, ProtocolSession>>>,
     #[session(signer = trader, authority = owner.key())]
     pub session_token: Option<Account<'info, SessionTokenV2>>,
@@ -3108,6 +4286,44 @@ pub struct Halt<'info> {
     pub market: Account<'info, Market>,
     #[account(seeds = [COMMITTEE_SEED], bump = committee.bump)]
     pub committee: Account<'info, Committee>,
+}
+
+#[derive(Accounts)]
+pub struct WideCancel<'info> {
+    pub authority: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [MARKET_SEED, market.id_hash.as_ref()],
+        bump = market.bump
+    )]
+    pub market: Account<'info, Market>,
+    #[account(seeds = [COMMITTEE_SEED], bump = committee.bump)]
+    pub committee: Account<'info, Committee>,
+    /// CHECK: primary grid shard; mutated when reverting an applied wide fill.
+    #[account(
+        mut,
+        seeds = [GRID_SEED, market.key().as_ref()],
+        bump
+    )]
+    pub grid: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ApplyResolutionStatus<'info> {
+    #[account(
+        mut,
+        seeds = [MARKET_SEED, market.id_hash.as_ref()],
+        bump = market.bump
+    )]
+    pub market: Account<'info, Market>,
+    /// CHECK: resolution program PDA `["res", market]`; phase/market read in handler.
+    #[account(
+        owner = RESOLUTION_PROGRAM_ID,
+        seeds = [b"res", market.key().as_ref()],
+        bump,
+        seeds::program = RESOLUTION_PROGRAM_ID
+    )]
+    pub record: UncheckedAccount<'info>,
 }
 
 #[delegate]
@@ -3199,6 +4415,8 @@ pub struct CommitBook<'info> {
 pub struct InitCommittee<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
     #[account(
         init,
         payer = authority,
@@ -3285,6 +4503,14 @@ pub enum MarketError {
     SessionUnauthorized,
     #[msg("a live session already exists; revoke or wait for expiry")]
     SessionLive,
+    #[msg("sync_vault unsynced ER fills (trade_pending or vault_owed) before session unlock/reopen")]
+    SyncVaultFirst,
+    #[msg("listed vault_owed sum does not match session.er_owed_usdc")]
+    DebtMismatch,
+    #[msg("ER sell may only unwind unsynced vault_owed_cost (sync buys for profit on L1)")]
+    ErSellExceedsOwed,
+    #[msg("session is still delegated — undelegate with the seat (or undelegate_session) before sync/renew/revoke")]
+    SessionDelegated,
     #[msg("nonce is not the next value (or a same-nonce retry of another fill)")]
     NonceReplay,
     #[msg("grid P0 is not sealed; grow_grid / write_grid_mass / seal_grid")]
@@ -3303,10 +4529,16 @@ pub enum MarketError {
     InsufficientVault,
     #[msg("another wide fill is in progress on this market")]
     WideFillBusy,
+    #[msg("wide apply already mutated shards; call wide_abort to revert")]
+    DirtyWide,
+    #[msg("|q/β| exceeds exp domain (±16); split the fill")]
+    QtyTooLarge,
     #[msg("sells are closed; inventory stays until settlement claim")]
     SellsClosed,
     #[msg("create fields must match the official protocol account")]
     NotOfficial,
+    #[msg("MagicBlock magic program is not executable on this cluster")]
+    MagicProgramMissing,
 }
 
 #[cfg(test)]
@@ -3367,8 +4599,11 @@ mod tests {
         };
         assert!(write_roster(&mut c, a, 1, vec![a, Pubkey::new_from_array([2u8; 32])], 2).is_ok());
         assert_eq!(c.member_count, 2);
+        // Strict majority: m=1 of n=2 rejected (both sides could hit quorum).
+        assert!(write_roster(&mut c, a, 1, vec![a, Pubkey::new_from_array([2u8; 32])], 1).is_err());
         assert!(write_roster(&mut c, a, 1, vec![a, a], 1).is_err());
         assert!(write_roster(&mut c, a, 1, vec![a], 2).is_err());
+        assert!(write_roster(&mut c, a, 1, vec![a], 1).is_ok());
     }
 
     #[test]

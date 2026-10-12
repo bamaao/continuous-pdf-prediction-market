@@ -415,6 +415,7 @@ pub fn withdraw(owner: Pubkey, amount: u64) -> Instruction {
             vault_ata: ata(&config),
             user_ata: ata(&owner),
             user: user_vault(&owner),
+            session: session_pda(&owner),
             token_program: anchor_spl::token::ID,
         }
         .to_account_metas(None),
@@ -427,17 +428,29 @@ pub fn committee_bond_pda(market: &Pubkey) -> Pubkey {
 }
 
 pub fn lock_committee_bond(owner: Pubkey, market: Pubkey, amount: u64) -> Instruction {
+    lock_committee_bond_ex(owner, market, amount, None)
+}
+
+pub fn lock_committee_bond_ex(
+    owner: Pubkey,
+    market: Pubkey,
+    amount: u64,
+    prev_holder: Option<Pubkey>,
+) -> Instruction {
+    let mut metas = vault::accounts::LockBond {
+        owner,
+        market,
+        resolution: record_pda(&market),
+        user: user_vault(&owner),
+        prev_holder: prev_holder.map(|h| user_vault(&h)),
+        bond: committee_bond_pda(&market),
+        system_program: system_program::ID,
+    }
+    .to_account_metas(None);
+    metas.retain(|m| m.pubkey != Pubkey::default());
     Instruction {
         program_id: vault::ID,
-        accounts: vault::accounts::LockBond {
-            owner,
-            market,
-            resolution: record_pda(&market),
-            user: user_vault(&owner),
-            bond: committee_bond_pda(&market),
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
+        accounts: metas,
         data: vault::instruction::LockCommitteeBond { amount }.data(),
     }
 }
@@ -455,6 +468,68 @@ pub fn slash_committee_bond(authority: Pubkey, market: Pubkey, holder: Pubkey) -
         }
         .to_account_metas(None),
         data: vault::instruction::SlashCommitteeBond {}.data(),
+    }
+}
+
+pub fn challenge_bond_pda(market: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[vault::CHBOND_SEED, market.as_ref()], &vault::ID).0
+}
+
+pub fn lock_challenge_bond(owner: Pubkey, market: Pubkey, amount: u64) -> Instruction {
+    lock_challenge_bond_ex(owner, market, amount, None)
+}
+
+pub fn lock_challenge_bond_ex(
+    owner: Pubkey,
+    market: Pubkey,
+    amount: u64,
+    prev_holder: Option<Pubkey>,
+) -> Instruction {
+    let mut metas = vault::accounts::LockChallengeBond {
+        owner,
+        market,
+        resolution: record_pda(&market),
+        user: user_vault(&owner),
+        prev_holder: prev_holder.map(|h| user_vault(&h)),
+        bond: challenge_bond_pda(&market),
+        system_program: system_program::ID,
+    }
+    .to_account_metas(None);
+    metas.retain(|m| m.pubkey != Pubkey::default());
+    Instruction {
+        program_id: vault::ID,
+        accounts: metas,
+        data: vault::instruction::LockChallengeBond { amount }.data(),
+    }
+}
+
+pub fn slash_challenge_bond(authority: Pubkey, market: Pubkey, holder: Pubkey) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::SlashChallengeBond {
+            authority,
+            market,
+            resolution: record_pda(&market),
+            bond: challenge_bond_pda(&market),
+            holder: user_vault(&holder),
+            platform: user_vault(&authority),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::SlashChallengeBond {}.data(),
+    }
+}
+
+pub fn release_challenge_bond(owner: Pubkey, market: Pubkey) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::ReleaseChallengeBond {
+            owner,
+            resolution: record_pda(&market),
+            bond: challenge_bond_pda(&market),
+            user: user_vault(&owner),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::ReleaseChallengeBond {}.data(),
     }
 }
 
@@ -485,6 +560,9 @@ pub fn open_session(
         accounts: market::accounts::OpenSession {
             owner,
             session: session_pda(&owner),
+            protocol: protocol_pda(),
+            user_vault: user_vault(&owner),
+            vault_program: vault::ID,
             system_program: system_program::ID,
         }
         .to_account_metas(None),
@@ -505,6 +583,9 @@ pub fn renew_session(owner: Pubkey, expires_ts: i64, remaining_usdc: u64) -> Ins
         accounts: market::accounts::MutSession {
             owner,
             session: session_pda(&owner),
+            protocol: protocol_pda(),
+            user_vault: user_vault(&owner),
+            vault_program: vault::ID,
         }
         .to_account_metas(None),
         data: market::instruction::RenewSession {
@@ -521,9 +602,56 @@ pub fn revoke_session(owner: Pubkey) -> Instruction {
         accounts: market::accounts::MutSession {
             owner,
             session: session_pda(&owner),
+            protocol: protocol_pda(),
+            user_vault: user_vault(&owner),
+            vault_program: vault::ID,
         }
         .to_account_metas(None),
         data: market::instruction::RevokeSession {}.data(),
+    }
+}
+
+/// Unlock leftover sync-fee dust in `trade_pending` after seats are synced and session is dead.
+pub fn reclaim_trade_pending(owner: Pubkey) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::MutSession {
+            owner,
+            session: session_pda(&owner),
+            protocol: protocol_pda(),
+            user_vault: user_vault(&owner),
+            vault_program: vault::ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::ReclaimTradePending {}.data(),
+    }
+}
+
+pub fn commit_session(owner: Pubkey) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::CommitSession {
+            owner,
+            session: session_pda(&owner),
+            magic_program: market::MAGIC_PROGRAM_ID,
+            magic_context: market::MAGIC_CONTEXT_ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::CommitSession {}.data(),
+    }
+}
+
+pub fn undelegate_session(owner: Pubkey) -> Instruction {
+    Instruction {
+        program_id: market::ID,
+        accounts: market::accounts::CommitSession {
+            owner,
+            session: session_pda(&owner),
+            magic_program: market::MAGIC_PROGRAM_ID,
+            magic_context: market::MAGIC_CONTEXT_ID,
+        }
+        .to_account_metas(None),
+        data: market::instruction::UndelegateSession {}.data(),
     }
 }
 
@@ -604,6 +732,7 @@ pub fn init_committee(authority: Pubkey, members: Vec<Pubkey>, m: u8) -> Instruc
         program_id: market::ID,
         accounts: market::accounts::InitCommittee {
             authority,
+            protocol: protocol_pda(),
             committee: committee_pda(),
             system_program: system_program::ID,
         }
@@ -1039,15 +1168,28 @@ pub fn commit_seat(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8;
     }
 }
 
-pub fn undelegate_seat(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8; 32]) -> Instruction {
+/// Single-seat undelegate + post-undelegate `sync_vault` (with `SYNC_SEAT_FEE_USDC`).
+pub fn undelegate_seat(
+    trader: Pubkey,
+    owner: Pubkey,
+    market: Pubkey,
+    platform: Pubkey,
+    set_hash: [u8; 32],
+) -> Instruction {
     Instruction {
         program_id: market::ID,
-        accounts: market::accounts::CommitSeat {
+        accounts: market::accounts::UndelegateSeat {
             trader,
             owner,
             market,
             position: position_pda(&market, &owner, &set_hash),
             nonce_acc: nonce_pda(&owner, &market),
+            platform,
+            board: board(&market),
+            user_vault: user_vault(&owner),
+            platform_vault: user_vault(&platform),
+            vault_program: vault::ID,
+            session: session_pda(&owner),
             magic_program: market::MAGIC_PROGRAM_ID,
             magic_context: market::MAGIC_CONTEXT_ID,
         }
@@ -1056,7 +1198,51 @@ pub fn undelegate_seat(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: 
     }
 }
 
+/// Batch undelegate + post-undelegate `sync_vault` (with sync fee).
+/// `seats`: `(owner, set_hash)` pairs; max 8 per tx.
+pub fn undelegate_seats(
+    trader: Pubkey,
+    market: Pubkey,
+    platform: Pubkey,
+    seats: &[(Pubkey, [u8; 32])],
+) -> Instruction {
+    let set_hashes: Vec<[u8; 32]> = seats.iter().map(|(_, h)| *h).collect();
+    let mut metas = market::accounts::UndelegateSeats {
+        trader,
+        market,
+        platform,
+        board: board(&market),
+        platform_vault: user_vault(&platform),
+        vault_program: vault::ID,
+        magic_program: market::MAGIC_PROGRAM_ID,
+        magic_context: market::MAGIC_CONTEXT_ID,
+    }
+    .to_account_metas(None);
+    for (owner, set_hash) in seats {
+        metas.push(AccountMeta::new_readonly(*owner, false));
+        metas.push(AccountMeta::new(position_pda(&market, owner, set_hash), false));
+        metas.push(AccountMeta::new(nonce_pda(owner, &market), false));
+        metas.push(AccountMeta::new(user_vault(owner), false));
+        metas.push(AccountMeta::new(session_pda(owner), false));
+    }
+    Instruction {
+        program_id: market::ID,
+        accounts: metas,
+        data: market::instruction::UndelegateSeats { set_hashes }.data(),
+    }
+}
+
 pub fn sync_vault(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8; 32]) -> Instruction {
+    sync_vault_ex(trader, owner, market, Pubkey::default(), set_hash)
+}
+
+pub fn sync_vault_ex(
+    trader: Pubkey,
+    owner: Pubkey,
+    market: Pubkey,
+    platform: Pubkey,
+    set_hash: [u8; 32],
+) -> Instruction {
     Instruction {
         program_id: market::ID,
         accounts: market::accounts::SyncVault {
@@ -1066,7 +1252,10 @@ pub fn sync_vault(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u8; 
             position: position_pda(&market, &owner, &set_hash),
             board: board(&market),
             user_vault: user_vault(&owner),
+            platform_vault_owner: platform,
+            platform_vault: user_vault(&platform),
             vault_program: vault::ID,
+            session: session_pda(&owner),
         }
         .to_account_metas(None),
         data: market::instruction::SyncVault { set_hash }.data(),
@@ -1095,7 +1284,21 @@ pub fn delegate_session(owner: Pubkey) -> Instruction {
 }
 
 pub fn halt(authority: Pubkey, market: Pubkey) -> Instruction {
-    book_ix(authority, market, market::instruction::Halt {}.data())
+    halt_ex(authority, market, &[])
+}
+
+/// `extra_shards`: non-zero grid shards needed when reverting a dirty wide fill.
+pub fn halt_ex(authority: Pubkey, market: Pubkey, extra_shards: &[Pubkey]) -> Instruction {
+    wide_book_ix(authority, market, extra_shards, market::instruction::Halt {}.data())
+}
+
+pub fn wide_cancel(authority: Pubkey, market: Pubkey, extra_shards: &[Pubkey]) -> Instruction {
+    wide_book_ix(
+        authority,
+        market,
+        extra_shards,
+        market::instruction::WideCancel {}.data(),
+    )
 }
 
 pub fn buffer_pda(delegated: &Pubkey) -> Pubkey {
@@ -1223,15 +1426,25 @@ pub fn undelegate_book(authority: Pubkey, market: Pubkey) -> Instruction {
     }
 }
 
-fn book_ix(authority: Pubkey, market: Pubkey, data: Vec<u8>) -> Instruction {
+fn wide_book_ix(
+    authority: Pubkey,
+    market: Pubkey,
+    extra_shards: &[Pubkey],
+    data: Vec<u8>,
+) -> Instruction {
+    let mut accounts = market::accounts::WideCancel {
+        authority,
+        market,
+        committee: committee_pda(),
+        grid: grid_pda(&market),
+    }
+    .to_account_metas(None);
+    for shard in extra_shards {
+        accounts.push(AccountMeta::new(*shard, false));
+    }
     Instruction {
         program_id: market::ID,
-        accounts: market::accounts::Halt {
-            authority,
-            market,
-            committee: committee_pda(),
-        }
-        .to_account_metas(None),
+        accounts,
         data,
     }
 }
@@ -1257,6 +1470,7 @@ pub fn submit_result(reporter: Pubkey, market: Pubkey, outcome: resolution::Outc
         accounts: resolution::accounts::SubmitRecord {
             reporter,
             record: record_pda(&market),
+            market,
             bond: committee_bond_pda(&market),
         }
         .to_account_metas(None),
@@ -1275,36 +1489,36 @@ pub fn finalize(reporter: Pubkey, market: Pubkey) -> Instruction {
             reporter,
             record: record_pda(&market),
             market,
+            market_program: market::ID,
         }
         .to_account_metas(None),
         data: resolution::instruction::Finalize {}.data(),
     }
 }
 
-pub fn begin_settle(market: Pubkey, include_risk: bool) -> Instruction {
-    begin_settle_ex(market, include_risk, false)
+pub fn begin_settle(market: Pubkey, _include_risk: bool) -> Instruction {
+    // Pass pool+tap via `begin_settle_ex(..., include_pool: true)` when L may exceed R
+    // (on-chain rejects omitting them on shortfall).
+    begin_settle_ex(market, true, false)
 }
 
-pub fn begin_settle_ex(market: Pubkey, include_risk: bool, include_pool: bool) -> Instruction {
-    begin_settle_on(market, include_risk, include_pool, grid_pda(&market))
+pub fn begin_settle_ex(market: Pubkey, _include_risk: bool, include_pool: bool) -> Instruction {
+    begin_settle_on(market, true, include_pool, grid_pda(&market))
 }
 
 pub fn begin_settle_on(
     market: Pubkey,
-    include_risk: bool,
+    _include_risk: bool,
     include_pool: bool,
     grid: Pubkey,
 ) -> Instruction {
+    // Risk book is required on-chain (even when empty / c_r=0).
     let mut metas = vault::accounts::BeginSettle {
         board: board(&market),
         market,
         grid,
         record: record_pda(&market),
-        risk_book: if include_risk {
-            Some(risk_book(&market))
-        } else {
-            None
-        },
+        risk_book: risk_book(&market),
         pool: if include_pool { Some(adjust_pool()) } else { None },
         tap: if include_pool { Some(board_tap(&market)) } else { None },
     }
@@ -1434,12 +1648,14 @@ pub fn cancel_unfilled(lp: Pubkey, market: Pubkey, layer_id: u8) -> Instruction 
     let (layer, _) = Pubkey::find_program_address(&[risk::LAYER_SEED, market.as_ref(), &[layer_id]], &risk::ID);
     let (quote, _) =
         Pubkey::find_program_address(&[risk::QUOTE_SEED, market.as_ref(), lp.as_ref(), &[layer_id]], &risk::ID);
+    let (vault_auth, _) = Pubkey::find_program_address(&[risk::VAULT_AUTH_SEED], &risk::ID);
     Instruction {
         program_id: risk::ID,
         accounts: risk::accounts::CancelUnfilled {
             lp,
             quote,
             layer,
+            vault_auth,
             user_vault: user_vault(&lp),
             vault_program: vault::ID,
         }
@@ -1451,9 +1667,11 @@ pub fn cancel_unfilled(lp: Pubkey, market: Pubkey, layer_id: u8) -> Instruction 
 pub fn challenge(reporter: Pubkey, market: Pubkey, outcome: resolution::Outcome) -> Instruction {
     Instruction {
         program_id: resolution::ID,
-        accounts: resolution::accounts::MutRecord {
+        accounts: resolution::accounts::ChallengeRecord {
             reporter,
             record: record_pda(&market),
+            market,
+            bond: challenge_bond_pda(&market),
         }
         .to_account_metas(None),
         data: resolution::instruction::Challenge { outcome }.data(),
@@ -1520,12 +1738,20 @@ pub fn decode_committee_bond(data: &[u8]) -> Result<vault::CommitteeBond, String
 }
 
 pub fn void_resolution(reporter: Pubkey, market: Pubkey) -> Instruction {
+    let record = record_pda(&market);
+    let (ballot, _) = Pubkey::find_program_address(
+        &[resolution::VOID_SEED, record.as_ref(), reporter.as_ref()],
+        &resolution::ID,
+    );
     Instruction {
         program_id: resolution::ID,
-        accounts: resolution::accounts::Finalize {
+        accounts: resolution::accounts::VoidRecord {
             reporter,
-            record: record_pda(&market),
+            record,
             market,
+            market_program: market::ID,
+            ballot,
+            system_program: system_program::ID,
         }
         .to_account_metas(None),
         data: resolution::instruction::VoidResolution {}.data(),
@@ -1544,6 +1770,7 @@ pub fn admin_submit_result(
             reporter,
             record: record_pda(&market),
             market,
+            market_program: market::ID,
         }
         .to_account_metas(None),
         data: resolution::instruction::AdminSubmitResult {
@@ -1561,6 +1788,7 @@ pub fn admin_void_resolution(reporter: Pubkey, market: Pubkey) -> Instruction {
             reporter,
             record: record_pda(&market),
             market,
+            market_program: market::ID,
         }
         .to_account_metas(None),
         data: resolution::instruction::AdminVoidResolution {}.data(),
@@ -1808,8 +2036,8 @@ pub fn payout_skellam_on(
 fn quote_pay(market: Pubkey, lp: Pubkey, layer_id: u8) -> vault::accounts::QuotePay {
     vault::accounts::QuotePay {
         board: board(&market),
-        layer: layer_pda(&market, layer_id),
         quote: quote_pda(&market, &lp, layer_id),
+        layer: layer_pda(&market, layer_id),
         user: user_vault(&lp),
     }
 }
@@ -1819,8 +2047,8 @@ pub fn draw_lp(market: Pubkey, lp: Pubkey, layer_id: u8) -> Instruction {
         program_id: vault::ID,
         accounts: vault::accounts::DrawLp {
             board: board(&market),
-            layer: layer_pda(&market, layer_id),
             quote: quote_pda(&market, &lp, layer_id),
+            layer: layer_pda(&market, layer_id),
             user: user_vault(&lp),
         }
         .to_account_metas(None),

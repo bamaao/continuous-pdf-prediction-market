@@ -66,14 +66,35 @@ impl Q64 {
         div_q64(self.0, rhs.0).map(Self)
     }
 
-    /// Natural exp on `|x| <= 16`. Range-reduce \(x=k\ln 2+r\) so Taylor runs on `|r|<1`, not `|x|`.
+    /// Max `|x|` accepted by `try_exp` / trading LMSR (Taylor domain).
+    pub const EXP_ABS_MAX: i64 = 16;
+
+    /// `true` when `|self| <= EXP_ABS_MAX` (safe for `try_exp`).
+    pub fn exp_in_domain(self) -> bool {
+        let max = Self::from_int(Self::EXP_ABS_MAX).raw();
+        self.0 >= -max && self.0 <= max
+    }
+
+    /// Natural exp when `|x| <= 16`. `None` if out of domain (do not clamp — that underprices fills).
+    pub fn try_exp(self) -> Option<Self> {
+        if !self.exp_in_domain() {
+            return None;
+        }
+        Some(self.exp_unchecked())
+    }
+
+    /// Natural exp with silent clamp to ±16. For priors / soft paths only — never trading costs.
     pub fn exp(self) -> Self {
-        let x = self.clamp(Self::from_int(-16), Self::from_int(16));
-        if x.raw() == 0 {
+        let x = self.clamp(Self::from_int(-Self::EXP_ABS_MAX), Self::from_int(Self::EXP_ABS_MAX));
+        x.exp_unchecked()
+    }
+
+    fn exp_unchecked(self) -> Self {
+        if self.raw() == 0 {
             return Self::ONE;
         }
-        let k = x.saturating_mul(INV_LN2).round_i32();
-        let r = x.saturating_sub(LN2.saturating_mul(Self::from_int(k as i64)));
+        let k = self.saturating_mul(INV_LN2).round_i32();
+        let r = self.saturating_sub(LN2.saturating_mul(Self::from_int(k as i64)));
         let mut term = Self::ONE;
         let mut sum = Self::ONE;
         for i in 1..=12 {

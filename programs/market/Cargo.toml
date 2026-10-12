@@ -10,7 +10,12 @@ crate-type = ["cdylib", "lib"]
 name = "market"
 
 [features]
+# genesis-open: any signer may init_protocol (localnet/tests only).
+# Default is OFF so staging/mainnet `cargo-build-sbf` cannot accidentally ship open genesis.
+# Local scripts pass `--features genesis-open`. Production: set GENESIS_AUTHORITY first.
+# NEVER enable genesis-open on staging/mainnet builds (see scripts/staging-on-server.sh).
 default = []
+genesis-open = []
 idl-build = ["anchor-lang/idl-build", "vault/idl-build"]
 no-entrypoint = []
 cpi = ["no-entrypoint"]

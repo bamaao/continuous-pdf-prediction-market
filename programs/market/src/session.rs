@@ -4,8 +4,7 @@
 //! 1. **Protocol Session PDA** (`["session", owner]`) — expiry, `remaining_usdc`, `allowed_ix`, whitelist.
 //! 2. **MagicBlock SessionTokenV2** — `#[session_auth_or]` on fills; PDA seeds under `session_keys::ID`.
 //!
-//! Fills debit the protocol Session. Clients create SessionTokenV2 when opening a trading session
-//! (`create_session_v2` on `session_token_program_id()`).
+//! Greenfield layout only: wipe ledger / redeploy instead of hot-migrating account bytes.
 
 use anchor_lang::prelude::*;
 use crate::MarketError;
@@ -52,10 +51,14 @@ pub struct Session {
     pub status: u8,
     pub bump: u8,
     pub whitelist: Pubkey,
+    /// Unsynced ER buy debit (cost+fee) still owed to Board via `vault_owed_*`.
+    pub er_owed_usdc: u64,
+    /// Count of Positions with any `vault_owed_*` > 0.
+    pub unsynced_seats: u16,
 }
 
 impl Session {
-    pub const SIZE: usize = 8 + 32 + 32 + 8 + 8 + 1 + 1 + 1 + 32;
+    pub const SIZE: usize = 8 + 32 + 32 + 8 + 8 + 1 + 1 + 1 + 32 + 8 + 2;
 }
 
 #[account]
@@ -133,6 +136,8 @@ mod tests {
             status: SESSION_LIVE,
             bump: 1,
             whitelist: Pubkey::default(),
+            er_owed_usdc: 0,
+            unsynced_seats: 0,
         }
     }
 
