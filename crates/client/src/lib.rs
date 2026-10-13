@@ -1751,11 +1751,12 @@ pub fn admin_submit_result(
 ) -> Instruction {
     Instruction {
         program_id: resolution::ID,
-        accounts: resolution::accounts::Finalize {
+        accounts: resolution::accounts::AdminSubmit {
             reporter,
             record: record_pda(&market),
             market,
             market_program: market::ID,
+            bond: committee_bond_pda(&market),
         }
         .to_account_metas(None),
         data: resolution::instruction::AdminSubmitResult {

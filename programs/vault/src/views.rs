@@ -285,6 +285,7 @@ foreign_account!(RiskBook, RISK_ID);
 foreign_account!(Quote, RISK_ID);
 
 pub const PHASE_OPEN: u8 = 0;
+pub const PHASE_PROPOSED: u8 = 1;
 pub const PHASE_FINALIZED: u8 = 3;
 pub const PHASE_FAILED: u8 = 4;
 pub const PHASE_VOIDED: u8 = 5;

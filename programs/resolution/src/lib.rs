@@ -115,6 +115,8 @@ pub mod resolution {
             bond_holder_is(&ctx.accounts.bond.to_account_info(), &reporter),
             ResError::BondNotLocked
         );
+        // Incomplete M-of-N VOID must finish (or expire) before a proposal can hijack Open.
+        require!(rec.void_votes == 0, ResError::VoidInProgress);
         validate_outcome(rec.family, rec.n_atoms, &outcome)?;
 
         let effect = apply(&snapshot(rec, now), Event::Submit).map_err(|_| error!(ResError::BadPhase))?;
@@ -125,6 +127,7 @@ pub mod resolution {
         rec.challenged = Outcome::default();
         rec.votes_proposal = 0;
         rec.votes_challenge = 0;
+        rec.void_votes = 0;
         rec.challenge_end = now.saturating_add(rec.challenge_secs);
         rec.evidence_hash = evidence_hash;
         rec.refunds_due = false;
@@ -289,7 +292,7 @@ pub mod resolution {
     }
 
     pub fn admin_submit_result(
-        ctx: Context<Finalize>,
+        ctx: Context<AdminSubmit>,
         outcome: Outcome,
         evidence_hash: [u8; 32],
     ) -> Result<()> {
@@ -303,6 +306,15 @@ pub mod resolution {
             !(ctx.accounts.record.early_resolve
                 && ctx.accounts.market.status == Status::Halted as u8),
             ResError::MustVoid
+        );
+        // Slash needs a locked bond; otherwise platform must `admin_void_resolution`.
+        require!(
+            bond_meets_min(
+                &ctx.accounts.bond.to_account_info(),
+                ctx.accounts.record.market,
+                ctx.accounts.market.committee_bond,
+            ),
+            ResError::BondNotLocked
         );
         {
             let rec = &mut ctx.accounts.record;
@@ -610,6 +622,23 @@ pub struct Finalize<'info> {
 }
 
 #[derive(Accounts)]
+pub struct AdminSubmit<'info> {
+    pub reporter: Signer<'info>,
+    #[account(mut, seeds = [RES_SEED, record.market.as_ref()], bump = record.bump)]
+    pub record: Box<Account<'info, Resolution>>,
+    #[account(mut, constraint = market.key() == record.market @ ResError::CommitteeMismatch)]
+    pub market: Box<Account<'info, Market>>,
+    pub market_program: Program<'info, market::program::Market>,
+    /// CHECK: vault committee bond PDA — must be locked so `slash_due` has teeth.
+    #[account(
+        seeds = [CBOND_SEED, record.market.as_ref()],
+        bump,
+        seeds::program = VAULT_ID
+    )]
+    pub bond: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
 pub struct VoidRecord<'info> {
     #[account(mut)]
     pub reporter: Signer<'info>,
@@ -688,6 +717,8 @@ pub enum ResError {
     BondNotLocked,
     #[msg("early_resolve market is Halted; only VOID is allowed")]
     MustVoid,
+    #[msg("M-of-N VOID endorsements in progress; finish VOID or wait for window")]
+    VoidInProgress,
 }
 
 #[cfg(test)]

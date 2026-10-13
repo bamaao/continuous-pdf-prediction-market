@@ -16,7 +16,7 @@ pub mod views;
 
 pub use mint::{CIRCLE_USDC_DEVNET, CIRCLE_USDC_MAINNET, USDC_MINT};
 pub use settle::{AdjustPool, Board, BoardTap, Claim, LossPool};
-pub use views::{PHASE_FAILED, PHASE_FINALIZED, PHASE_OPEN, PHASE_VOIDED};
+pub use views::{PHASE_FAILED, PHASE_FINALIZED, PHASE_OPEN, PHASE_PROPOSED, PHASE_VOIDED};
 
 declare_id!("VaULt11111111111111111111111111111111111111");
 
@@ -195,6 +195,18 @@ pub mod vault {
         require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
         let rec = &ctx.accounts.resolution;
         let who = ctx.accounts.owner.key();
+        let now = Clock::get()?.unix_timestamp;
+        // Only during an open report window — blocks early sniping before close / report_open.
+        require!(rec.phase == PHASE_OPEN, VaultError::NotFinalized);
+        let report_open = if rec.report_open_ts > 0 {
+            rec.report_open_ts
+        } else {
+            rec.close_ts
+        };
+        require!(
+            now >= report_open && now < rec.report_deadline,
+            VaultError::NotFinalized
+        );
         let member = rec.members.iter().take(rec.n as usize).any(|m| *m == who);
         let market_data = ctx.accounts.market.try_borrow_data()?;
         // Borsh layout: creator @ 16; `committee_bond` is the trailing u64 @ 540 (serialized len 548).
@@ -210,9 +222,7 @@ pub mod vault {
         drop(market_data);
         let reported = rec.authorized_reporter != Pubkey::default() && who == rec.authorized_reporter;
         require!(member || who == creator || reported, VaultError::NotOwner);
-        let reset = rec.phase == PHASE_OPEN
-            && rec.extensions > 0
-            && rec.proposer == Pubkey::default();
+        let reset = rec.extensions > 0 && rec.proposer == Pubkey::default();
         // After ExtendOnce only the current holder may unlock-and-relock — no third-party sniping.
         if ctx.accounts.bond.amount > 0 {
             require!(
@@ -288,15 +298,17 @@ pub mod vault {
         require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
         let rec = &ctx.accounts.resolution;
         let who = ctx.accounts.owner.key();
+        let now = Clock::get()?.unix_timestamp;
+        // Only while a proposal is live and the challenge window is open.
+        require!(rec.phase == PHASE_PROPOSED, VaultError::NotFinalized);
+        require!(now < rec.challenge_end, VaultError::NotFinalized);
         let member = rec.members.iter().take(rec.n as usize).any(|m| *m == who);
         require!(member, VaultError::NotOwner);
-        let reset = rec.phase == PHASE_OPEN
-            && rec.extensions > 0
-            && rec.challenger == Pubkey::default();
-        // After ExtendOnce only the current challenger-holder may unlock-and-relock.
+        require!(who != rec.proposer, VaultError::NotOwner);
+        // Relock only by current holder (same window) — no third-party sniping.
         if ctx.accounts.bond.amount > 0 {
             require!(
-                reset && !ctx.accounts.bond.slashed && ctx.accounts.bond.holder == who,
+                !ctx.accounts.bond.slashed && ctx.accounts.bond.holder == who,
                 VaultError::BondLocked
             );
             let stale = ctx.accounts.bond.amount;
@@ -357,17 +369,22 @@ pub mod vault {
         Ok(())
     }
 
-    /// Return challenger bond after challenge wins, VOID/Failed, or report window reset.
+    /// Return challenger bond after challenge wins, VOID/Failed, unused lock, or ExtendOnce reset.
     pub fn release_challenge_bond(ctx: Context<ReleaseChallengeBond>) -> Result<()> {
         require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
         let rec = &ctx.accounts.resolution;
         let phase = rec.phase;
         let challenge_won = phase == PHASE_FINALIZED && outcome_eq(&rec.final_outcome, &rec.challenged);
         let reset = phase == PHASE_OPEN && rec.challenger == Pubkey::default() && rec.extensions > 0;
+        // Quiet finalize / never challenged: unlock. Also abandon during Proposed before challenge ix.
+        let unused = (phase == PHASE_FINALIZED
+            && (rec.challenger == Pubkey::default() || rec.challenger != ctx.accounts.owner.key()))
+            || (phase == PHASE_PROPOSED && rec.challenger == Pubkey::default());
         let ok = phase == PHASE_VOIDED
             || phase == PHASE_FAILED
             || challenge_won
-            || reset;
+            || reset
+            || unused;
         require!(ok, VaultError::NotFinalized);
         let bond = &mut ctx.accounts.bond;
         require!(!bond.slashed && bond.amount > 0, VaultError::ZeroAmount);

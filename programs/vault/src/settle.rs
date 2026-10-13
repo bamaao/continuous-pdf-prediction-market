@@ -506,6 +506,8 @@ pub fn draw_quote(
     if board.draw_bits & bit != 0 {
         return Ok(0);
     }
+    // Fixed rank order (cheap unit, then earlier ts) so callers cannot pick who eats H.
+    require_draw_rank_ready(board, layer, slot)?;
     // Own funds first: trading revenue. Every filled quote may cover the leftover shortfall.
     let own = board.trading_revenue;
     let need = board.liability.saturating_sub(own).saturating_sub(board.drawn_h);
@@ -523,6 +525,25 @@ pub fn draw_quote(
     }
     board.draw_bits |= bit;
     Ok(h)
+}
+
+/// All strictly better-ranked live quotes must already be drawn (or skipped with bit set).
+fn require_draw_rank_ready(board: &Board, layer: &Layer, my_slot: usize) -> Result<()> {
+    let my_unit = layer.unit_at(my_slot);
+    let my_ts = layer.quote_ts[my_slot];
+    for i in 0..layer.quote_count as usize {
+        if i == my_slot || layer.quote_live[i] == 0 || layer.quote_filled[i] == 0 {
+            continue;
+        }
+        let u = layer.unit_at(i);
+        let ts = layer.quote_ts[i];
+        let better = u < my_unit || (u == my_unit && (ts < my_ts || (ts == my_ts && i < my_slot)));
+        if better {
+            let bit = 1u64 << i;
+            require!(board.draw_bits & bit != 0, VaultError::WrongBoard);
+        }
+    }
+    Ok(())
 }
 
 pub fn release_quote(
@@ -645,8 +666,13 @@ fn draw_surplus_share(
     Ok((share.min(left), Some(slot)))
 }
 
+/// Ceil(`unit * filled / 1e6`) so truncated unit storage never underestimates others' caps.
 fn reconstructed_owed(unit: u128, filled: u64) -> u64 {
-    (unit.saturating_mul(filled as u128) / 1_000_000) as u64
+    if filled == 0 || unit == 0 {
+        return 0;
+    }
+    let num = unit.saturating_mul(filled as u128);
+    ((num + 999_999) / 1_000_000) as u64
 }
 
 fn no_draw_waterfall_share(
@@ -675,12 +701,8 @@ fn no_draw_waterfall_share(
             ts: layer.quote_ts[i],
             idx: live,
         });
-        let cap = if layer.quote_keys[i] == quote_key {
-            quote.premium_owed
-        } else {
-            reconstructed_owed(layer.unit_at(i), layer.quote_filled[i])
-        };
-        caps.push(cap);
+        // Same ceil formula for every quote — never underestimate peers via truncated unit.
+        caps.push(reconstructed_owed(layer.unit_at(i), layer.quote_filled[i]));
     }
     let slot = slot.ok_or(error!(VaultError::WrongBoard))?;
     let mine = mine.ok_or(error!(VaultError::WrongBoard))?;
@@ -1688,6 +1710,73 @@ mod tests {
         assert_eq!(lp.risk_pnl, -50);
         assert_eq!(uncovered_loss(&lp), 0);
         assert_eq!(cover_lp_loss_inner(&mut pool, &mut lp).unwrap(), 0);
+    }
+
+    #[test]
+    fn reconstructed_owed_ceils_truncated_unit() {
+        // premium=1, capacity=3 → unit=333_333; floor path yields 0, ceil yields 1.
+        assert_eq!(reconstructed_owed(333_333, 3), 1);
+        assert_eq!(reconstructed_owed(1_000_000, 80), 80);
+        assert_eq!(reconstructed_owed(0, 10), 0);
+    }
+
+    #[test]
+    fn draw_requires_cheaper_quotes_first() {
+        let mut b = board();
+        b.phase = BOARD_SETTLED;
+        b.trading_revenue = 0;
+        b.liability = 30;
+        let cheap = qkey(1);
+        let rich = qkey(2);
+        let mut layer = Layer {
+            market: b.market,
+            quote_count: 2,
+            layer_id: 1,
+            ..Layer::default()
+        };
+        layer.quote_keys[0] = rich;
+        layer.quote_keys[1] = cheap;
+        layer.quote_live[0] = 1;
+        layer.quote_live[1] = 1;
+        layer.quote_filled[0] = 40;
+        layer.quote_filled[1] = 40;
+        layer.set_unit(0, 50 * 1_000_000 / 40);
+        layer.set_unit(1, 10 * 1_000_000 / 40);
+        layer.quote_ts[0] = 2;
+        layer.quote_ts[1] = 1;
+        let q_rich = Quote {
+            market: b.market,
+            lp: rich,
+            capacity: 40,
+            filled: 40,
+            premium: 50,
+            premium_owed: 50,
+            ts: 2,
+            profit_share_bps: 0,
+            layer_id: 1,
+            cancelled: false,
+            bump: 0,
+        };
+        let q_cheap = Quote {
+            market: b.market,
+            lp: cheap,
+            capacity: 40,
+            filled: 40,
+            premium: 10,
+            premium_owed: 10,
+            ts: 1,
+            profit_share_bps: 0,
+            layer_id: 1,
+            cancelled: false,
+            bump: 0,
+        };
+        let mut lp_rich = user(100, 40);
+        let mut lp_cheap = user(100, 40);
+        assert!(draw_quote(&mut b, &layer, rich, &q_rich, &mut lp_rich).is_err());
+        assert_eq!(draw_quote(&mut b, &layer, cheap, &q_cheap, &mut lp_cheap).unwrap(), 30);
+        assert_eq!(draw_quote(&mut b, &layer, rich, &q_rich, &mut lp_rich).unwrap(), 0);
+        assert_eq!(lp_rich.reserved, 0);
+        assert_eq!(lp_rich.available, 100);
     }
 
     #[test]

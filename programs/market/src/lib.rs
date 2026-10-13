@@ -1665,6 +1665,7 @@ fn open_board(
     market.wide_write = 0;
     market.wide_tag = 0;
     market.wide_flags = 0;
+    market.wide_owner = Pubkey::default();
 
     let grid = &mut ctx.accounts.grid;
     let local = Grid::shard_len(common.n, 0) as usize;
@@ -2007,20 +2008,22 @@ fn apply_cached_on_shards(
         .checked_div(beta)
         .and_then(|r| r.try_exp())
         .ok_or_else(|| error!(MarketError::QtyTooLarge))?;
+    // Extras first, shard0 last — only ix==0 persists Z; must write the final partition sum.
     let mut z_now = z0;
     let mut l_max = 0i128;
-    {
-        let mut data = grid.try_borrow_mut_data()?;
-        let out = apply_one_shard_write(&mut data, market, n, 0, &in_set, q, e, z_now, l_max)?;
-        z_now = out.0;
-        l_max = out.1;
-    }
     for (shard, ix) in extras.iter().zip(extra_ix.iter()) {
         let mut data = shard.try_borrow_mut_data()?;
         let out = apply_one_shard_write(&mut data, market, n, *ix, &in_set, q, e, z_now, l_max)?;
         z_now = out.0;
         l_max = out.1;
     }
+    {
+        let mut data = grid.try_borrow_mut_data()?;
+        let out = apply_one_shard_write(&mut data, market, n, 0, &in_set, q, e, z_now, l_max)?;
+        z_now = out.0;
+        l_max = out.1;
+    }
+    let _ = z_now;
     Ok((cost, l_max))
 }
 
@@ -2469,6 +2472,7 @@ fn wide_clear(m: &mut Market) {
     m.wide_tag = 0;
     m.wide_flags = 0;
     m.wide_mask = [0; 128];
+    m.wide_owner = Pubkey::default();
 }
 
 fn wide_store_mask(m: &mut Market, set_mask: &[u8]) -> Result<()> {
@@ -2580,7 +2584,9 @@ fn wide_begin_fill(
         let m = &ctx.accounts.market;
         if m.wide_flags & WIDE_ACTIVE != 0 {
             wide_params_ok(m, set_mask, q_raw, nonce, is_buy)?;
+            require_keys_eq!(m.wide_owner, ctx.accounts.owner.key(), MarketError::WideOwner);
         } else {
+            let owner = ctx.accounts.owner.key();
             let m = &mut ctx.accounts.market;
             m.wide_flags = WIDE_ACTIVE | if is_buy { WIDE_BUY } else { 0 };
             m.wide_q = q_raw;
@@ -2590,6 +2596,7 @@ fn wide_begin_fill(
             m.wide_write = 0;
             m.wide_z = 0;
             m.p0_sum = 0;
+            m.wide_owner = owner;
             wide_store_mask(m, set_mask)?;
         }
     }
@@ -2607,6 +2614,11 @@ fn wide_accum_fill(
         return Ok(());
     }
     wide_params_ok(&ctx.accounts.market, set_mask, q_raw, nonce, is_buy)?;
+    require_keys_eq!(
+        ctx.accounts.market.wide_owner,
+        ctx.accounts.owner.key(),
+        MarketError::WideOwner
+    );
     wide_accum_extras(ctx, set_mask)
 }
 
@@ -2621,6 +2633,11 @@ fn wide_apply_fill(
         return Ok(());
     }
     wide_params_ok(&ctx.accounts.market, set_mask, q_raw, nonce, is_buy)?;
+    require_keys_eq!(
+        ctx.accounts.market.wide_owner,
+        ctx.accounts.owner.key(),
+        MarketError::WideOwner
+    );
     let n = ctx.accounts.market.n;
     let need = wide_need(n, set_mask);
     require!(
@@ -2795,6 +2812,11 @@ fn wide_abort_fill(
         ctx.accounts.market.wide_flags & WIDE_ACTIVE != 0 || ctx.accounts.market.wide_write != 0,
         MarketError::GridNotReady
     );
+    require_keys_eq!(
+        ctx.accounts.market.wide_owner,
+        ctx.accounts.owner.key(),
+        MarketError::WideOwner
+    );
     if ctx.accounts.market.wide_write != 0 {
         let market_key = ctx.accounts.market.key();
         wide_revert_step(
@@ -2826,6 +2848,11 @@ fn wide_finish_fill(
         return Ok(());
     }
     wide_params_ok(&ctx.accounts.market, set_mask, q_raw, nonce, is_buy)?;
+    require_keys_eq!(
+        ctx.accounts.market.wide_owner,
+        ctx.accounts.owner.key(),
+        MarketError::WideOwner
+    );
     let n = ctx.accounts.market.n;
     let need = wide_need(n, set_mask);
     require!(
@@ -4568,6 +4595,8 @@ pub enum MarketError {
     InsufficientVault,
     #[msg("another wide fill is in progress on this market")]
     WideFillBusy,
+    #[msg("signer is not the owner of the in-flight wide fill")]
+    WideOwner,
     #[msg("wide apply already mutated shards; call wide_abort to revert")]
     DirtyWide,
     #[msg("|q/β| exceeds exp domain (±16); split the fill")]
