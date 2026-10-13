@@ -428,29 +428,17 @@ pub fn committee_bond_pda(market: &Pubkey) -> Pubkey {
 }
 
 pub fn lock_committee_bond(owner: Pubkey, market: Pubkey, amount: u64) -> Instruction {
-    lock_committee_bond_ex(owner, market, amount, None)
-}
-
-pub fn lock_committee_bond_ex(
-    owner: Pubkey,
-    market: Pubkey,
-    amount: u64,
-    prev_holder: Option<Pubkey>,
-) -> Instruction {
-    let mut metas = vault::accounts::LockBond {
-        owner,
-        market,
-        resolution: record_pda(&market),
-        user: user_vault(&owner),
-        prev_holder: prev_holder.map(|h| user_vault(&h)),
-        bond: committee_bond_pda(&market),
-        system_program: system_program::ID,
-    }
-    .to_account_metas(None);
-    metas.retain(|m| m.pubkey != Pubkey::default());
     Instruction {
         program_id: vault::ID,
-        accounts: metas,
+        accounts: vault::accounts::LockBond {
+            owner,
+            market,
+            resolution: record_pda(&market),
+            user: user_vault(&owner),
+            bond: committee_bond_pda(&market),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
         data: vault::instruction::LockCommitteeBond { amount }.data(),
     }
 }
@@ -476,29 +464,17 @@ pub fn challenge_bond_pda(market: &Pubkey) -> Pubkey {
 }
 
 pub fn lock_challenge_bond(owner: Pubkey, market: Pubkey, amount: u64) -> Instruction {
-    lock_challenge_bond_ex(owner, market, amount, None)
-}
-
-pub fn lock_challenge_bond_ex(
-    owner: Pubkey,
-    market: Pubkey,
-    amount: u64,
-    prev_holder: Option<Pubkey>,
-) -> Instruction {
-    let mut metas = vault::accounts::LockChallengeBond {
-        owner,
-        market,
-        resolution: record_pda(&market),
-        user: user_vault(&owner),
-        prev_holder: prev_holder.map(|h| user_vault(&h)),
-        bond: challenge_bond_pda(&market),
-        system_program: system_program::ID,
-    }
-    .to_account_metas(None);
-    metas.retain(|m| m.pubkey != Pubkey::default());
     Instruction {
         program_id: vault::ID,
-        accounts: metas,
+        accounts: vault::accounts::LockChallengeBond {
+            owner,
+            market,
+            resolution: record_pda(&market),
+            user: user_vault(&owner),
+            bond: challenge_bond_pda(&market),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
         data: vault::instruction::LockChallengeBond { amount }.data(),
     }
 }
@@ -1738,9 +1714,18 @@ pub fn decode_committee_bond(data: &[u8]) -> Result<vault::CommitteeBond, String
 }
 
 pub fn void_resolution(reporter: Pubkey, market: Pubkey) -> Instruction {
+    void_resolution_ex(reporter, market, 0)
+}
+
+pub fn void_resolution_ex(reporter: Pubkey, market: Pubkey, extensions: u8) -> Instruction {
     let record = record_pda(&market);
     let (ballot, _) = Pubkey::find_program_address(
-        &[resolution::VOID_SEED, record.as_ref(), reporter.as_ref()],
+        &[
+            resolution::VOID_SEED,
+            record.as_ref(),
+            reporter.as_ref(),
+            &[extensions],
+        ],
         &resolution::ID,
     );
     Instruction {

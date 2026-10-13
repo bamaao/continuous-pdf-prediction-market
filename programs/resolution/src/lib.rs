@@ -220,6 +220,8 @@ pub mod resolution {
                     rec.report_deadline = now.saturating_add(rec.report_window_secs);
                     rec.votes_proposal = 0;
                     rec.votes_challenge = 0;
+                    // Fresh VOID tally for the extended window (old vball seeds are dead).
+                    rec.void_votes = 0;
                     rec.proposer = Pubkey::default();
                     rec.challenger = Pubkey::default();
                     rec.proposed = Outcome::default();
@@ -620,7 +622,12 @@ pub struct VoidRecord<'info> {
         init,
         payer = reporter,
         space = Ballot::SIZE,
-        seeds = [VOID_SEED, record.key().as_ref(), reporter.key().as_ref()],
+        seeds = [
+            VOID_SEED,
+            record.key().as_ref(),
+            reporter.key().as_ref(),
+            &[record.extensions]
+        ],
         bump
     )]
     pub ballot: Account<'info, Ballot>,

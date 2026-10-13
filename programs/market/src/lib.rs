@@ -748,7 +748,7 @@ pub mod market {
     }
 
     /// Creator or roster member stops fills (VOID, including Bernoulli early occurrence, or after close).
-    /// If a wide fill already wrote shards, reverts from on-chain `wide_mask` (pass grid + shards).
+    /// Dirty wide: reverts only the shards passed; `wide_clear` only when `wide_write==0` (multi-step OK).
     pub fn halt(ctx: Context<WideCancel>) -> Result<()> {
         require_book_keys(
             &ctx.accounts.authority.key(),
@@ -766,8 +766,9 @@ pub mod market {
             let q_raw = ctx.accounts.market.wide_q;
             let nonce = ctx.accounts.market.wide_nonce;
             let is_buy = ctx.accounts.market.wide_flags & WIDE_BUY != 0;
-            wide_revert_written(
-                &ctx.accounts.market,
+            // Best-effort: missing shards leave bits set so later `wide_cancel` can finish.
+            wide_revert_step(
+                &mut ctx.accounts.market,
                 market_key,
                 &ctx.accounts.grid.to_account_info(),
                 ctx.remaining_accounts,
@@ -775,21 +776,28 @@ pub mod market {
                 q_raw,
                 nonce,
                 is_buy,
+                false,
             )?;
         }
         let market = &mut ctx.accounts.market;
         market.status = Status::Halted as u8;
-        wide_clear(market);
+        // Only wipe wide_* when every written shard was reverted (else keep mask for more cancel steps).
+        if market.wide_write == 0 {
+            wide_clear(market);
+        }
         Ok(())
     }
 
-    /// Clear stuck `wide_*`. Uses on-chain `wide_mask`/q/nonce when shards were written.
-    /// Before `close_ts`: creator/committee. After close: permissionless.
+    /// Clear stuck `wide_*`. Multi-step: each call reverts provided shards; clears only when write==0.
+    /// Before `close_ts`: creator/committee. After close: permissionless. Allowed while Halted.
     pub fn wide_cancel(ctx: Context<WideCancel>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         {
             let market = &ctx.accounts.market;
-            require!(market.wide_flags & WIDE_ACTIVE != 0, MarketError::GridNotReady);
+            require!(
+                market.wide_flags & WIDE_ACTIVE != 0 || market.wide_write != 0,
+                MarketError::GridNotReady
+            );
             if now < market.close_ts {
                 require_book_keys(
                     &ctx.accounts.authority.key(),
@@ -805,8 +813,8 @@ pub mod market {
             let q_raw = ctx.accounts.market.wide_q;
             let nonce = ctx.accounts.market.wide_nonce;
             let is_buy = ctx.accounts.market.wide_flags & WIDE_BUY != 0;
-            wide_revert_written(
-                &ctx.accounts.market,
+            wide_revert_step(
+                &mut ctx.accounts.market,
                 market_key,
                 &ctx.accounts.grid.to_account_info(),
                 ctx.remaining_accounts,
@@ -814,9 +822,12 @@ pub mod market {
                 q_raw,
                 nonce,
                 is_buy,
+                true,
             )?;
         }
-        wide_clear(&mut ctx.accounts.market);
+        if ctx.accounts.market.wide_write == 0 {
+            wide_clear(&mut ctx.accounts.market);
+        }
         Ok(())
     }
 
@@ -862,6 +873,11 @@ pub mod market {
         require!(
             market.status == Status::Trading as u8 || market.status == Status::Halted as u8,
             MarketError::NotTrading
+        );
+        // Dirty / in-flight wide would skew E(x*) on Settled and leave a stuck book on Void.
+        require!(
+            market.wide_write == 0 && market.wide_flags & WIDE_ACTIVE == 0,
+            MarketError::DirtyWide
         );
         market.status = next;
         Ok(())
@@ -2682,8 +2698,10 @@ fn wide_apply_fill(
     Ok(())
 }
 
-fn wide_revert_written(
-    market: &Market,
+/// Inverse-apply provided shards and clear their bits from `wide_write`. Multi-step safe:
+/// does **not** wipe flags while any written bit remains (avoids permanent grid skew).
+fn wide_revert_step(
+    market: &mut Market,
     market_key: Pubkey,
     grid: &AccountInfo,
     remaining: &[AccountInfo],
@@ -2691,13 +2709,16 @@ fn wide_revert_written(
     q_raw: i128,
     nonce: u64,
     is_buy: bool,
+    require_progress: bool,
 ) -> Result<()> {
-    wide_params_ok(market, set_mask, q_raw, nonce, is_buy)?;
+    require!(market.wide_tag == mask_tag(set_mask), MarketError::BadMask);
+    require!(market.wide_q == q_raw, MarketError::ZeroQty);
+    require!(market.wide_nonce == nonce, MarketError::NonceReplay);
+    require!((market.wide_flags & WIDE_BUY != 0) == is_buy, MarketError::BadMask);
     let n = market.n;
     let need = wide_need(n, set_mask);
     let written = market.wide_write;
     require!(written != 0, MarketError::GridNotReady);
-    // Inverse: −q with e = exp(−q/β) restores w/θ/E on written shards.
     let signed = if is_buy { -q_raw } else { q_raw };
     let q = Q64::from_raw(signed);
     let e = q
@@ -2708,10 +2729,12 @@ fn wide_revert_written(
     let in_set = |i: usize| mask::bit(set_mask, i);
     let mut z_now = Q64::from_raw(market.wide_z);
     let l_max = market.l_max;
+    let mut cleared = 0u128;
     for shard in &remaining[..extra] {
         let ix = parse_extra_ix(shard, market_key, n)?;
         let bit = shard_bit(ix);
-        if written & bit == 0 {
+        // Skip already-reverted bits in this ix (duplicate remaining accounts must not double-apply).
+        if written & bit == 0 || cleared & bit != 0 {
             continue;
         }
         require!(need & bit != 0, MarketError::WrongGrid);
@@ -2728,10 +2751,11 @@ fn wide_revert_written(
             l_max,
         )?;
         z_now = out.0;
+        cleared |= bit;
     }
-    if written & 1 != 0 {
+    if written & 1 != 0 && cleared & 1 == 0 {
         let mut data = grid.try_borrow_mut_data()?;
-        let _ = apply_one_shard_write(
+        let out = apply_one_shard_write(
             &mut data,
             market_key,
             n as usize,
@@ -2742,6 +2766,15 @@ fn wide_revert_written(
             z_now,
             l_max,
         )?;
+        z_now = out.0;
+        cleared |= 1;
+    }
+    if require_progress {
+        require!(cleared != 0, MarketError::GridNotReady);
+    }
+    if cleared != 0 {
+        market.wide_write &= !cleared;
+        market.wide_z = z_now.raw();
     }
     Ok(())
 }
@@ -2758,11 +2791,14 @@ fn wide_abort_fill(
             || ctx.accounts.market.status == Status::Halted as u8,
         MarketError::NotTrading
     );
-    require!(ctx.accounts.market.wide_flags & WIDE_ACTIVE != 0, MarketError::GridNotReady);
+    require!(
+        ctx.accounts.market.wide_flags & WIDE_ACTIVE != 0 || ctx.accounts.market.wide_write != 0,
+        MarketError::GridNotReady
+    );
     if ctx.accounts.market.wide_write != 0 {
         let market_key = ctx.accounts.market.key();
-        wide_revert_written(
-            &ctx.accounts.market,
+        wide_revert_step(
+            &mut ctx.accounts.market,
             market_key,
             &ctx.accounts.grid.to_account_info(),
             ctx.remaining_accounts,
@@ -2770,9 +2806,12 @@ fn wide_abort_fill(
             q_raw,
             nonce,
             is_buy,
+            true,
         )?;
     }
-    wide_clear(&mut ctx.accounts.market);
+    if ctx.accounts.market.wide_write == 0 {
+        wide_clear(&mut ctx.accounts.market);
+    }
     Ok(())
 }
 

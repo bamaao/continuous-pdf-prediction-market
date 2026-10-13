@@ -276,6 +276,11 @@ pub fn compute_begin(
     require!(record.market == board.market, VaultError::WrongBoard);
     require!(book.market == board.market, VaultError::WrongBoard);
     require!(market.status == STATUS_SETTLED, VaultError::NotFinalized);
+    // Partial wide apply without finish would inflate E(x*) / L without matching revenue.
+    require!(
+        market.wide_write == 0 && market.wide_flags & 1 == 0,
+        VaultError::DirtyWide
+    );
     // ER fills update Market first; Board catches up only after sync_vault.
     require!(
         board.trading_revenue == market.trading_revenue
@@ -402,6 +407,10 @@ pub fn compute_refund(board: &mut Board, market: &Market, record: &Resolution) -
     require!(record.refunds_due, VaultError::RefundsDue);
     require!(record.market == board.market, VaultError::WrongBoard);
     require!(market.status == STATUS_VOID, VaultError::NotFinalized);
+    require!(
+        market.wide_write == 0 && market.wide_flags & 1 == 0,
+        VaultError::DirtyWide
+    );
     // Same gate as settle: ER fills hit Market first; refunding cost_paid before sync
     // would credit available twice (buy never debited available until sync_vault).
     require!(

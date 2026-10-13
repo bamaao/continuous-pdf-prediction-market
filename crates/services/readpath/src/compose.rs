@@ -887,7 +887,11 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
         }
         "void_resolution" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
-            Ok(client::void_resolution(owner, market))
+            Ok(client::void_resolution_ex(
+                owner,
+                market,
+                body.extensions.unwrap_or(0),
+            ))
         }
         "admin_submit_result" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;

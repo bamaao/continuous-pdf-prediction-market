@@ -188,8 +188,8 @@ pub mod vault {
     }
 
     /// Lock unused margin as this market's committee report bond. One lock per market.
-    /// After VoteTimeout→ExtendOnce, a stale unslashed bond is returned to the previous
-    /// holder so a new proposer can lock (blocks free-ride on another's cbond).
+    /// After ExtendOnce, only the current holder may unlock-and-relock; others must wait for
+    /// `release_committee_bond` (reset path) then lock fresh — no third-party sniping.
     pub fn lock_committee_bond(ctx: Context<LockBond>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroAmount);
         require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
@@ -208,27 +208,21 @@ pub mod vault {
                 .unwrap(),
         );
         drop(market_data);
-        require!(member || who == creator, VaultError::NotOwner);
+        let reported = rec.authorized_reporter != Pubkey::default() && who == rec.authorized_reporter;
+        require!(member || who == creator || reported, VaultError::NotOwner);
         let reset = rec.phase == PHASE_OPEN
             && rec.extensions > 0
             && rec.proposer == Pubkey::default();
+        // After ExtendOnce only the current holder may unlock-and-relock — no third-party sniping.
         if ctx.accounts.bond.amount > 0 {
-            require!(reset && !ctx.accounts.bond.slashed, VaultError::BondLocked);
-            let prev = ctx.accounts.bond.holder;
+            require!(
+                reset && !ctx.accounts.bond.slashed && ctx.accounts.bond.holder == who,
+                VaultError::BondLocked
+            );
             let stale = ctx.accounts.bond.amount;
-            if prev == who {
-                let user = &mut ctx.accounts.user;
-                user.bond = accounting::debit_bond(user.bond, stale)?;
-                user.available = accounting::credit(user.available, stale)?;
-            } else {
-                require!(
-                    ctx.accounts.prev_holder.as_ref().map(|u| u.owner) == Some(prev),
-                    VaultError::NotOwner
-                );
-                let prev_uv = ctx.accounts.prev_holder.as_mut().unwrap();
-                prev_uv.bond = accounting::debit_bond(prev_uv.bond, stale)?;
-                prev_uv.available = accounting::credit(prev_uv.available, stale)?;
-            }
+            let user = &mut ctx.accounts.user;
+            user.bond = accounting::debit_bond(user.bond, stale)?;
+            user.available = accounting::credit(user.available, stale)?;
             ctx.accounts.bond.amount = 0;
         }
         require!(ctx.accounts.bond.amount == 0, VaultError::BondLocked);
@@ -268,20 +262,13 @@ pub mod vault {
     }
 
     /// Return this market's bond after VOID / committee finalize (not slashed).
-    /// Also after VoteTimeout→ExtendOnce (`Open` + `extensions>0` + proposer cleared).
+    /// Not allowed during ExtendOnce Open — bond must stay locked so admin slash still has teeth.
     pub fn release_committee_bond(ctx: Context<ReleaseBond>) -> Result<()> {
         require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
         let slash = ctx.accounts.resolution.slash_due;
         let phase = ctx.accounts.resolution.phase;
-        let rec = &ctx.accounts.resolution;
-        let reset = phase == PHASE_OPEN
-            && rec.extensions > 0
-            && rec.proposer == Pubkey::default();
         let ok = !slash
-            && (phase == PHASE_VOIDED
-                || phase == PHASE_FAILED
-                || phase == PHASE_FINALIZED
-                || reset);
+            && (phase == PHASE_VOIDED || phase == PHASE_FAILED || phase == PHASE_FINALIZED);
         require!(ok, VaultError::NotFinalized);
         let bond = &mut ctx.accounts.bond;
         require!(!bond.slashed && bond.amount > 0, VaultError::ZeroAmount);
@@ -294,8 +281,8 @@ pub mod vault {
     }
 
     /// Lock unused margin as this market's challenger bond (`["chbond", market]`).
-    /// After ExtendOnce (`Open` + extensions + challenger cleared), an unslashed stale
-    /// bond is returned to the previous holder so a new member can lock.
+    /// After ExtendOnce, only the current holder may unlock-and-relock; others use
+    /// `release_challenge_bond` then a fresh lock.
     pub fn lock_challenge_bond(ctx: Context<LockChallengeBond>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroAmount);
         require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
@@ -306,23 +293,16 @@ pub mod vault {
         let reset = rec.phase == PHASE_OPEN
             && rec.extensions > 0
             && rec.challenger == Pubkey::default();
+        // After ExtendOnce only the current challenger-holder may unlock-and-relock.
         if ctx.accounts.bond.amount > 0 {
-            require!(reset && !ctx.accounts.bond.slashed, VaultError::BondLocked);
-            let prev = ctx.accounts.bond.holder;
+            require!(
+                reset && !ctx.accounts.bond.slashed && ctx.accounts.bond.holder == who,
+                VaultError::BondLocked
+            );
             let stale = ctx.accounts.bond.amount;
-            if prev == who {
-                let user = &mut ctx.accounts.user;
-                user.bond = accounting::debit_bond(user.bond, stale)?;
-                user.available = accounting::credit(user.available, stale)?;
-            } else {
-                require!(
-                    ctx.accounts.prev_holder.as_ref().map(|u| u.owner) == Some(prev),
-                    VaultError::NotOwner
-                );
-                let prev_uv = ctx.accounts.prev_holder.as_mut().unwrap();
-                prev_uv.bond = accounting::debit_bond(prev_uv.bond, stale)?;
-                prev_uv.available = accounting::credit(prev_uv.available, stale)?;
-            }
+            let user = &mut ctx.accounts.user;
+            user.bond = accounting::debit_bond(user.bond, stale)?;
+            user.available = accounting::credit(user.available, stale)?;
             ctx.accounts.bond.amount = 0;
         }
         require!(ctx.accounts.bond.amount == 0, VaultError::BondLocked);
@@ -925,9 +905,6 @@ pub struct LockBond<'info> {
         has_one = owner @ VaultError::NotOwner
     )]
     pub user: Account<'info, UserVault>,
-    /// Previous bond holder vault — required when reclaiming a stale lock after ExtendOnce.
-    #[account(mut, seeds = [USER_SEED, prev_holder.owner.as_ref()], bump = prev_holder.bump)]
-    pub prev_holder: Option<Account<'info, UserVault>>,
     #[account(
         init_if_needed,
         payer = owner,
@@ -1004,9 +981,6 @@ pub struct LockChallengeBond<'info> {
         has_one = owner @ VaultError::NotOwner
     )]
     pub user: Account<'info, UserVault>,
-    /// Previous challenger vault — required when reclaiming a stale chbond after ExtendOnce.
-    #[account(mut, seeds = [USER_SEED, prev_holder.owner.as_ref()], bump = prev_holder.bump)]
-    pub prev_holder: Option<Account<'info, UserVault>>,
     #[account(
         init_if_needed,
         payer = owner,
@@ -1510,6 +1484,8 @@ pub enum VaultError {
     InsufficientTradePending,
     #[msg("shortfall settle requires AdjustPool + BoardTap accounts")]
     MissingCpAccounts,
+    #[msg("market has an in-flight or dirty wide fill — cancel/abort before settle")]
+    DirtyWide,
 }
 
 #[cfg(test)]
