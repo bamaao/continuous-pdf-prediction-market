@@ -115,8 +115,6 @@ pub mod resolution {
             bond_holder_is(&ctx.accounts.bond.to_account_info(), &reporter),
             ResError::BondNotLocked
         );
-        // Incomplete M-of-N VOID must finish (or expire) before a proposal can hijack Open.
-        require!(rec.void_votes == 0, ResError::VoidInProgress);
         validate_outcome(rec.family, rec.n_atoms, &outcome)?;
 
         let effect = apply(&snapshot(rec, now), Event::Submit).map_err(|_| error!(ResError::BadPhase))?;
@@ -127,6 +125,7 @@ pub mod resolution {
         rec.challenged = Outcome::default();
         rec.votes_proposal = 0;
         rec.votes_challenge = 0;
+        // Incomplete VOID ballots are abandoned once a proposal stands (avoids single-vote DoS).
         rec.void_votes = 0;
         rec.challenge_end = now.saturating_add(rec.challenge_secs);
         rec.evidence_hash = evidence_hash;
@@ -237,6 +236,21 @@ pub mod resolution {
                     rec.refunds_due = true;
                     true
                 }
+                Effect::AwaitAdmin => {
+                    // Close the report window in place. AdminSubmit slashes; AdminVoid refunds.
+                    rec.phase = Phase::Open as u8;
+                    rec.extensions = rec.extensions.saturating_add(1).max(1);
+                    rec.report_deadline = now;
+                    rec.votes_proposal = 0;
+                    rec.votes_challenge = 0;
+                    rec.void_votes = 0;
+                    rec.proposer = Pubkey::default();
+                    rec.challenger = Pubkey::default();
+                    rec.proposed = Outcome::default();
+                    rec.challenged = Outcome::default();
+                    rec.refunds_due = false;
+                    false
+                }
                 _ => return err!(ResError::BadPhase),
             }
         };
@@ -254,7 +268,7 @@ pub mod resolution {
     pub fn void_resolution(ctx: Context<VoidRecord>) -> Result<()> {
         require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
         let now = Clock::get()?.unix_timestamp;
-        // Early void (before close) requires halt so fills cannot continue.
+        // Before close_ts the market must already be halted so fills cannot continue.
         if now < ctx.accounts.record.close_ts {
             require!(
                 ctx.accounts.market.status == Status::Halted as u8,
@@ -717,8 +731,6 @@ pub enum ResError {
     BondNotLocked,
     #[msg("early_resolve market is Halted; only VOID is allowed")]
     MustVoid,
-    #[msg("M-of-N VOID endorsements in progress; finish VOID or wait for window")]
-    VoidInProgress,
 }
 
 #[cfg(test)]

@@ -67,6 +67,8 @@ pub enum Effect {
     ExtendOnce,
     Fail,
     Void,
+    /// Vote timed out with no side at M. Hand the case to the platform admin.
+    AwaitAdmin,
 }
 
 pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
@@ -138,11 +140,8 @@ pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
             if case.votes_challenge >= case.m {
                 return Ok(Effect::FinalizeChallenge);
             }
-            if case.extensions == 0 {
-                Ok(Effect::ExtendOnce)
-            } else {
-                Ok(Effect::Fail)
-            }
+            // No quorum: committee disagreed. Platform admin chooses x* (slash) or VOID (refund).
+            Ok(Effect::AwaitAdmin)
         }
         Event::ReportTimeout => {
             if case.phase != Phase::Open {
@@ -157,11 +156,9 @@ pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
             if case.phase != Phase::Open {
                 return Err("cannot void");
             }
-            if case.now < case.close_ts && !case.early_ok {
-                return Err("void only after close");
-            }
-            if case.now >= case.report_deadline {
-                return Err("awaiting admin");
+            // Committee VOID only while trading is still open. After close_ts, admin VOIDs.
+            if case.now >= case.close_ts {
+                return Err("void only before close");
             }
             Ok(Effect::Void)
         }
@@ -252,15 +249,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_vote_extends_once_then_fails() {
+    fn failed_vote_waits_for_admin() {
         let mut c = base();
         c.phase = Phase::Voting;
         c.now = 180;
         c.votes_proposal = 1;
         c.votes_challenge = 1;
-        assert_eq!(apply(&c, Event::VoteTimeout), Ok(Effect::ExtendOnce));
-        c.extensions = 1;
-        assert_eq!(apply(&c, Event::VoteTimeout), Ok(Effect::Fail));
+        assert_eq!(apply(&c, Event::VoteTimeout), Ok(Effect::AwaitAdmin));
     }
 
     #[test]
@@ -280,7 +275,7 @@ mod tests {
         c.now = 200;
         assert_eq!(apply(&c, Event::ReportTimeout), Err("awaiting admin"));
         assert_eq!(apply(&c, Event::Submit), Err("report window closed"));
-        assert_eq!(apply(&c, Event::Void), Err("awaiting admin"));
+        assert_eq!(apply(&c, Event::Void), Err("void only before close"));
         assert_eq!(apply(&c, Event::AdminSubmit), Ok(Effect::FinalizeProposal));
         assert_eq!(apply(&c, Event::AdminVoid), Ok(Effect::Void));
     }
@@ -293,16 +288,18 @@ mod tests {
         assert_eq!(apply(&c, Event::Submit), Err("market still open"));
         assert_eq!(apply(&c, Event::Void), Ok(Effect::Void));
         c.early_ok = false;
-        assert_eq!(apply(&c, Event::Void), Err("void only after close"));
+        assert_eq!(apply(&c, Event::Void), Ok(Effect::Void));
     }
 
     #[test]
-    fn void_only_after_close() {
+    fn void_only_before_close() {
         let mut c = base();
         c.now = 80;
-        assert_eq!(apply(&c, Event::Void), Err("void only after close"));
-        c.now = 100;
         assert_eq!(apply(&c, Event::Void), Ok(Effect::Void));
+        c.now = 90;
+        assert_eq!(apply(&c, Event::Void), Err("void only before close"));
+        c.now = 100;
+        assert_eq!(apply(&c, Event::Void), Err("void only before close"));
     }
 
     #[test]

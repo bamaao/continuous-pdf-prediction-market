@@ -174,10 +174,10 @@ export function ResultForm({ market, family }: { market: string; family: number 
       (rec.phase === 2 && (rec.votes_proposal >= rec.m || rec.votes_challenge >= rec.m || now >= rec.vote_end)));
   const canVoid =
     !!rec &&
+    rec.phase === 0 &&
     !terminal &&
     member &&
-    now < rec.report_deadline &&
-    (now >= rec.close_ts || rec.early_resolve);
+    now < rec.close_ts;
 
   async function run(
     op: "resolve_open" | "submit_result" | "challenge" | "vote" | "finalize" | "void_resolution" | "begin_settle" | "begin_refund" | "halt" | "admin_submit_result" | "admin_void_resolution" | "slash_committee_bond" | "lock_committee_bond" | "release_committee_bond",
@@ -332,7 +332,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
           <p className="mt-1 text-[10px] text-paper/45">Votes use the roster copied at resolve_open, not a later set_roster.</p>
           <TallyBar label="Keep proposed" votes={rec.votes_proposal} m={rec.m} n={rec.n} />
           <TallyBar label="Take challenge" votes={rec.votes_challenge} m={rec.m} n={rec.n} />
-          {rec.extensions > 0 && <p className="mt-2 text-[10px] text-paper/45">Already extended once. Next miss is RESOLUTION_FAILED.</p>}
+          {rec.extensions > 0 && <p className="mt-2 text-[10px] text-paper/45">A previous window already closed. A miss here waits for the platform.</p>}
         </div>
       )}
 
@@ -365,7 +365,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
                     : "Members may challenge. Reporters propose only.")}
             {rec?.phase === 2 &&
               (canVote
-                ? "One ballot per member. First side to reach M finalizes. Timeout extends once, then RESOLUTION_FAILED."
+                ? "One ballot per member. First side to reach M finalizes. If neither side reaches M, the platform writes x* or VOIDs."
                 : "Members vote. Observers wait for M or the window.")}
           </p>
 
@@ -412,7 +412,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
                 {busy ? "Releasing…" : "Release committee bond"}
               </button>
             )}
-            {member && rec?.early_resolve && !terminal && (
+            {member && rec && !terminal && now < rec.close_ts && (
               <button className="w-full border border-rule py-2 text-paper/70 disabled:opacity-50" disabled={busy} onClick={() => run("halt")}>
                 {busy ? "Halting…" : "Halt trading"}
               </button>
@@ -443,20 +443,14 @@ export function ResultForm({ market, family }: { market: string; family: number 
             )}
             {canFinalize && (
               <button className="w-full border border-amber py-2 text-amber disabled:opacity-50" disabled={busy} onClick={() => run("finalize")}>
-                {rec?.phase === 0 && rec.extensions === 0
-                  ? "Extend report window"
-                  : rec?.phase === 0
-                    ? "Mark RESOLUTION_FAILED"
-                    : rec?.phase === 2 && rec.votes_proposal < rec.m && rec.votes_challenge < rec.m && rec.extensions === 0
-                      ? "Extend once"
-                      : rec?.phase === 2 && rec.votes_proposal < rec.m && rec.votes_challenge < rec.m
-                        ? "Mark RESOLUTION_FAILED"
-                        : "Finalize"}
+                {rec?.phase === 2 && rec.votes_proposal < rec.m && rec.votes_challenge < rec.m
+                  ? "Hand to platform"
+                  : "Finalize"}
               </button>
             )}
             {canVoid && (
               <button className="w-full border border-rule py-2 text-paper/60 disabled:opacity-50" disabled={busy} onClick={() => run("void_resolution")}>
-                Void market
+                Void market (halt first)
               </button>
             )}
             {isAdmin && rec?.phase === 0 && reportElapsed && (

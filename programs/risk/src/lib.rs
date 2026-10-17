@@ -155,7 +155,16 @@ pub mod risk {
     }
 
     pub fn cancel_unfilled(ctx: Context<CancelUnfilled>) -> Result<()> {
+        let market = &ctx.accounts.market;
+        require!(
+            market.status == Status::Trading as u8,
+            RiskError::Locked
+        );
+        let now = Clock::get()?.unix_timestamp;
+        // Same gate as quote/fill — no cancel after risk lock / close (blocks settle-time rank dodge).
+        require!(now < market.close_ts && now < market.risk_lock_ts, RiskError::Locked);
         let quote = &mut ctx.accounts.quote;
+        require_keys_eq!(quote.market, market.key(), RiskError::WrongBook);
         let mut layer = ctx.accounts.layer.load_mut()?;
         require!(quote.lp == ctx.accounts.lp.key(), RiskError::NotOwner);
         require!(!quote.cancelled, RiskError::Cancelled);
@@ -440,10 +449,13 @@ pub struct FillNext<'info> {
 #[derive(Accounts)]
 pub struct CancelUnfilled<'info> {
     pub lp: Signer<'info>,
+    #[account(owner = market::ID)]
+    pub market: Box<Account<'info, Market>>,
     #[account(
         mut,
         seeds = [QUOTE_SEED, quote.market.as_ref(), lp.key().as_ref(), &[quote.layer_id]],
-        bump = quote.bump
+        bump = quote.bump,
+        constraint = quote.market == market.key() @ RiskError::WrongBook
     )]
     pub quote: Box<Account<'info, Quote>>,
     #[account(

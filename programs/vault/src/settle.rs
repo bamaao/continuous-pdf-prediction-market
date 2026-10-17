@@ -527,12 +527,13 @@ pub fn draw_quote(
     Ok(h)
 }
 
-/// All strictly better-ranked live quotes must already be drawn (or skipped with bit set).
+/// All strictly better-ranked **filled** quotes must already be drawn.
+/// `live==0` (cancelled leftover) does not drop filled exposure from the H order.
 fn require_draw_rank_ready(board: &Board, layer: &Layer, my_slot: usize) -> Result<()> {
     let my_unit = layer.unit_at(my_slot);
     let my_ts = layer.quote_ts[my_slot];
     for i in 0..layer.quote_count as usize {
-        if i == my_slot || layer.quote_live[i] == 0 || layer.quote_filled[i] == 0 {
+        if i == my_slot || layer.quote_filled[i] == 0 {
             continue;
         }
         let u = layer.unit_at(i);
@@ -1718,6 +1719,47 @@ mod tests {
         assert_eq!(reconstructed_owed(333_333, 3), 1);
         assert_eq!(reconstructed_owed(1_000_000, 80), 80);
         assert_eq!(reconstructed_owed(0, 10), 0);
+    }
+
+    #[test]
+    fn draw_rank_includes_cancelled_but_filled() {
+        let mut b = board();
+        b.phase = BOARD_SETTLED;
+        b.trading_revenue = 0;
+        b.liability = 30;
+        let cheap = qkey(1);
+        let rich = qkey(2);
+        let mut layer = Layer {
+            market: b.market,
+            quote_count: 2,
+            layer_id: 1,
+            ..Layer::default()
+        };
+        layer.quote_keys[0] = rich;
+        layer.quote_keys[1] = cheap;
+        layer.quote_live[0] = 1;
+        layer.quote_live[1] = 0; // cancelled leftover — filled must still rank
+        layer.quote_filled[0] = 40;
+        layer.quote_filled[1] = 40;
+        layer.set_unit(0, 50 * 1_000_000 / 40);
+        layer.set_unit(1, 10 * 1_000_000 / 40);
+        layer.quote_ts[0] = 2;
+        layer.quote_ts[1] = 1;
+        let q_rich = Quote {
+            market: b.market,
+            lp: rich,
+            capacity: 40,
+            filled: 40,
+            premium: 50,
+            premium_owed: 50,
+            ts: 2,
+            profit_share_bps: 0,
+            layer_id: 1,
+            cancelled: false,
+            bump: 0,
+        };
+        let mut lp_rich = user(100, 40);
+        assert!(draw_quote(&mut b, &layer, rich, &q_rich, &mut lp_rich).is_err());
     }
 
     #[test]

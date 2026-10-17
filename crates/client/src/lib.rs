@@ -495,14 +495,15 @@ pub fn slash_challenge_bond(authority: Pubkey, market: Pubkey, holder: Pubkey) -
     }
 }
 
-pub fn release_challenge_bond(owner: Pubkey, market: Pubkey) -> Instruction {
+/// `holder` receives the funds. `authority` is the holder, or any committee member kicking an unused lock.
+pub fn release_challenge_bond(authority: Pubkey, market: Pubkey, holder: Pubkey) -> Instruction {
     Instruction {
         program_id: vault::ID,
         accounts: vault::accounts::ReleaseChallengeBond {
-            owner,
+            authority,
             resolution: record_pda(&market),
             bond: challenge_bond_pda(&market),
-            user: user_vault(&owner),
+            user: user_vault(&holder),
         }
         .to_account_metas(None),
         data: vault::instruction::ReleaseChallengeBond {}.data(),
@@ -1629,6 +1630,7 @@ pub fn cancel_unfilled(lp: Pubkey, market: Pubkey, layer_id: u8) -> Instruction 
         program_id: risk::ID,
         accounts: risk::accounts::CancelUnfilled {
             lp,
+            market,
             quote,
             layer,
             vault_auth,

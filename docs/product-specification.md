@@ -78,7 +78,7 @@ These are protocol rules, not UI hints. Programs, Quote, and the desk SHALL foll
 | Duplicate listings are refused | Two applications SHALL NOT cover the same event. Duplicate key = distribution family + normalized **canonical English** title + trading event (trim / case-fold ASCII). Translations SHALL NOT create a second market. If another row is `PENDING_REVIEW` or `OPEN`, submit returns `409`. The reviewer MAY reject an application as duplicate. |
 | Listing language | Anyone MAY apply from any country. The **canonical** title, trading event, and description are **English** (product §1.2.5). Optional locale strings are display only. Geo-IP blocks are access policy, not language. |
 | Geo-IP region block | A listing MAY lock blocked countries / regions (ISO 3166-1 alpha-2, optional subdivision). Enforcement is the client IP via GeoIP on lobby, info, quote, compose, trade, auction, and comments. A blocked visitor SHALL NOT see the prediction market as tradable (`403` / hidden). The reviewer MAY add or confirm the block list at review. This is access policy, not settlement math. |
-| Report clocks, committee bond, platform timeout | Create SHALL require `report_open_ts ≥ close_ts` (no omitted / `0` default) and `committee_bond > 0`. Trading still stops at `close_ts`. The committee MAY `submit_result` only in `[report_open_ts, report_open_ts + report_window_secs)` (product default **86400** seconds). Committee VOID is allowed after `close_ts` until `report_deadline`. Bernoulli `early_resolve`: if the event occurs before `close_ts`, **halt and VOID** (refund `cost_paid`); do **not** settle YES. After `report_deadline` with no committee `submit_result`: **no auto-extend** and **no auto-`RESOLUTION_FAILED`**. Only the protocol platform (`Market.platform` / `PLATFORM_PUBKEY`) MAY act: `admin_submit_result` writes $x^*$ and **slashes** the committee bond; `admin_void_resolution` VOIDs and **does not slash** (bond MAY be released). A failed **vote** after a proposal is a different clock (FR-RES-03: one extend, then `RESOLUTION_FAILED`). |
+| Report clocks, committee bond, platform timeout | Create SHALL require `report_open_ts ≥ close_ts` (no omitted / `0` default) and `committee_bond > 0`. Trading still stops at `close_ts`. The committee MAY `submit_result` only in `[report_open_ts, report_open_ts + report_window_secs)` (product default **86400** seconds). Committee VOID is allowed only while `now < close_ts` and the market is Halted (any family; refund `cost_paid`). After `close_ts` the committee SHALL NOT VOID. Bernoulli `early_resolve` + Halted: do **not** settle YES. If the committee does not submit, or a vote ends with neither side at $M$: **no auto-extend** and **no auto-`RESOLUTION_FAILED`**. Only the protocol platform (`Market.platform` / `PLATFORM_PUBKEY`) MAY act: `admin_submit_result` writes $x^*$ and **slashes** the committee bond; `admin_void_resolution` VOIDs and **does not slash** (bond MAY be released). |
 
 SRS: FR-TRD-01, FR-TRD-04, FR-TRD-14, FR-RSK-05, FR-HAL-01, FR-RES-06, FR-RES-07, FR-SET-06–08, FR-UI-32, FR-UI-37, FR-UI-42–45.
 
@@ -125,7 +125,7 @@ During the trading period $L_{\max}$ may exceed available funds. **Orders are no
 
 **⑤ Wait for the event.** Football waits for full time; CPI waits for the official print; a price board waits until `observe_ts`; a binary event waits until the deadline or an early occurrence.
 
-**⑥ Submit the result.** The chain does not grow $x^*$ by itself. Create locks `report_open_ts` (required, $\ge$ `close_ts`), `report_window_secs` (default **24 hours**), and `committee_bond > 0`. A committee / authorized-reporter `submit_result` may write the settlement value only when `now ≥ report_open_ts` and `now < report_deadline`. There is no early-YES submit. If a Bernoulli event occurs before `close_ts` and `early_resolve` is set, halt trading and **VOID** (refund `cost_paid`); do not write $x^*=\mathrm{YES}$. If the report window ends with no `submit_result`, the market waits for the protocol platform: `admin_submit_result` (finalize $x^*$, slash the bond) or `admin_void_resolution` (VOID, return the bond). The payload is a score, a published print, a winner, a price, or YES/NO — not “which line won”. An optional `evidence_hash` may be stored; the program does not parse it. No payout before finalization. Details: §10.5.
+**⑥ Submit the result.** The chain does not grow $x^*$ by itself. Create locks `report_open_ts` (required, $\ge$ `close_ts`), `report_window_secs` (default **24 hours**), and `committee_bond > 0`. A committee / authorized-reporter `submit_result` may write the settlement value only when `now ≥ report_open_ts` and `now < report_deadline`. There is no early-YES submit. Before `close_ts`, any family MAY halt and **VOID** (refund `cost_paid`). After `close_ts` the committee SHALL NOT VOID. Bernoulli `early_resolve` + Halted still forbids writing $x^*=\mathrm{YES}$. If the report window ends with no `submit_result`, the market waits for the protocol platform: `admin_submit_result` (finalize $x^*$, slash the bond) or `admin_void_resolution` (VOID, return the bond). The payload is a score, a published print, a winner, a price, or YES/NO — not “which line won”. An optional `evidence_hash` may be stored; the program does not parse it. No payout before finalization. Details: §10.5.
 
 **⑦ Settlement gate — compute $\rho$, then pay.** This protocol has no futures-style liquidation. After $x^*$ is final, settlement **first** locks $L=E(c)$ and $C_{\max}=R_{\mathrm{net}}+C_R^{\mathrm{final}}+C_P^{\mathrm{alloc}}$, **then** writes one board-wide recovery rate
 
@@ -466,7 +466,7 @@ flowchart TB
     D3 -->|No challenge| D4[finalize locks x*]
     D3 -->|Challenge| D5[M/N vote]
     D5 -->|Pass| D4
-    D5 -->|Fail after one extend| D6[RESOLUTION_FAILED<br/>refund users / collateral / unused premium]
+    D5 -->|Neither side at M| D6[Admin: x* + slash, or VOID refund]
     D2 -->|Window ends, no report| D7[Await Market.platform]
     D7 -->|admin_submit_result| D8[x* final; slash committee bond]
     D7 -->|admin_void_resolution| D9[VOID; return bond; refund cost_paid]
@@ -2092,7 +2092,7 @@ submit_result(market, value, evidence?)   // committee / authorized reporter, in
 challenge(market, value, bond)
 finalize(market)                          // challenge window ends with no objection
 vote(market, value)                       // after entering a vote
-void_resolution(market)                   // committee VOID after close_ts until report_deadline
+void_resolution(market)                   // committee VOID only while now < close_ts and Halted
 admin_submit_result(market, value)        // Market.platform only, after report_deadline, no prior submit
 admin_void_resolution(market)             // Market.platform only, after report_deadline; no slash
 lock_committee_bond / slash_committee_bond / release_committee_bond
@@ -2119,7 +2119,7 @@ Each board binds a Resolver: the creator’s roster, or the protocol’s public 
 1. A member or authorized reporter submits `value` inside the report window and posts a bond. The payload is the settlement value under the listing convention, not a feed account.
 2. If nobody objects inside the challenge window, `finalize` locks it.
 3. If someone objects and posts a bond, enter an $M/N$ vote; price/macro may use the median inside a tolerance $\varepsilon$.
-4. If that **vote** fails: extend the **vote** clock once; if it still fails, `RESOLUTION_FAILED` (refund). This is not a missed-report timeout and does not wait for the platform.
+4. If that **vote** ends with neither side at $M$, the case waits for the platform: write $x^*$ and slash, or VOID and refund. No auto-extend and no auto-`RESOLUTION_FAILED`.
 
 An authorized bot (sports feed, price keeper) is only “a member who may propose first”. Disputes still return to the same committee; no separate settlement channel is opened.
 
@@ -2136,9 +2136,9 @@ The contract stores the number. It does not fetch a feed, re-run a formula, or t
 | Clock | Who | If it fires |
 | --- | --- | --- |
 | `close_ts` | Everyone | Stop prediction fills and the risk auction. Distribution frozen. |
-| `[report_open_ts, report_deadline)` | Committee / authorized reporter | MAY `submit_result`. MAY VOID after `close_ts`. Bernoulli `early_resolve` MAY VOID **before** `close_ts` (halt + refund, not YES). |
-| `now ≥ report_deadline`, phase still Open, no proposal | **Only** `Market.platform` | No auto-extend. No auto-`RESOLUTION_FAILED`. The market waits. |
-| After a proposal, vote timeout | Committee machine | One vote extend, then `RESOLUTION_FAILED` (FR-RES-03). |
+| `now < close_ts`, market Halted | Committee | MAY VOID (any family). Halt first so fills stop. Refund `cost_paid` when $M$ endorse. |
+| `[report_open_ts, report_deadline)` | Committee / authorized reporter | MAY `submit_result`. SHALL NOT VOID. Bernoulli `early_resolve` + Halted still forbids YES. |
+| `now ≥ report_deadline`, no agreed result (missed submit or vote without $M$) | **Only** `Market.platform` | No auto-extend. No auto-`RESOLUTION_FAILED`. Admin writes $x^*$ (slash) or VOIDs (refund). |
 
 After `report_deadline` with no committee report, the protocol platform (super-admin = `Market.platform` / `PLATFORM_PUBKEY`) chooses **exactly one**:
 
@@ -2220,7 +2220,7 @@ Exceptions:
 ```text
 AWAITING_PLATFORM → only Market.platform: admin_submit_result (slash) or admin_void_resolution (no slash)
 RESOLUTION_FAILED → vote failed after a proposal: refund (not the missed-report path)
-VOID → refund cost_paid (committee before deadline, Bernoulli early_resolve, or platform VOID)
+VOID → refund cost_paid (committee while now < close_ts, or platform VOID after a missed report / failed vote)
 RISK_LP_DEFAULT  → that LP’s collateral is forfeited and counted in C_max; any remainder is still absorbed by ρ
 ```
 

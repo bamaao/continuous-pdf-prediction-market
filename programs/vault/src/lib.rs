@@ -370,25 +370,35 @@ pub mod vault {
     }
 
     /// Return challenger bond after challenge wins, VOID/Failed, unused lock, or ExtendOnce reset.
+    /// During Proposed before `challenge`, any committee member may kick an unused lock (anti-grief).
     pub fn release_challenge_bond(ctx: Context<ReleaseChallengeBond>) -> Result<()> {
-        require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
         let rec = &ctx.accounts.resolution;
         let phase = rec.phase;
+        let who = ctx.accounts.authority.key();
+        let holder = ctx.accounts.bond.holder;
+        require_keys_eq!(ctx.accounts.user.owner, holder, VaultError::NotOwner);
         let challenge_won = phase == PHASE_FINALIZED && outcome_eq(&rec.final_outcome, &rec.challenged);
         let reset = phase == PHASE_OPEN && rec.challenger == Pubkey::default() && rec.extensions > 0;
-        // Quiet finalize / never challenged: unlock. Also abandon during Proposed before challenge ix.
-        let unused = (phase == PHASE_FINALIZED
-            && (rec.challenger == Pubkey::default() || rec.challenger != ctx.accounts.owner.key()))
-            || (phase == PHASE_PROPOSED && rec.challenger == Pubkey::default());
+        let abandon = phase == PHASE_PROPOSED && rec.challenger == Pubkey::default();
+        // Quiet finalize / never challenged: unlock. Abandon also allows peer kick.
+        let unused_final = phase == PHASE_FINALIZED
+            && (rec.challenger == Pubkey::default() || rec.challenger != holder);
         let ok = phase == PHASE_VOIDED
             || phase == PHASE_FAILED
             || challenge_won
             || reset
-            || unused;
+            || abandon
+            || unused_final;
         require!(ok, VaultError::NotFinalized);
+        if abandon {
+            let member = rec.members.iter().take(rec.n as usize).any(|m| *m == who);
+            require!(who == holder || member, VaultError::NotOwner);
+        } else {
+            require_keys_eq!(who, holder, VaultError::NotOwner);
+        }
         let bond = &mut ctx.accounts.bond;
         require!(!bond.slashed && bond.amount > 0, VaultError::ZeroAmount);
-        require_keys_eq!(bond.holder, ctx.accounts.owner.key(), VaultError::NotOwner);
+        require_keys_eq!(bond.holder, holder, VaultError::NotOwner);
         let amount = bond.amount;
         ctx.accounts.user.bond = accounting::debit_bond(ctx.accounts.user.bond, amount)?;
         ctx.accounts.user.available = accounting::credit(ctx.accounts.user.available, amount)?;
@@ -1040,7 +1050,8 @@ pub struct SlashChallengeBond<'info> {
 
 #[derive(Accounts)]
 pub struct ReleaseChallengeBond<'info> {
-    pub owner: Signer<'info>,
+    /// Holder, or (when abandon) any committee member kicking an unused lock.
+    pub authority: Signer<'info>,
     #[account(owner = views::RESOLUTION_ID)]
     pub resolution: Box<Account<'info, views::Resolution>>,
     #[account(
@@ -1049,11 +1060,12 @@ pub struct ReleaseChallengeBond<'info> {
         bump = bond.bump
     )]
     pub bond: Account<'info, CommitteeBond>,
+    /// Always the bond holder's vault (credits return here even on peer kick).
     #[account(
         mut,
-        seeds = [USER_SEED, owner.key().as_ref()],
+        seeds = [USER_SEED, bond.holder.as_ref()],
         bump = user.bump,
-        has_one = owner @ VaultError::NotOwner
+        constraint = user.owner == bond.holder @ VaultError::NotOwner
     )]
     pub user: Account<'info, UserVault>,
 }
