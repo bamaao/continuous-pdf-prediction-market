@@ -1983,7 +1983,10 @@ fn apply_cached_on_shards(
     let mut extra_ix: Vec<usize> = Vec::with_capacity(extras.len());
     for shard in extras {
         let ix = parse_extra_ix(shard, market, n as u16)?;
-        got |= shard_bit(ix);
+        let bit = shard_bit(ix);
+        // Same shard twice would charge once and multiply weights twice.
+        require!(got & bit == 0, MarketError::WrongGrid);
+        got |= bit;
         extra_ix.push(ix);
     }
     require!(got & need == need, MarketError::GridNotReady);
@@ -2770,7 +2773,10 @@ fn wide_revert_step(
         z_now = out.0;
         cleared |= bit;
     }
-    if written & 1 != 0 && cleared & 1 == 0 {
+    // Shard 0 is the only place Z is stored. Revert it after every other written
+    // bit is gone, so a partial abort cannot publish an intermediate partition sum.
+    let extras_still = (written & !1u128) & !cleared;
+    if written & 1 != 0 && cleared & 1 == 0 && extras_still == 0 {
         let mut data = grid.try_borrow_mut_data()?;
         let out = apply_one_shard_write(
             &mut data,

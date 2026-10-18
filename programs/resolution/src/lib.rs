@@ -137,6 +137,10 @@ pub mod resolution {
         let rec = &mut ctx.accounts.record;
         let now = Clock::get()?.unix_timestamp;
         require!(is_member(rec, &ctx.accounts.reporter.key()), ResError::NotReporter);
+        require!(
+            !halted_early(rec.early_resolve, ctx.accounts.market.status),
+            ResError::MustVoid
+        );
         require!(ctx.accounts.reporter.key() != rec.proposer, ResError::SelfChallenge);
         require!(
             bond_meets_min(
@@ -188,6 +192,7 @@ pub mod resolution {
     pub fn finalize(ctx: Context<Finalize>) -> Result<()> {
         require!(ctx.accounts.market.key() == ctx.accounts.record.market, ResError::CommitteeMismatch);
         let now = Clock::get()?.unix_timestamp;
+        let halted = ctx.accounts.market.status;
         let sync_status = {
             let rec = &mut ctx.accounts.record;
             let snap = snapshot(rec, now);
@@ -205,12 +210,20 @@ pub mod resolution {
             let effect = apply(&snap, ev).map_err(|_| error!(ResError::BadPhase))?;
             match effect {
                 Effect::FinalizeProposal => {
+                    require!(
+                        !halted_early(rec.early_resolve, halted),
+                        ResError::MustVoid
+                    );
                     rec.phase = Phase::Finalized as u8;
                     rec.final_outcome = rec.proposed;
                     rec.refunds_due = false;
                     true
                 }
                 Effect::FinalizeChallenge => {
+                    require!(
+                        !halted_early(rec.early_resolve, halted),
+                        ResError::MustVoid
+                    );
                     rec.phase = Phase::Finalized as u8;
                     rec.final_outcome = rec.challenged;
                     rec.refunds_due = false;
@@ -255,6 +268,8 @@ pub mod resolution {
             }
         };
         if sync_status {
+            // Market reads the account bytes, not this program's in-memory copy.
+            ctx.accounts.record.exit(&crate::ID)?;
             sync_market_status(
                 ctx.accounts.market_program.to_account_info(),
                 ctx.accounts.market.to_account_info(),
@@ -296,6 +311,7 @@ pub mod resolution {
             true
         };
         if sync {
+            ctx.accounts.record.exit(&crate::ID)?;
             sync_market_status(
                 ctx.accounts.market_program.to_account_info(),
                 ctx.accounts.market.to_account_info(),
@@ -343,6 +359,7 @@ pub mod resolution {
             rec.slash_due = true;
             rec.refunds_due = false;
         }
+        ctx.accounts.record.exit(&crate::ID)?;
         sync_market_status(
             ctx.accounts.market_program.to_account_info(),
             ctx.accounts.market.to_account_info(),
@@ -365,6 +382,7 @@ pub mod resolution {
             rec.slash_due = false;
             rec.refunds_due = true;
         }
+        ctx.accounts.record.exit(&crate::ID)?;
         sync_market_status(
             ctx.accounts.market_program.to_account_info(),
             ctx.accounts.market.to_account_info(),
@@ -372,6 +390,10 @@ pub mod resolution {
         )?;
         Ok(())
     }
+}
+
+fn halted_early(early_resolve: bool, status: u8) -> bool {
+    early_resolve && status == Status::Halted as u8
 }
 
 fn sync_market_status<'info>(
@@ -460,6 +482,11 @@ fn validate_outcome(family: u8, n_atoms: u16, o: &Outcome) -> Result<()> {
     match family {
         FAMILY_SKELLAM => {
             require!(o.a >= 0 && o.b >= 0, ResError::BadOutcome);
+            // `outcome_cell` casts to u32. Larger scores must not collapse onto a low cell.
+            require!(
+                o.a <= u32::MAX as i128 && o.b <= u32::MAX as i128,
+                ResError::BadOutcome
+            );
             require!(o.kind == 0, ResError::BadOutcome);
         }
         FAMILY_GAUSSIAN => {
@@ -819,6 +846,22 @@ mod tests {
             shares: [0; 8],
         };
         assert!(validate_outcome(FAMILY_DIRICHLET, 4, &o).is_err());
+        let huge = Outcome {
+            family: FAMILY_SKELLAM,
+            kind: 0,
+            a: (u32::MAX as i128) + 1,
+            b: 0,
+            shares: [0; 8],
+        };
+        assert!(validate_outcome(FAMILY_SKELLAM, 121, &huge).is_err());
+        let edge = Outcome {
+            family: FAMILY_SKELLAM,
+            kind: 0,
+            a: u32::MAX as i128,
+            b: u32::MAX as i128,
+            shares: [0; 8],
+        };
+        assert!(validate_outcome(FAMILY_SKELLAM, 121, &edge).is_ok());
         let ok = Outcome {
             family: FAMILY_DIRICHLET,
             kind: 2,

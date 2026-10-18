@@ -427,6 +427,7 @@ pub mod vault {
     /// The market PDA must sign (CPI). The user owner is not a signer — Session
     /// may authorize the fill; this instruction still never treats a Session as vault authority.
     pub fn credit_trade(ctx: Context<CreditTrade>, cost: u64, fee: u64) -> Result<()> {
+        require_market_pda(&ctx.accounts.market.to_account_info())?;
         require!(ctx.accounts.board.market == ctx.accounts.market.key(), VaultError::WrongBoard);
         settle::credit_trade_inner(&mut ctx.accounts.board, &mut ctx.accounts.user, cost, fee)
     }
@@ -434,6 +435,7 @@ pub mod vault {
     /// Consume `trade_pending` then debit available / credit Board (ER `sync_vault` path).
     /// Market PDA signs. Prevents withdraw-during-ER-fill double-spend.
     pub fn credit_er_trade(ctx: Context<CreditTrade>, cost: u64, fee: u64) -> Result<()> {
+        require_market_pda(&ctx.accounts.market.to_account_info())?;
         require!(ctx.accounts.board.market == ctx.accounts.market.key(), VaultError::WrongBoard);
         settle::credit_er_trade_inner(&mut ctx.accounts.board, &mut ctx.accounts.user, cost, fee)
     }
@@ -441,6 +443,7 @@ pub mod vault {
     /// Credit unused margin from an in-board sell. Market PDA signs (CPI).
     /// `basis_cut` = min(position.cost_paid, proceeds) so VOID ρ tracks remaining basis.
     pub fn refund_trade(ctx: Context<CreditTrade>, cost: u64, basis_cut: u64) -> Result<()> {
+        require_market_pda(&ctx.accounts.market.to_account_info())?;
         require!(ctx.accounts.board.market == ctx.accounts.market.key(), VaultError::WrongBoard);
         settle::refund_trade_inner(
             &mut ctx.accounts.board,
@@ -454,23 +457,18 @@ pub mod vault {
     /// Fee must already sit in `trade_pending` (session open reserve) — never drains free margin.
     pub fn pay_sync_fee(ctx: Context<PaySyncFee>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroAmount);
+        let market = require_market_pda(&ctx.accounts.market.to_account_info())?;
         require_keys_eq!(ctx.accounts.user.owner, ctx.accounts.owner.key(), VaultError::NotOwner);
         require_keys_eq!(
             ctx.accounts.platform_user.owner,
             ctx.accounts.platform.key(),
             VaultError::NotOwner
         );
-        {
-            let data = ctx.accounts.market.try_borrow_data()?;
-            let mut cur: &[u8] = &data;
-            let market = views::Market::try_deserialize(&mut cur)
-                .map_err(|_| error!(VaultError::WrongBoard))?;
-            require_keys_eq!(
-                ctx.accounts.platform.key(),
-                market.platform,
-                VaultError::WrongBoard
-            );
-        }
+        require_keys_eq!(
+            ctx.accounts.platform.key(),
+            market.platform,
+            VaultError::WrongBoard
+        );
         let user = &mut ctx.accounts.user;
         require!(
             user.trade_pending >= amount,
@@ -707,6 +705,20 @@ pub mod vault {
         )?;
         Ok(())
     }
+}
+
+/// Signer is not enough: another program can CPI-sign an account it owns.
+/// The account must be the market program's `["market", id_hash]` PDA.
+fn require_market_pda(market: &AccountInfo) -> Result<views::Market> {
+    require!(market.owner == &views::MARKET_ID, VaultError::WrongBoard);
+    let data = market.try_borrow_data()?;
+    let mut cur: &[u8] = &data;
+    let decoded = views::Market::try_deserialize(&mut cur).map_err(|_| error!(VaultError::WrongBoard))?;
+    let (expected, bump) =
+        Pubkey::find_program_address(&[b"market", decoded.id_hash.as_ref()], &views::MARKET_ID);
+    require_keys_eq!(market.key(), expected, VaultError::WrongBoard);
+    require!(decoded.bump == bump, VaultError::WrongBoard);
+    Ok(decoded)
 }
 
 pub mod accounting {
@@ -1106,7 +1118,7 @@ pub struct FundCm<'info> {
 
 #[derive(Accounts)]
 pub struct CreditTrade<'info> {
-    /// Market PDA. Only the market program can sign this (CPI seeds).
+    /// Market PDA `["market", id_hash]`, owned by the market program.
     pub market: Signer<'info>,
     /// CHECK: main wallet that owns the user vault. Not a signer.
     pub owner: UncheckedAccount<'info>,
@@ -1128,7 +1140,7 @@ pub struct CreditTrade<'info> {
 
 #[derive(Accounts)]
 pub struct PaySyncFee<'info> {
-    /// Market PDA. Only the market program can sign this (CPI seeds).
+    /// Market PDA `["market", id_hash]`, owned by the market program.
     pub market: Signer<'info>,
     /// CHECK: trader vault owner.
     pub owner: UncheckedAccount<'info>,
