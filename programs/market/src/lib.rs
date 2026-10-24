@@ -2126,7 +2126,21 @@ fn write_p0_range(data: &mut [u8], market: &Market, start: usize, end: usize) ->
     Ok(())
 }
 
+fn require_seal_idle(market: &Market) -> Result<()> {
+    require!(
+        market.wide_flags & WIDE_ACTIVE == 0 && market.wide_write == 0,
+        MarketError::WideFillBusy
+    );
+    Ok(())
+}
+
+fn mark_seal_complete(market: &mut Market, n: u16) {
+    market.seal_bits = seal_bit_mask(n);
+    market.p0_sum = 0;
+}
+
 fn append_interval_mass(ctx: Context<GrowGrid>) -> Result<()> {
+    require_seal_idle(&ctx.accounts.market)?;
     let local = Grid::shard_len(ctx.accounts.market.n, 0) as usize;
     let info = ctx.accounts.grid.to_account_info();
     require!(info.data_len() >= Grid::space(local), MarketError::GridNotReady);
@@ -2197,6 +2211,7 @@ fn read_seal_shard(data: &[u8], market: Pubkey, n: u16, ix: usize) -> Result<(bo
 }
 
 fn seal_interval_p0(ctx: Context<GrowGrid>) -> Result<()> {
+    require_seal_idle(&ctx.accounts.market)?;
     let n_u = ctx.accounts.market.n;
     let n = n_u as usize;
     let extra = extra_shard_count(n_u);
@@ -2217,6 +2232,8 @@ fn seal_interval_p0(ctx: Context<GrowGrid>) -> Result<()> {
         all.extend(p0);
     }
     if sealed {
+        // Mark seal complete so later `accum_seal` cannot reuse `p0_sum` during a wide fill.
+        mark_seal_complete(&mut ctx.accounts.market, n_u);
         return Ok(());
     }
     require!(all.len() == n, MarketError::BadGrid);
@@ -2238,6 +2255,7 @@ fn seal_interval_p0(ctx: Context<GrowGrid>) -> Result<()> {
         seal_one_shard(&mut data, &all[off..off + local], z_sum, false)?;
         off += local;
     }
+    mark_seal_complete(&mut ctx.accounts.market, n_u);
     Ok(())
 }
 
@@ -2285,6 +2303,7 @@ fn apply_one_p0(data: &mut [u8], market_key: Pubkey, n: u16, ix: usize, sum: i12
 }
 
 fn accum_seal_p0(ctx: Context<GrowGrid>) -> Result<()> {
+    require_seal_idle(&ctx.accounts.market)?;
     let n = ctx.accounts.market.n;
     let market_key = ctx.accounts.market.key();
     {
@@ -2300,6 +2319,7 @@ fn accum_seal_p0(ctx: Context<GrowGrid>) -> Result<()> {
 }
 
 fn apply_seal_p0(ctx: Context<GrowGrid>) -> Result<()> {
+    require_seal_idle(&ctx.accounts.market)?;
     let n = ctx.accounts.market.n;
     require!(
         ctx.accounts.market.seal_bits == seal_bit_mask(n),

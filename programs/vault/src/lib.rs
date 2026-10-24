@@ -676,6 +676,8 @@ pub mod vault {
     }
 
     pub fn cover_lp_loss(ctx: Context<CoverLp>) -> Result<()> {
+        // Reject forged MARKET_ID accounts (e.g. gdump) that only look like a Market.
+        require_market_pda(&ctx.accounts.market.to_account_info())?;
         settle::cover_lp_loss_inner(&mut ctx.accounts.loss_pool, &mut ctx.accounts.user)?;
         Ok(())
     }

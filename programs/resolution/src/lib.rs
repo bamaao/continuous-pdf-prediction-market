@@ -210,23 +210,29 @@ pub mod resolution {
             let effect = apply(&snap, ev).map_err(|_| error!(ResError::BadPhase))?;
             match effect {
                 Effect::FinalizeProposal => {
-                    require!(
-                        !halted_early(rec.early_resolve, halted),
-                        ResError::MustVoid
-                    );
-                    rec.phase = Phase::Finalized as u8;
-                    rec.final_outcome = rec.proposed;
-                    rec.refunds_due = false;
+                    // early_resolve + Halted: never settle YES; VOID so funds are not stuck
+                    // after a propose-then-halt (committee VOID only works from Open).
+                    if halted_early(rec.early_resolve, halted) {
+                        rec.phase = Phase::Voided as u8;
+                        rec.refunds_due = true;
+                        rec.slash_due = false;
+                    } else {
+                        rec.phase = Phase::Finalized as u8;
+                        rec.final_outcome = rec.proposed;
+                        rec.refunds_due = false;
+                    }
                     true
                 }
                 Effect::FinalizeChallenge => {
-                    require!(
-                        !halted_early(rec.early_resolve, halted),
-                        ResError::MustVoid
-                    );
-                    rec.phase = Phase::Finalized as u8;
-                    rec.final_outcome = rec.challenged;
-                    rec.refunds_due = false;
+                    if halted_early(rec.early_resolve, halted) {
+                        rec.phase = Phase::Voided as u8;
+                        rec.refunds_due = true;
+                        rec.slash_due = false;
+                    } else {
+                        rec.phase = Phase::Finalized as u8;
+                        rec.final_outcome = rec.challenged;
+                        rec.refunds_due = false;
+                    }
                     true
                 }
                 Effect::ExtendOnce => {
