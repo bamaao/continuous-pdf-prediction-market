@@ -253,6 +253,8 @@ pub mod resolution {
                 Effect::Fail => {
                     rec.phase = Phase::Failed as u8;
                     rec.refunds_due = true;
+                    // Grace expired with no result. Slash the occupied committee bond.
+                    rec.slash_due = true;
                     true
                 }
                 Effect::AwaitAdmin => {
@@ -427,6 +429,7 @@ fn snapshot(rec: &Resolution, now: i64) -> Case {
         challenge_end: rec.challenge_end,
         vote_end: rec.vote_end,
         extensions: rec.extensions,
+        report_window_secs: rec.report_window_secs,
         m: rec.m,
         n: rec.n,
         votes_proposal: rec.votes_proposal,

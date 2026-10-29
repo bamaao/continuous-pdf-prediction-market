@@ -56,6 +56,83 @@ pub const MAGIC_CONTEXT_ID: Pubkey = pubkey!("MagicContext1111111111111111111111
 /// Replace with the official deployer / multisig before mainnet (disable `genesis-open`).
 pub const GENESIS_AUTHORITY: Pubkey = pubkey!("Gen1111111111111111111111111111111111111111");
 
+/// ER validator is the local MagicBlock identity. Callers cannot substitute another key.
+fn pinned_er_validator(remaining: &[AccountInfo]) -> Result<Option<Pubkey>> {
+    match remaining.first() {
+        None => Ok(None),
+        Some(acct) => {
+            require_keys_eq!(*acct.key, LOCAL_ER_VALIDATOR, MarketError::BadValidator);
+            Ok(Some(LOCAL_ER_VALIDATOR))
+        }
+    }
+}
+
+fn require_seat_delegator(trader: &Pubkey, owner: &Pubkey, protocol: &Protocol) -> Result<()> {
+    require!(
+        trader == owner || *trader == protocol.platform,
+        MarketError::NotResolver
+    );
+    Ok(())
+}
+
+fn require_book_operator(
+    authority: &Pubkey,
+    protocol: &Protocol,
+    committee: &Committee,
+    market_ai: &AccountInfo,
+) -> Result<()> {
+    if *authority == protocol.platform || committee.is_member(authority) {
+        return Ok(());
+    }
+    if *market_ai.owner == crate::ID && !market_ai.data_is_empty() {
+        let data = market_ai.try_borrow_data()?;
+        let mut cur: &[u8] = &data;
+        if let Ok(market) = Market::try_deserialize(&mut cur) {
+            require_keys_eq!(*authority, market.creator, MarketError::NotResolver);
+            return Ok(());
+        }
+    }
+    err!(MarketError::NotResolver)
+}
+
+fn require_dump_writer(
+    signer: &Pubkey,
+    market_ai: &AccountInfo,
+    protocol: &Protocol,
+    committee: &Committee,
+) -> Result<()> {
+    require_book_operator(signer, protocol, committee, market_ai)?;
+    if *market_ai.owner == crate::ID && !market_ai.data_is_empty() {
+        let data = market_ai.try_borrow_data()?;
+        let mut cur: &[u8] = &data;
+        if let Ok(market) = Market::try_deserialize(&mut cur) {
+            let (expected, _) =
+                Pubkey::find_program_address(&[MARKET_SEED, market.id_hash.as_ref()], &crate::ID);
+            require_keys_eq!(market_ai.key(), expected, MarketError::IdMismatch);
+        }
+    } else {
+        require_keys_eq!(
+            *market_ai.owner,
+            DELEGATION_PROGRAM_ID,
+            MarketError::IdMismatch
+        );
+    }
+    Ok(())
+}
+
+fn require_whole_share(q_raw: i128) -> Result<()> {
+    require!(q_raw >= Q64::ONE.raw(), MarketError::ZeroQty);
+    Ok(())
+}
+
+fn require_interval_bounds(family: Family, x_min: i128, x_max: i128, sigma: i128) -> Result<()> {
+    require!(x_max > x_min && sigma > 0, MarketError::BadGrid);
+    if family == Family::Lognormal {
+        require!(x_min > 0, MarketError::BadGrid);
+    }
+    Ok(())
+}
+
 fn require_genesis_authority(authority: &Pubkey) -> Result<()> {
     #[cfg(feature = "genesis-open")]
     {
@@ -603,6 +680,11 @@ pub mod market {
 
     /// Delegates the trader's position + nonce so ER `buy_set` can write them.
     pub fn delegate_seat(ctx: Context<DelegateSeat>, set_hash: [u8; 32]) -> Result<()> {
+        require_seat_delegator(
+            &ctx.accounts.trader.key(),
+            &ctx.accounts.owner.key(),
+            &ctx.accounts.protocol,
+        )?;
         {
             let owner = ctx.accounts.market.owner;
             if owner == &crate::ID {
@@ -614,7 +696,7 @@ pub mod market {
                 require_keys_eq!(*owner, DELEGATION_PROGRAM_ID, MarketError::NotDelegated);
             }
         }
-        let validator = ctx.remaining_accounts.first().map(|a| *a.key);
+        let validator = pinned_er_validator(ctx.remaining_accounts)?;
         if ctx.accounts.delegation_program.executable {
             ctx.accounts.delegate_position(
                 &ctx.accounts.trader,
@@ -906,7 +988,7 @@ pub mod market {
             market.try_serialize(&mut out)?;
             id_hash
         };
-        let validator = ctx.remaining_accounts.first().map(|a| *a.key);
+        let validator = pinned_er_validator(ctx.remaining_accounts)?;
         if ctx.accounts.delegation_program.executable {
             let grid_len = ctx.accounts.grid.data_len();
             let commit_frequency_ms = if grid_len > Grid::CREATE_CAP {
@@ -1014,6 +1096,12 @@ pub mod market {
 
     /// Grow a market-owned grid dump in 10 240-byte steps (committor cannot return a 16KB grid).
     pub fn prepare_grid_dump(ctx: Context<PrepareGridDump>) -> Result<()> {
+        require_dump_writer(
+            &ctx.accounts.payer.key(),
+            &ctx.accounts.market,
+            &ctx.accounts.protocol,
+            &ctx.accounts.committee,
+        )?;
         let n = {
             let data = ctx.accounts.market.try_borrow_data()?;
             let mut cur: &[u8] = &data;
@@ -1072,6 +1160,12 @@ pub mod market {
 
     /// Copy one chunk of ER grid bytes onto the L1 dump (vault reads this when grid is still DLP).
     pub fn write_grid_dump(ctx: Context<WriteGridDump>, offset: u32, data: Vec<u8>) -> Result<()> {
+        require_dump_writer(
+            &ctx.accounts.payer.key(),
+            &ctx.accounts.market,
+            &ctx.accounts.protocol,
+            &ctx.accounts.committee,
+        )?;
         require!(!data.is_empty() && data.len() <= 900, MarketError::BadGrid);
         let dump = &ctx.accounts.dump;
         let start = offset as usize;
@@ -1139,7 +1233,18 @@ pub mod market {
 
     pub fn delegate_grid_shard(ctx: Context<DelegateShard>, ix: u8) -> Result<()> {
         require!(ix >= 1, MarketError::BadGrid);
-        let validator = ctx.remaining_accounts.first().map(|a| *a.key);
+        require_book_operator(
+            &ctx.accounts.authority.key(),
+            &ctx.accounts.protocol,
+            &ctx.accounts.committee,
+            &ctx.accounts.market,
+        )?;
+        let (expected, _) = Pubkey::find_program_address(
+            &[GRID_SEED, ctx.accounts.market.key().as_ref(), &[ix]],
+            &crate::ID,
+        );
+        require_keys_eq!(ctx.accounts.shard.key(), expected, MarketError::WrongGrid);
+        let validator = pinned_er_validator(ctx.remaining_accounts)?;
         if ctx.accounts.delegation_program.executable {
             let ix_seed = [ix];
             ctx.accounts.delegate_shard(
@@ -1154,7 +1259,22 @@ pub mod market {
         Ok(())
     }
 
-    pub fn undelegate_shard(ctx: Context<CommitShard>) -> Result<()> {
+    pub fn undelegate_shard(ctx: Context<CommitShard>, ix: u8) -> Result<()> {
+        let market_key = ctx.accounts.market.key();
+        require!(
+            *ctx.accounts.market.owner == crate::ID
+                || *ctx.accounts.market.owner == DELEGATION_PROGRAM_ID,
+            MarketError::IdMismatch
+        );
+        let (expected, _) = if ix == 0 {
+            Pubkey::find_program_address(&[GRID_SEED, market_key.as_ref()], &crate::ID)
+        } else {
+            Pubkey::find_program_address(
+                &[GRID_SEED, market_key.as_ref(), &[ix]],
+                &crate::ID,
+            )
+        };
+        require_keys_eq!(ctx.accounts.shard.key(), expected, MarketError::WrongGrid);
         invoke_magic_commit(
             &ctx.accounts.authority,
             &ctx.accounts.magic_context,
@@ -1505,7 +1625,7 @@ pub mod market {
 
     /// Delegates the owner's Session PDA so ER session fills can write `remaining_usdc`.
     pub fn delegate_session(ctx: Context<DelegateSession>) -> Result<()> {
-        let validator = ctx.remaining_accounts.first().map(|a| *a.key);
+        let validator = pinned_er_validator(ctx.remaining_accounts)?;
         if ctx.accounts.delegation_program.executable {
             ctx.accounts.delegate_session(
                 &ctx.accounts.owner,
@@ -1555,6 +1675,7 @@ fn open_interval(
         MarketError::IdMismatch
     );
     require!((8..=MAX_N).contains(&n), MarketError::BadGrid);
+    require_interval_bounds(family, args.x_min, args.x_max, args.sigma)?;
     // Over CREATE_CAP the account cannot hold P0; a full 256-point exp here also blows the 1.4M CU cap.
     // write_grid_mass / seal_grid rebuild P0 from extra.{a,b,c,d}.
     let p0 = if Grid::space(n as usize) > Grid::CREATE_CAP {
@@ -2346,7 +2467,7 @@ fn require_buy(is_buy: bool) -> Result<()> {
 
 fn fill(ctx: &mut Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: bool) -> Result<()> {
     require_buy(is_buy)?;
-    require!(q_raw > 0, MarketError::ZeroQty);
+    require_whole_share(q_raw)?;
     require!(
         ctx.accounts.market.status == Status::Trading as u8,
         MarketError::NotTrading
@@ -2531,7 +2652,7 @@ fn wide_qty_ok(beta_raw: i128, q_raw: i128, is_buy: bool) -> Result<Q64> {
 
 fn wide_gate(ctx: &Context<Trade>, set_mask: &[u8], q_raw: i128, nonce: u64, is_buy: bool) -> Result<bool> {
     require_buy(is_buy)?;
-    require!(q_raw > 0, MarketError::ZeroQty);
+    require_whole_share(q_raw)?;
     require!(
         ctx.accounts.market.status == Status::Trading as u8,
         MarketError::NotTrading
@@ -3003,7 +3124,7 @@ fn fill_skellam(
     is_buy: bool,
 ) -> Result<()> {
     require_buy(is_buy)?;
-    require!(q_raw > 0, MarketError::ZeroQty);
+    require_whole_share(q_raw)?;
     require!(
         ctx.accounts.market.family == Family::Skellam as u8,
         MarketError::WrongFamily
@@ -3886,18 +4007,24 @@ pub struct WriteGridShard<'info> {
 pub struct DelegateShard<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
-    /// CHECK: market key for shard seeds.
+    /// CHECK: market key for shard seeds. May be delegation-owned after `delegate_book`.
     pub market: AccountInfo<'info>,
-    /// CHECK: one grid shard.
+    /// CHECK: one grid shard. Address checked against `["grid", market, ix]`.
     #[account(mut, del)]
     pub shard: AccountInfo<'info>,
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+    #[account(seeds = [COMMITTEE_SEED], bump = committee.bump)]
+    pub committee: Account<'info, Committee>,
 }
 
 #[derive(Accounts)]
 pub struct CommitShard<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
-    /// CHECK: shard to commit / undelegate.
+    /// CHECK: market key. Shard PDA is checked in the handler (`ix == 0` omits the index seed).
+    pub market: UncheckedAccount<'info>,
+    /// CHECK: shard to commit / undelegate. Must be this market's grid PDA.
     #[account(mut)]
     pub shard: AccountInfo<'info>,
     /// CHECK: MagicBlock magic program.
@@ -3997,6 +4124,8 @@ pub struct DelegateSeat<'info> {
     pub owner: UncheckedAccount<'info>,
     /// CHECK: market key for PDA seeds. After Delegate, L1 owner is DLP.
     pub market: UncheckedAccount<'info>,
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
     /// CHECK: position PDA delegated for ER fills.
     #[account(
         mut,
@@ -4464,6 +4593,10 @@ pub struct PrepareGridDump<'info> {
     #[account(mut, seeds = [GRID_DUMP_SEED, market.key().as_ref()], bump)]
     pub dump: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+    #[account(seeds = [COMMITTEE_SEED], bump = committee.bump)]
+    pub committee: Account<'info, Committee>,
 }
 
 #[derive(Accounts)]
@@ -4472,8 +4605,12 @@ pub struct WriteGridDump<'info> {
     /// CHECK: dump PDA grown by `prepare_grid_dump`.
     #[account(mut, seeds = [GRID_DUMP_SEED, market.key().as_ref()], bump)]
     pub dump: AccountInfo<'info>,
-    /// CHECK: seeds only.
+    /// CHECK: seeds only. Writer must be platform, a roster member, or the creator.
     pub market: AccountInfo<'info>,
+    #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
+    pub protocol: Account<'info, Protocol>,
+    #[account(seeds = [COMMITTEE_SEED], bump = committee.bump)]
+    pub committee: Account<'info, Committee>,
 }
 
 #[derive(Accounts)]
@@ -4633,6 +4770,8 @@ pub enum MarketError {
     NotOfficial,
     #[msg("MagicBlock magic program is not executable on this cluster")]
     MagicProgramMissing,
+    #[msg("ER validator is not the pinned MagicBlock identity")]
+    BadValidator,
 }
 
 #[cfg(test)]
@@ -4766,5 +4905,42 @@ mod tests {
         assert!(lock_clocks(&common).is_err());
         common.report_open_ts = 9;
         assert!(lock_clocks(&common).is_err());
+    }
+
+    #[test]
+    fn protocol_tap_cap_offset_is_stable() {
+        use super::Protocol;
+        use anchor_lang::prelude::{AnchorSerialize, Pubkey};
+        let p = Protocol {
+            platform: Pubkey::new_from_array([3u8; 32]),
+            fee_bps: 1,
+            fee_timing: 0,
+            report_window_secs: 2,
+            challenge_secs: 3,
+            committee_bond: 4,
+            tap_cap_max: 0x0102_0304_0506_0708,
+            alpha_r_bps: 9,
+            bump: 1,
+        };
+        let mut body = Vec::new();
+        p.serialize(&mut body).unwrap();
+        const BODY_OFF: usize = 32 + 2 + 1 + 8 + 8 + 8;
+        let v = u64::from_le_bytes(body[BODY_OFF..BODY_OFF + 8].try_into().unwrap());
+        assert_eq!(v, p.tap_cap_max);
+        // vault::protocol_tap_cap reads this field at discriminator + BODY_OFF.
+        assert_eq!(8 + BODY_OFF, 67);
+    }
+
+    #[test]
+    fn interval_bounds_reject_inverted_or_nonpositive_log() {
+        use super::{require_interval_bounds, require_whole_share, Family};
+        use math::Q64;
+        assert!(require_interval_bounds(Family::Gaussian, 0, 10, 1).is_ok());
+        assert!(require_interval_bounds(Family::Gaussian, 10, 10, 1).is_err());
+        assert!(require_interval_bounds(Family::Gaussian, 0, 10, 0).is_err());
+        assert!(require_interval_bounds(Family::Lognormal, 0, 10, 1).is_err());
+        assert!(require_interval_bounds(Family::Lognormal, 1, 10, 1).is_ok());
+        assert!(require_whole_share(Q64::ONE.raw()).is_ok());
+        assert!(require_whole_share(Q64::ONE.raw() - 1).is_err());
     }
 }

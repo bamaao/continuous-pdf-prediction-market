@@ -314,19 +314,14 @@ pub fn compute_begin(
     // Draw-path `pay_premium` is disabled — LP premium only via no-draw \(S_R\) waterfall.
     let r = r_net(board.trading_revenue, 0);
     let alloc = draw_c_p(liability, r, 0, c_r, pool, tap, board.market)?;
-    let cmax = usdc(c_max(
-        Q64::from_int(r as i64),
-        Q64::ZERO,
-        Q64::from_int(c_r as i64),
-        Q64::from_int(alloc as i64),
-    ));
-    let rho = recovery_rate(Q64::from_int(cmax as i64), Q64::from_int(liability as i64));
-    let s = usdc(surplus(
-        Q64::from_int(r as i64),
-        Q64::ZERO,
-        Q64::from_int(liability as i64),
-        rho,
-    ));
+    let r_q = q64_usdc(r)?;
+    let c_r_q = q64_usdc(c_r)?;
+    let alloc_q = q64_usdc(alloc)?;
+    let liability_q = q64_usdc(liability)?;
+    let cmax = usdc(c_max(r_q, Q64::ZERO, c_r_q, alloc_q));
+    let cmax_q = q64_usdc(cmax)?;
+    let rho = recovery_rate(cmax_q, liability_q);
+    let s = usdc(surplus(r_q, Q64::ZERO, liability_q, rho));
     // No filled risk capital → remainder after $S_C$ stays with the platform.
     let (sc, sr, sp) = surplus_split(s, market.alpha_r_bps, c_r > 0);
 
@@ -422,16 +417,18 @@ pub fn compute_refund(board: &mut Board, market: &Market, record: &Resolution) -
     let r = board.trading_revenue;
     let basis = board.cost_basis;
     // Pro-rata VOID: ρ = min(1, R / Σcost_paid). Avoids first-come drain after profitable sells.
-    board.rho_raw = recovery_rate(
-        Q64::from_int(r as i64),
-        Q64::from_int(basis as i64),
-    )
-    .raw();
+    board.rho_raw = recovery_rate(q64_usdc(r)?, q64_usdc(basis)?).raw();
     board.liability = basis;
     board.c_max = r;
     board.phase = BOARD_REFUND;
     board.surplus = 0;
     Ok(())
+}
+
+/// USDC integer as Q64. Rejects amounts that do not fit `i64` instead of wrapping negative.
+fn q64_usdc(amount: u64) -> Result<Q64> {
+    let n = i64::try_from(amount).map_err(|_| error!(VaultError::Overflow))?;
+    Ok(Q64::from_int(n))
 }
 
 fn rho_dust(rho_raw: i128, q: u64, _pay: u64) -> u64 {

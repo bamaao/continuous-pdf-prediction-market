@@ -213,7 +213,6 @@ pub mod vault {
         // Account alloc may be Market::SIZE (600) with zero padding — do not read the last bytes.
         const COMMITTEE_BOND_OFF: usize = 540;
         require!(market_data.len() >= COMMITTEE_BOND_OFF + 8, VaultError::BadSettle);
-        let creator = Pubkey::try_from(&market_data[16..48]).map_err(|_| error!(VaultError::BadSettle))?;
         let min_bond = u64::from_le_bytes(
             market_data[COMMITTEE_BOND_OFF..COMMITTEE_BOND_OFF + 8]
                 .try_into()
@@ -221,7 +220,8 @@ pub mod vault {
         );
         drop(market_data);
         let reported = rec.authorized_reporter != Pubkey::default() && who == rec.authorized_reporter;
-        require!(member || who == creator || reported, VaultError::NotOwner);
+        // Creator cannot occupy the only bond unless they can also propose.
+        require!(member || reported, VaultError::NotOwner);
         let reset = rec.extensions > 0 && rec.proposer == Pubkey::default();
         // After ExtendOnce only the current holder may unlock-and-relock — no third-party sniping.
         if ctx.accounts.bond.amount > 0 {
@@ -260,7 +260,11 @@ pub mod vault {
             VaultError::NotOwner
         );
         require!(ctx.accounts.resolution.slash_due, VaultError::NotFinalized);
-        require!(ctx.accounts.resolution.phase == PHASE_FINALIZED, VaultError::NotFinalized);
+        require!(
+            ctx.accounts.resolution.phase == PHASE_FINALIZED
+                || ctx.accounts.resolution.phase == PHASE_FAILED,
+            VaultError::NotFinalized
+        );
         let bond = &mut ctx.accounts.bond;
         require!(!bond.slashed && bond.amount > 0, VaultError::ZeroAmount);
         require_keys_eq!(ctx.accounts.holder.owner, bond.holder, VaultError::NotOwner);
@@ -518,6 +522,8 @@ pub mod vault {
     pub fn set_tap(ctx: Context<SetTap>, cap: u64) -> Result<()> {
         let m = &ctx.accounts.market;
         require!(ctx.accounts.authority.key() == m.platform, VaultError::NotOwner);
+        let max = protocol_tap_cap(&ctx.accounts.protocol.to_account_info())?;
+        require!(cap <= max, VaultError::TapCap);
         let tap = &mut ctx.accounts.tap;
         tap.market = m.key();
         tap.cap = cap;
@@ -1084,6 +1090,20 @@ pub struct ReleaseChallengeBond<'info> {
     pub user: Account<'info, UserVault>,
 }
 
+/// `Protocol` body: platform(32) + fee_bps(2) + fee_timing(1) + two i64 windows + committee_bond(8).
+/// Account offset includes the 8-byte discriminator. Must match `market::state::Protocol`.
+const PROTOCOL_TAP_CAP_OFF: usize = 8 + 32 + 2 + 1 + 8 + 8 + 8;
+
+fn protocol_tap_cap(protocol: &AccountInfo) -> Result<u64> {
+    let data = protocol.try_borrow_data()?;
+    require!(data.len() >= PROTOCOL_TAP_CAP_OFF + 8, VaultError::BadSettle);
+    Ok(u64::from_le_bytes(
+        data[PROTOCOL_TAP_CAP_OFF..PROTOCOL_TAP_CAP_OFF + 8]
+            .try_into()
+            .unwrap(),
+    ))
+}
+
 fn outcome_eq(a: &views::Outcome, b: &views::Outcome) -> bool {
     a.family == b.family
         && a.kind == b.kind
@@ -1231,6 +1251,14 @@ pub struct SetTap<'info> {
         bump
     )]
     pub tap: Account<'info, BoardTap>,
+    /// Market `["protocol"]`. `cap` cannot exceed `Protocol.tap_cap_max`.
+    #[account(
+        owner = views::MARKET_ID @ VaultError::WrongBoard,
+        seeds = [b"protocol"],
+        bump,
+        seeds::program = views::MARKET_ID
+    )]
+    pub protocol: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1529,6 +1557,8 @@ pub enum VaultError {
     MissingCpAccounts,
     #[msg("market has an in-flight or dirty wide fill — cancel/abort before settle")]
     DirtyWide,
+    #[msg("tap cap exceeds the protocol maximum")]
+    TapCap,
 }
 
 #[cfg(test)]

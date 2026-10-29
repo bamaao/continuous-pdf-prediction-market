@@ -922,8 +922,15 @@ fn intent_already_queued(s: &str) -> bool {
         || s.contains("0xBBF")
 }
 
-fn send_undelegate_shard(er: &str, kp: &Keypair, me: Pubkey, shard: Pubkey) -> Result<()> {
-    match send(er, kp, client::undelegate_shard(me, shard)) {
+fn send_undelegate_shard(
+    er: &str,
+    kp: &Keypair,
+    me: Pubkey,
+    market: Pubkey,
+    ix: u8,
+    shard: Pubkey,
+) -> Result<()> {
+    match send(er, kp, client::undelegate_shard(me, market, ix, shard)) {
         Ok(sig) => {
             println!("undelegate_shard {sig} shard={shard}");
             Ok(())
@@ -943,6 +950,8 @@ fn undelegate_shard_until_home(
     l1: &str,
     kp: &Keypair,
     me: Pubkey,
+    market: Pubkey,
+    ix: u8,
     shard: Pubkey,
     label: &str,
     tries: u32,
@@ -954,14 +963,14 @@ fn undelegate_shard_until_home(
     // 16-cell shards are 1101B and need the committor writeback buffer.
     // Do not create the SDK Delegate buffer ["buffer", source]: that PDA is
     // not the committor buffer and pushed local writeback onto a crash.
-    send_undelegate_shard(er, kp, me, shard)?;
+    send_undelegate_shard(er, kp, me, market, ix, shard)?;
     for t in 0..tries {
         if account_owned_by_market(l1, &shard) {
             println!("home {label}={shard}");
             return Ok(());
         }
         if t > 0 && t % 8 == 0 {
-            if let Err(e) = send_undelegate_shard(er, kp, me, shard) {
+            if let Err(e) = send_undelegate_shard(er, kp, me, market, ix, shard) {
                 let s = e.to_string();
                 if !intent_already_queued(&s) {
                     eprintln!("retry undelegate_shard {label}: {s}");
@@ -976,7 +985,7 @@ fn undelegate_shard_until_home(
 fn undelegate_extra_shards(er: &str, l1: &str, kp: &Keypair, me: Pubkey, market: Pubkey, n: u16) -> Result<()> {
     for ix in 1..client::market::state::Grid::shard_count(n) {
         let shard = client::grid_shard_pda(&market, ix as u8);
-        undelegate_shard_until_home(er, l1, kp, me, shard, &format!("shard{ix}"), 80)?;
+        undelegate_shard_until_home(er, l1, kp, me, market, ix as u8, shard, &format!("shard{ix}"), 80)?;
     }
     Ok(())
 }
@@ -1004,7 +1013,7 @@ fn wait_book_home(l1: &str, er: &str, kp: &Keypair, me: Pubkey, market: Pubkey, 
         }
     }
     if !account_owned_by_market(l1, &grid) {
-        undelegate_shard_until_home(er, l1, kp, me, grid, "shard0", 240)?;
+        undelegate_shard_until_home(er, l1, kp, me, market, 0, grid, "shard0", 240)?;
     } else {
         println!("home shard0={grid}");
     }

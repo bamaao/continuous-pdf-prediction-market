@@ -38,8 +38,16 @@ pub struct Case {
     pub n: u8,
     pub votes_proposal: u8,
     pub votes_challenge: u8,
+    /// Length of the committee report window. After `report_deadline`, the platform has one
+    /// more window; then a missed report fails closed into a refund.
+    pub report_window_secs: i64,
     /// Bernoulli: if the defined event occurs before `close_ts`, VOID (refund), do not settle YES.
     pub early_ok: bool,
+}
+
+fn grace_end(case: &Case) -> i64 {
+    case.report_deadline
+        .saturating_add(case.report_window_secs.max(0))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +158,10 @@ pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
             if case.now < case.report_deadline {
                 return Err("report window still open");
             }
-            Err("awaiting admin")
+            if case.now < grace_end(case) {
+                return Err("awaiting admin");
+            }
+            Ok(Effect::Fail)
         }
         Event::Void => {
             if case.phase != Phase::Open {
@@ -169,6 +180,9 @@ pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
             if case.now < case.report_deadline {
                 return Err("report window still open");
             }
+            if case.now >= grace_end(case) {
+                return Err("admin grace closed");
+            }
             Ok(Effect::FinalizeProposal)
         }
         Event::AdminVoid => {
@@ -177,6 +191,9 @@ pub fn apply(case: &Case, ev: Event) -> Result<Effect, &'static str> {
             }
             if case.now < case.report_deadline {
                 return Err("report window still open");
+            }
+            if case.now >= grace_end(case) {
+                return Err("admin grace closed");
             }
             Ok(Effect::Void)
         }
@@ -201,6 +218,7 @@ mod tests {
             n: 3,
             votes_proposal: 0,
             votes_challenge: 0,
+            report_window_secs: 50,
             early_ok: false,
         }
     }
@@ -278,6 +296,10 @@ mod tests {
         assert_eq!(apply(&c, Event::Void), Err("void only before close"));
         assert_eq!(apply(&c, Event::AdminSubmit), Ok(Effect::FinalizeProposal));
         assert_eq!(apply(&c, Event::AdminVoid), Ok(Effect::Void));
+        c.now = 250;
+        assert_eq!(apply(&c, Event::AdminSubmit), Err("admin grace closed"));
+        assert_eq!(apply(&c, Event::AdminVoid), Err("admin grace closed"));
+        assert_eq!(apply(&c, Event::ReportTimeout), Ok(Effect::Fail));
     }
 
     #[test]

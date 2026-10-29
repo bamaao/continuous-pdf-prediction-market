@@ -249,6 +249,8 @@ pub fn prepare_grid_dump(payer: Pubkey, market: Pubkey) -> Instruction {
             market,
             dump: grid_dump_pda(&market),
             system_program: system_program::ID,
+            protocol: protocol_pda(),
+            committee: committee_pda(),
         }
         .to_account_metas(None),
         data: market::instruction::PrepareGridDump {}.data(),
@@ -262,6 +264,8 @@ pub fn write_grid_dump(payer: Pubkey, market: Pubkey, offset: u32, data: Vec<u8>
             payer,
             dump: grid_dump_pda(&market),
             market,
+            protocol: protocol_pda(),
+            committee: committee_pda(),
         }
         .to_account_metas(None),
         data: market::instruction::WriteGridDump { offset, data }.data(),
@@ -1107,6 +1111,7 @@ pub fn delegate_seat(trader: Pubkey, owner: Pubkey, market: Pubkey, set_hash: [u
         trader,
         owner,
         market,
+        protocol: protocol_pda(),
         position,
         nonce_acc,
         owner_program: market::ID,
@@ -1341,6 +1346,8 @@ pub fn delegate_grid_shard(authority: Pubkey, market: Pubkey, ix: u8) -> Instruc
         authority,
         market,
         shard,
+        protocol: protocol_pda(),
+        committee: committee_pda(),
         owner_program: market::ID,
         delegation_program: market::DELEGATION_PROGRAM_ID,
         system_program: system_program::ID,
@@ -1357,17 +1364,18 @@ pub fn delegate_grid_shard(authority: Pubkey, market: Pubkey, ix: u8) -> Instruc
     }
 }
 
-pub fn undelegate_shard(authority: Pubkey, shard: Pubkey) -> Instruction {
+pub fn undelegate_shard(authority: Pubkey, market: Pubkey, ix: u8, shard: Pubkey) -> Instruction {
     Instruction {
         program_id: market::ID,
         accounts: market::accounts::CommitShard {
             authority,
+            market,
             shard,
             magic_program: market::MAGIC_PROGRAM_ID,
             magic_context: market::MAGIC_CONTEXT_ID,
         }
         .to_account_metas(None),
-        data: market::instruction::UndelegateShard {}.data(),
+        data: market::instruction::UndelegateShard { ix }.data(),
     }
 }
 
@@ -1632,6 +1640,8 @@ pub fn cancel_unfilled(lp: Pubkey, market: Pubkey, layer_id: u8) -> Instruction 
             lp,
             market,
             quote,
+            book: Pubkey::find_program_address(&[risk::BOOK_SEED, market.as_ref()], &risk::ID).0,
+            seat: Pubkey::find_program_address(&[risk::SEAT_SEED, market.as_ref(), lp.as_ref()], &risk::ID).0,
             layer,
             vault_auth,
             user_vault: user_vault(&lp),
@@ -2128,6 +2138,7 @@ pub fn set_tap(authority: Pubkey, market: Pubkey, cap: u64) -> Instruction {
             authority,
             market,
             tap: board_tap(&market),
+            protocol: protocol_pda(),
             system_program: system_program::ID,
         }
         .to_account_metas(None),

@@ -163,15 +163,21 @@ pub mod risk {
         let now = Clock::get()?.unix_timestamp;
         // Same gate as quote/fill — no cancel after risk lock / close (blocks settle-time rank dodge).
         require!(now < market.close_ts && now < market.risk_lock_ts, RiskError::Locked);
-        let quote = &mut ctx.accounts.quote;
-        require_keys_eq!(quote.market, market.key(), RiskError::WrongBook);
+        let qk = ctx.accounts.quote.key();
+        require_keys_eq!(ctx.accounts.quote.market, market.key(), RiskError::WrongBook);
         let mut layer = ctx.accounts.layer.load_mut()?;
-        require!(quote.lp == ctx.accounts.lp.key(), RiskError::NotOwner);
-        require!(!quote.cancelled, RiskError::Cancelled);
-        let leftover = quote.capacity.saturating_sub(quote.filled);
-        require!(leftover > 0, RiskError::AlreadyFilled);
-        quote.cancelled = true;
-        drop_quote(&mut layer, quote.key());
+        require!(ctx.accounts.quote.lp == ctx.accounts.lp.key(), RiskError::NotOwner);
+        require!(!ctx.accounts.quote.cancelled, RiskError::Cancelled);
+        require!(ctx.accounts.quote.capacity > 0, RiskError::BadSize);
+        let idx = quote_index(&layer, qk)?;
+        let released = unwind_quote(
+            &mut ctx.accounts.book,
+            &mut layer,
+            &mut ctx.accounts.quote,
+            &mut ctx.accounts.seat,
+            idx,
+            qk,
+        )?;
         let bump = [ctx.bumps.vault_auth];
         let seeds: &[&[u8]] = &[VAULT_AUTH_SEED, &bump];
         release(
@@ -184,10 +190,46 @@ pub mod risk {
                 },
                 &[seeds],
             ),
-            leftover,
+            released,
         )?;
         Ok(())
     }
+}
+
+/// Drop a quote before `risk_lock_ts` and reverse the capacity that `quote` added to `c_r`.
+fn unwind_quote(
+    book: &mut RiskBook,
+    layer: &mut Layer,
+    quote: &mut Quote,
+    seat: &mut LpSeat,
+    idx: usize,
+    quote_key: Pubkey,
+) -> Result<u64> {
+    let filled = quote.filled;
+    let owed = quote.premium_owed;
+    let capacity = quote.capacity;
+    book.c_r = book.c_r.checked_sub(filled).ok_or(error!(RiskError::Overflow))?;
+    book.premium_payable = book
+        .premium_payable
+        .checked_sub(owed)
+        .ok_or(error!(RiskError::Overflow))?;
+    layer.filled = layer.filled.checked_sub(filled).ok_or(error!(RiskError::Overflow))?;
+    layer.quote_filled[idx] = 0;
+    layer.quote_live[idx] = 0;
+    seat.filled_d = seat
+        .filled_d
+        .checked_sub(filled)
+        .ok_or(error!(RiskError::Overflow))?;
+    if book.head_quote == quote_key {
+        book.head_quote = Pubkey::default();
+        book.head_unit = 0;
+        book.head_premium = 0;
+        book.head_ts = 0;
+    }
+    quote.filled = 0;
+    quote.premium_owed = 0;
+    quote.cancelled = true;
+    Ok(capacity)
 }
 
 fn quote_index(layer: &Layer, key: Pubkey) -> Result<usize> {
@@ -197,14 +239,6 @@ fn quote_index(layer: &Layer, key: Pubkey) -> Result<usize> {
         }
     }
     err!(RiskError::EmptyLayer)
-}
-
-fn drop_quote(layer: &mut Layer, key: Pubkey) {
-    for i in 0..layer.quote_count as usize {
-        if layer.quote_keys[i] == key {
-            layer.quote_live[i] = 0;
-        }
-    }
 }
 
 fn try_fill(
@@ -458,6 +492,14 @@ pub struct CancelUnfilled<'info> {
         constraint = quote.market == market.key() @ RiskError::WrongBook
     )]
     pub quote: Box<Account<'info, Quote>>,
+    #[account(mut, seeds = [BOOK_SEED, market.key().as_ref()], bump = book.bump)]
+    pub book: Box<Account<'info, RiskBook>>,
+    #[account(
+        mut,
+        seeds = [SEAT_SEED, market.key().as_ref(), lp.key().as_ref()],
+        bump = seat.bump
+    )]
+    pub seat: Box<Account<'info, LpSeat>>,
     #[account(
         mut,
         seeds = [LAYER_SEED, quote.market.as_ref(), &[quote.layer_id]],
@@ -506,6 +548,8 @@ pub enum RiskError {
     Cancelled,
     #[msg("quote is fully filled")]
     AlreadyFilled,
+    #[msg("arithmetic overflow")]
+    Overflow,
 }
 
 #[cfg(test)]
@@ -527,6 +571,62 @@ mod tests {
         let layer = super::Layer::from_account_data(&raw).expect("zero_copy layout");
         assert_eq!(layer.layer_id, 7);
         assert_eq!(layer.quote_count, 0);
+    }
+
+    #[test]
+    fn cancel_unwinds_a_fully_filled_quote() {
+        use super::{unwind_quote, Layer, LpSeat, Quote, RiskBook};
+        use anchor_lang::prelude::Pubkey;
+        use bytemuck::Zeroable;
+        let qk = Pubkey::new_from_array([9u8; 32]);
+        let mut layer = Layer::zeroed();
+        layer.quote_count = 1;
+        layer.quote_keys[0] = qk;
+        layer.quote_live[0] = 1;
+        layer.quote_filled[0] = 80;
+        layer.filled = 80;
+        let mut book = RiskBook {
+            market: Pubkey::default(),
+            c_m: 0,
+            d_unit: 1,
+            c_r: 80,
+            premium_payable: 8,
+            n_layers: 1,
+            gamma_bps: 0,
+            bump: 1,
+            head_quote: qk,
+            head_premium: 8,
+            head_unit: 1,
+            head_ts: 1,
+        };
+        let mut quote = Quote {
+            market: Pubkey::default(),
+            lp: Pubkey::default(),
+            capacity: 80,
+            filled: 80,
+            premium: 8,
+            premium_owed: 8,
+            ts: 1,
+            profit_share_bps: 0,
+            layer_id: 1,
+            cancelled: false,
+            bump: 1,
+        };
+        let mut seat = LpSeat {
+            market: Pubkey::default(),
+            owner: Pubkey::default(),
+            filled_d: 80,
+            bump: 1,
+        };
+        let released = unwind_quote(&mut book, &mut layer, &mut quote, &mut seat, 0, qk).unwrap();
+        assert_eq!(released, 80);
+        assert_eq!(book.c_r, 0);
+        assert_eq!(book.premium_payable, 0);
+        assert_eq!(book.head_quote, Pubkey::default());
+        assert!(quote.cancelled);
+        assert_eq!(quote.filled, 0);
+        assert_eq!(layer.quote_live[0], 0);
+        assert_eq!(seat.filled_d, 0);
     }
 
     #[test]
