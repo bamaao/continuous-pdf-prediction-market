@@ -79,6 +79,7 @@ pub fn project(
         extra_u2: 0,
         delegated: false,
         platform: String::new(),
+        creator: String::new(),
     })
 }
 
@@ -387,6 +388,7 @@ pub async fn poll_once(rpc: &RpcClient, store: &MemoryStore, pool: Option<&sqlx:
         row.extra_u2 = mkt.extra.u2;
         row.delegated = mkt.delegated;
         row.platform = mkt.platform.to_string();
+        row.creator = mkt.creator.to_string();
         if let Some(&(phase, rho, cell, liability)) = boards.get(&key.to_string()) {
             row.board_phase = phase;
             row.rho_raw = rho;

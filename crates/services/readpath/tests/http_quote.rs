@@ -65,6 +65,7 @@ fn seeded() -> (Arc<MemoryStore>, String) {
             extra_u2: 0,
             delegated: false,
             platform: String::new(),
+            creator: String::new(),
         });
     store.replace_positions(vec![readpath::PositionRow {
         position: "Pos111111111111111111111111111111111111111".into(),
@@ -1546,6 +1547,7 @@ async fn compose_buy_after_close_ts_is_forbidden() {
             extra_u2: 0,
             delegated: false,
             platform: String::new(),
+            creator: String::new(),
         });
     let owner = solana_sdk::pubkey::Pubkey::new_unique();
     let app = router(store);

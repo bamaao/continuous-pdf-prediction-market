@@ -57,6 +57,7 @@ export function AuctionDesk({ market }: { market: string }) {
   const [description, setDescription] = useState("");
   const [event, setEvent] = useState("");
   const [closeTs, setCloseTs] = useState<number | null>(null);
+  const [riskLockTs, setRiskLockTs] = useState<number | null>(null);
   const [cMax, setCMax] = useState<number | null>(null);
   const [payable, setPayable] = useState<number | null>(null);
   const [abnormal, setAbnormal] = useState("");
@@ -83,6 +84,8 @@ export function AuctionDesk({ market }: { market: string }) {
     if (book.description || desk?.description) setDescription(book.description || desk?.description || "");
     if (book.event || desk?.event) setEvent(book.event || desk?.event || "");
     if (book.close_ts || desk?.close_ts) setCloseTs(book.close_ts || desk?.close_ts || null);
+    const lock = desk?.risk_lock_ts || book.risk_lock_ts || book.close_ts || desk?.close_ts || null;
+    setRiskLockTs(lock);
     setCMax(desk?.c_max_usdc ?? null);
     setPayable(desk?.payable_usdc ?? null);
     setAbnormal(desk?.abnormal ?? "");
@@ -125,11 +128,13 @@ export function AuctionDesk({ market }: { market: string }) {
   const rank = rankLine(mineUnit, best, standing.length);
   const dustWarn = capacity > 0 && capacity < MIN_D;
 
-  const auctionClosed = closeTs != null && closeTs > 0 && nowSec >= closeTs;
+  const tradingClosed = closeTs != null && closeTs > 0 && nowSec >= closeTs;
+  const capitalLocked = riskLockTs != null && riskLockTs > 0 && nowSec >= riskLockTs;
+  const auctionClosed = tradingClosed || capitalLocked;
 
   async function bid() {
     if (auctionClosed) {
-      setNote("trading closed — no new risk quotes after the deadline");
+      setNote(capitalLocked && !tradingClosed ? "risk capital is locked — no new quotes" : "trading closed — no new risk quotes after the deadline");
       return;
     }
     if (!publicKey || !signTransaction) {
@@ -178,6 +183,37 @@ export function AuctionDesk({ market }: { market: string }) {
     }
   }
 
+  async function cancelQuote(layer: number) {
+    if (auctionClosed) {
+      setNote("risk capital is locked — this quote stays until settlement or VOID");
+      return;
+    }
+    if (!publicKey || !signTransaction) {
+      setNote(NEED_WALLET);
+      return;
+    }
+    setBusy(true);
+    setNote("signing…");
+    try {
+      const sig = await sendSigned(connection, signTransaction, publicKey, [
+        await compose(MARKET_API, {
+          op: "cancel_unfilled",
+          owner: publicKey.toBase58(),
+          market,
+          layer,
+        }),
+      ]);
+      setNote(`cancelled ${sig}`);
+      await load();
+      const r = await fetchOwnerRisk(MARKET_API, publicKey.toBase58());
+      setMine((r.items ?? []).filter((q) => q.market === market));
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "cancel failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div>
       <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-amber">Risk auction</p>
@@ -220,7 +256,8 @@ export function AuctionDesk({ market }: { market: string }) {
         winners still need a draw, every filled quote can be taken until the gap is closed — more locked D is
         better. If no draw is needed, α_R of surplus is paid down the rank (lowest unit premium first) until the
         pot is gone.
-        The auction stops at <span className="text-paper">close_ts</span> with the prediction market. {SESSION_BOARD_ONLY}
+        The auction stops at <span className="text-paper">risk_lock_ts</span> (default: the same moment as close). After that, new quotes stop.
+        Already locked D stays until settlement or VOID. {SESSION_BOARD_ONLY}
       </p>
       <div className="mt-4 flex flex-wrap gap-4 font-mono text-[11px] uppercase">
         <Link href={`/m/${market}`} className="text-amber">
@@ -293,8 +330,10 @@ export function AuctionDesk({ market }: { market: string }) {
           <p className="uppercase tracking-widest text-amber">{auctionClosed ? "Auction closed" : "Quote ticket"}</p>
           <p className="mt-2 text-[10px] leading-relaxed text-paper/50">
             {auctionClosed
-              ? "Trading closed at close_ts. New risk quotes stop with the prediction market."
-              : "Lock is a vault reserve, not a transfer out. After settlement, claim H then premium / surplus on /lp. VOID unlocks unused D."}
+              ? capitalLocked && !tradingClosed
+                ? "Risk capital locked at risk_lock_ts. New quotes stop. Buys may continue until close_ts."
+                : "Trading closed at close_ts. New risk quotes stop with the prediction market."
+              : "Lock is a vault reserve, not a transfer out. Cancel a quote before risk_lock_ts to unlock D. After settlement, claim H then premium / surplus on /lp. VOID unlocks unused D."}
           </p>
           <label className="mt-4 block text-[10px] uppercase text-paper/50">
             Capacity D
@@ -344,7 +383,7 @@ export function AuctionDesk({ market }: { market: string }) {
             disabled={busy || auctionClosed}
             onClick={bid}
           >
-            {busy ? "Posting…" : auctionClosed ? "Trading closed" : "Quote pool"}
+            {busy ? "Posting…" : auctionClosed ? (capitalLocked && !tradingClosed ? "Capital locked" : "Trading closed") : "Quote pool"}
           </button>
           {note && <p className={`mt-2 text-[10px] ${/failed|Error|error/i.test(note) ? "text-rust" : "text-paper/60"}`}>{note}</p>}
         </aside>
@@ -355,9 +394,21 @@ export function AuctionDesk({ market }: { market: string }) {
           <p className="font-mono text-[11px] uppercase tracking-widest text-amber">Your quotes on this market</p>
           <ul className="mt-3 divide-y divide-rule border border-rule font-mono text-[11px]">
             {mine.map((q) => (
-              <li key={q.quote} className="px-3 py-2">
-                D {q.d_i} · filled {q.filled}/{q.capacity} · premium owed {q.premium_owed}
-                {q.expected_h != null ? ` · expected H ${q.expected_h}` : ""}
+              <li key={q.quote} className="flex items-center justify-between gap-3 px-3 py-2">
+                <span>
+                  D {q.d_i} · filled {q.filled}/{q.capacity} · premium owed {q.premium_owed}
+                  {q.expected_h != null ? ` · expected H ${q.expected_h}` : ""}
+                  {q.cancelled ? " · cancelled" : ""}
+                </span>
+                {!q.cancelled && !auctionClosed && (
+                  <button
+                    className="border border-rule px-2 py-1 text-paper/70 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => cancelQuote(q.layer)}
+                  >
+                    Cancel quote
+                  </button>
+                )}
               </li>
             ))}
           </ul>

@@ -46,7 +46,8 @@ export function CashDesk() {
   const wallet = ledger?.wallet_usdc ?? 0;
   const available = ledger?.available ?? 0;
   const reserved = ledger?.reserved ?? 0;
-  const free = ledger?.free ?? 0;
+  const tradePending = ledger?.trade_pending ?? 0;
+  const free = ledger?.free ?? Math.max(0, available - reserved - tradePending);
   const max = mode === "deposit" ? wallet : free;
   const overWallet = mode === "deposit" && !!publicKey && amount > wallet;
   const overFree = mode === "withdraw" && !!publicKey && amount > free;
@@ -71,7 +72,7 @@ export function CashDesk() {
       return;
     }
     if (next === "withdraw" && publicKey && amount > free) {
-      setNote("cannot withdraw reserved margin — only free (available − reserved) can leave");
+      setNote("cannot withdraw locked margin — only free (available − reserved − session budget) can leave");
       return;
     }
     setPhase("signing");
@@ -138,6 +139,7 @@ export function CashDesk() {
         <Row k="Wallet ATA" v={publicKey ? `${wallet} USDC` : "—"} />
         <Row k="Vault available" v={publicKey ? `${available} USDC` : "—"} />
         <Row k="Vault reserved" v={publicKey ? `${reserved} USDC` : "—"} />
+        <Row k="Session budget" v={publicKey ? `${tradePending} USDC` : "—"} />
         <Row k="Free to withdraw" v={publicKey ? `${free} USDC` : "—"} />
         <Row k="Session cap" v={sessionCap == null ? "no session" : `${sessionCap} USDC · not a balance`} />
         <Row k="Mint" v="Circle SPL USDC" />

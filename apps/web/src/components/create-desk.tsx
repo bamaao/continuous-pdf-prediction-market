@@ -609,6 +609,10 @@ export function CreateDesk() {
       setNote(NEED_WALLET_AND_MARKET);
       return;
     }
+    if (!platformPk || publicKey.toBase58() !== platformPk) {
+      setNote(platformPk ? `Connect Market.platform (${platformPk}) to set the tap` : "Market.platform is not indexed yet");
+      return;
+    }
     setBusy(true);
     try {
       const sig = await sendSigned(connection, signTransaction, publicKey, [
@@ -1231,8 +1235,8 @@ export function CreateDesk() {
         <div className="space-y-3 border border-rule p-4 font-mono text-xs">
           <p className="uppercase tracking-widest text-amber">Platform φ and S_P</p>
           <p className="text-[10px] text-paper/45">
-            Two ledgers, both land in Market.platform’s UserVault. φ (`claim_fees`) requires the platform signer —
-            claim anytime, including VOID; it never enters T, C_P, or surplus. S_P (`pay_surplus_platform`) is this
+            Two ledgers, both land in Market.platform’s UserVault. φ (`claim_fees`) requires the platform signer
+            and a settled or refunded market. It never enters T, C_P, or surplus. S_P (`pay_surplus_platform`) is this
             market’s leftover after winners are whole (ρ=1) and after 20% cover; any wallet MAY credit it into the
             platform vault; only the platform owner can withdraw. Haircut / draw / VOID → S_P = 0. Do not sweep
             either into C_P. Fund C_P is a separate fund_pool action below.
@@ -1283,7 +1287,11 @@ export function CreateDesk() {
             value={tapCap}
             onChange={(e) => setTapCap(Math.max(0, Math.min(tapCapMax, Number(e.target.value) || 0)))}
           />
-          <button className="w-full border border-rule py-2 disabled:opacity-50" disabled={busy} onClick={setBoardTap}>
+          <button
+            className="w-full border border-rule py-2 disabled:opacity-50"
+            disabled={busy || !publicKey || !market || !platformPk || publicKey.toBase58() !== platformPk}
+            onClick={setBoardTap}
+          >
             Set market tap cap
           </button>
         </div>

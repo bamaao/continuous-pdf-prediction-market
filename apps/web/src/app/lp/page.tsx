@@ -18,6 +18,14 @@ import { sendSigned } from "@/lib/tx";
 
 type LpOp = "draw_lp" | "pay_premium" | "release_lp" | "pay_surplus_lp" | "pay_surplus_cover" | "cover_lp_loss";
 
+function canCancelQuote(row: RiskQuoteItem): boolean {
+  const now = Math.floor(Date.now() / 1000);
+  const close = row.close_ts ?? 0;
+  const lock = row.risk_lock_ts && row.risk_lock_ts > 0 ? row.risk_lock_ts : close;
+  if (close <= 0 || lock <= 0) return false;
+  return now < close && now < lock;
+}
+
 export default function LpPage() {
   const { connection } = useConnection();
   const { publicKey, signTransaction } = useWallet();
@@ -82,6 +90,31 @@ export default function LpPage() {
       await load();
     } catch (e) {
       setNote(e instanceof Error ? e.message : "claim failed");
+    }
+  }
+
+  async function cancelQuote(row: RiskQuoteItem) {
+    if (!publicKey || !signTransaction) {
+      setNote(NEED_WALLET);
+      return;
+    }
+    if (!canCancelQuote(row)) {
+      setNote("risk capital is locked — this quote stays until settlement or VOID");
+      return;
+    }
+    try {
+      const sig = await sendSigned(connection, signTransaction, publicKey, [
+        await compose(MARKET_API, {
+          op: "cancel_unfilled",
+          owner: publicKey.toBase58(),
+          market: row.market,
+          layer: row.layer,
+        }),
+      ]);
+      setNote(`cancelled ${sig}`);
+      await load();
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "cancel failed");
     }
   }
 
@@ -183,6 +216,11 @@ export default function LpPage() {
                 {refund && (
                   <button className="border border-rule px-2 py-1" onClick={() => act("release_lp", row)}>
                     Unlock D
+                  </button>
+                )}
+                {!row.cancelled && !settled && !refund && canCancelQuote(row) && (
+                  <button className="border border-rule px-2 py-1" onClick={() => cancelQuote(row)}>
+                    Cancel quote
                   </button>
                 )}
               </div>

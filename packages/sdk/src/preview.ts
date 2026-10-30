@@ -179,6 +179,7 @@ export type MarketInfo = {
   peak_risk?: PeakRisk;
   cells: { cell: number; p_bps: number; e: number }[];
   platform?: string;
+  creator?: string;
 };
 
 export async function listMarketsPage(api: string, query: MarketListQuery = {}): Promise<MarketListPage> {
@@ -422,6 +423,7 @@ export async function fetchLayers(api: string, market: string): Promise<{
   description?: string;
   event?: string;
   close_ts?: number;
+  risk_lock_ts?: number;
   family?: number;
   status?: number;
   c_r: number;
@@ -449,6 +451,8 @@ export type RiskQuoteItem = {
   premium_owed: number;
   profit_share_bps: number;
   cancelled: boolean;
+  close_ts?: number;
+  risk_lock_ts?: number;
   expected_h: number;
   attachment: number;
   weight_sum: number;

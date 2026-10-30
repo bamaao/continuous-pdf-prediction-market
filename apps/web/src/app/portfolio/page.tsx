@@ -106,8 +106,8 @@ export default function Portfolio() {
       <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-amber">Wallet</p>
       <h1 className="font-display text-5xl">Portfolio</h1>
       <p className="mt-2 max-w-2xl text-sm leading-relaxed text-paper/70">
-        Deposit, withdraw, and claims use the connected wallet. A trading Session can only buy and sell
-        in a prediction market — it cannot move unused margin. Your tickets across every market live
+        Deposit, withdraw, and claims use the connected wallet. A trading Session can only buy
+        in a prediction market — it cannot sell, and it cannot move unused margin. Your tickets across every market live
         here. After settlement, payout is ρ · face if the set contains x*. {SESSION_BOARD_ONLY}
       </p>
 

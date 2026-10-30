@@ -6,6 +6,7 @@ export type UserVaultSnap = {
   exists: boolean;
   available: number;
   reserved: number;
+  trade_pending?: number;
   free: number;
   risk_pnl?: number;
   cover_paid?: number;
@@ -13,19 +14,22 @@ export type UserVaultSnap = {
   mint: "Circle SPL USDC";
 };
 
-/** Borsh: disc + owner + available + reserved + bump + risk_pnl + bond + cover_paid */
+/** Borsh: disc + owner + available + reserved + bump + risk_pnl + bond + cover_paid + trade_pending */
 export function decodeUserVault(
   data: Uint8Array,
-): { available: number; reserved: number; risk_pnl: number; cover_paid: number } | null {
+): { available: number; reserved: number; trade_pending: number; risk_pnl: number; cover_paid: number } | null {
   if (data.length < 8 + 32 + 8 + 8) return null;
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const pnlOff = 8 + 32 + 8 + 8 + 1;
   const risk_pnl = data.length >= pnlOff + 8 ? Number(view.getBigInt64(pnlOff, true)) : 0;
   const coverOff = pnlOff + 8 + 8;
   const cover_paid = data.length >= coverOff + 8 ? Number(view.getBigUint64(coverOff, true)) : 0;
+  const pendingOff = coverOff + 8;
+  const trade_pending = data.length >= pendingOff + 8 ? Number(view.getBigUint64(pendingOff, true)) : 0;
   return {
     available: Number(view.getBigUint64(8 + 32, true)),
     reserved: Number(view.getBigUint64(8 + 40, true)),
+    trade_pending,
     risk_pnl,
     cover_paid,
   };
@@ -38,6 +42,7 @@ export async function fetchUserVault(connection: Connection, owner: PublicKey): 
     exists: false,
     available: 0,
     reserved: 0,
+    trade_pending: 0,
     free: 0,
     risk_pnl: 0,
     cover_paid: 0,
@@ -52,12 +57,13 @@ export async function fetchUserVault(connection: Connection, owner: PublicKey): 
   if (!vaultAcc) return { ...empty, wallet_usdc };
   const dec = decodeUserVault(vaultAcc.data);
   if (!dec) return { ...empty, wallet_usdc };
-  const free = Math.max(0, dec.available - dec.reserved);
+  const free = Math.max(0, dec.available - dec.reserved - dec.trade_pending);
   return {
     owner: owner.toBase58(),
     exists: true,
     available: dec.available,
     reserved: dec.reserved,
+    trade_pending: dec.trade_pending,
     free,
     risk_pnl: dec.risk_pnl,
     cover_paid: dec.cover_paid,

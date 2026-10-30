@@ -1334,6 +1334,7 @@ pub struct InfoJson {
     pub peak_risk: PeakRisk,
     pub cells: Vec<PdfCell>,
     pub platform: String,
+    pub creator: String,
 }
 
 async fn info_one(
@@ -1419,6 +1420,7 @@ async fn info_one(
         peak_risk: peak_risk(&row),
         cells,
         platform: row.platform.clone(),
+        creator: row.creator.clone(),
     }))
 }
 
@@ -1612,6 +1614,7 @@ async fn layers_one(State(st): State<AppState>, Path(market): Path<String>) -> R
         "description": listing.description,
         "event": listing.event,
         "close_ts": row.close_ts,
+        "risk_lock_ts": row.risk_lock_ts,
         "family": row.family,
         "status": row.status,
         "c_r": row.c_r,
@@ -2561,6 +2564,8 @@ async fn owner_risk(State(st): State<AppState>, Path(owner): Path<String>) -> im
                 "premium_owed": q.premium_owed,
                 "profit_share_bps": q.profit_share_bps,
                 "cancelled": q.cancelled,
+                "close_ts": mkt.as_ref().map(|m| m.close_ts).unwrap_or(0),
+                "risk_lock_ts": mkt.as_ref().map(|m| m.risk_lock_ts).unwrap_or(0),
                 "expected_h": expected_h,
                 "attachment": attachment,
                 "weight_sum": weight_sum,

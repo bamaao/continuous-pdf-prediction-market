@@ -3,6 +3,7 @@
 import {
   formatTags,
   cellsFromPush,
+  compose,
   composeIxs,
   coverageLow,
   coveragePct,
@@ -477,7 +478,8 @@ export function Board({ market }: { market: string }) {
     }
   }
   const closeTs = info?.close_ts ?? 0;
-  const tradingClosed = settled || (closeTs > 0 && nowSec >= closeTs);
+  const halted = info?.status === 2;
+  const tradingClosed = settled || halted || (closeTs > 0 && nowSec >= closeTs);
 
   function typedLine() {
     if (!isSkellam || line === "custom") return null;
@@ -855,8 +857,10 @@ export function Board({ market }: { market: string }) {
               : needsRho
                 ? LOCK_RHO_HINT
                 : tradingClosed
-                ? "Trading closed at the deadline. No buys or sells on any prediction market after close_ts."
-                : "Session may sign buy. Sells are closed. Same nonce retries the same fill. Coverage is display only."}
+                ? halted && !settled && !(closeTs > 0 && nowSec >= closeTs)
+                  ? "Trading is halted. Buys stay off until this market is trading again. Sells stay closed."
+                  : "Trading closed at the deadline. No buys after close_ts. Sells stay closed."
+                : "Session may sign buy. Sells are closed. Same nonce retries the same fill. Coverage is display only. ρ̂ is not the payout."}
           </p>
           <label className="mt-4 block text-[10px] uppercase tracking-widest text-paper/50">Shares q</label>
           <input
@@ -902,23 +906,25 @@ export function Board({ market }: { market: string }) {
           <div className="mt-5 border border-amber/40 bg-amber/5 p-3">
             <p className="font-mono text-[11px] uppercase tracking-widest text-amber">Pre-bet ticket</p>
             <p className="mt-1 text-[10px] text-paper/45">
-              Pay = C_S + φ·C_S. Hit pays ⌊ρ̂·q⌋ integer USDC. Miss pays 0. ρ̂ / Book EV are display only.
+              You pay C_S now{info?.fee_timing === 1 ? "" : ", plus φ·C_S"}. If S hits, face is q USDC. Miss pays 0.
+              Settlement writes ρ later. ρ̂ above is coverage only.
             </p>
             <div className="mt-3">
               <Row k="You pay now" v={quote ? `${quote.pay_usdc ?? quote.c_s_usdc} USDC` : "—"} />
-              <Row k="Fee" v={quote ? `${quote.fee_usdc ?? 0} USDC` : "—"} />
-              <Row k="If S hits" v={quote ? `${quote.payout_if_hit_usdc ?? "—"} USDC` : "—"} />
-              <Row k="If S misses" v={quote ? `${quote.payout_if_miss_usdc ?? 0} USDC` : "—"} />
-              <Row k="Net if hit" v={quote ? signedUsdc(quote.net_if_hit ?? 0) : "—"} warn={!!quote && (quote.net_if_hit ?? 0) < 0} />
-              <Row k="Book EV" v={quote ? signedUsdc(quote.ev_if_p_s ?? 0) : "—"} />
+              <Row k="Fee" v={quote ? `${shownFee(quote, info?.fee_timing, shares)} USDC` : "—"} />
+              <Row k="If S hits" v={quote ? `${quote.face_usdc ?? shares} USDC` : "—"} />
+              <Row k="If S misses" v="0 USDC" />
             </div>
-            <p className="mt-2 text-[10px] text-paper/40">Book EV uses p_S as if you believe the book. Not a promise.</p>
+            <p className="mt-2 text-[10px] text-paper/40">
+              Claim is ⌊ρ·face⌋ after ρ is locked. A short market uses the same ρ for every winner.
+              {info?.fee_timing === 1 ? " φ is taken from that claim. Miss / VOID: 0." : " φ at fill does not enter the payout."}
+            </p>
           </div>
           {quote && coverageLow(quote.l_max_usdc, quote.coverage_bps) && (
             <p className="mt-3 text-amber">Low coverage. The order is still allowed.</p>
           )}
           <button className="mt-4 w-full bg-amber py-2 text-ink disabled:opacity-50" disabled={busy || tradingClosed} onClick={() => trade(true)}>
-            {busy ? "Pending…" : tradingClosed ? "Trading closed" : typedLine() ? "Buy line" : "Buy set"}
+            {busy ? "Pending…" : settled || (closeTs > 0 && nowSec >= closeTs) ? "Trading closed" : halted ? "Halted" : typedLine() ? "Buy line" : "Buy set"}
           </button>
           <button className="mt-2 w-full border border-rule py-2 disabled:opacity-50" disabled onClick={() => trade(false)}>
             Sells closed
@@ -1034,9 +1040,16 @@ function Stat({ k, v, hint, warn }: { k: string; v: string; hint: string; warn?:
   );
 }
 
-function signedUsdc(n: number): string {
-  if (n > 0) return `+${n} USDC`;
-  return `${n} USDC`;
+function shownFee(
+  quote: { fee_usdc?: number; fee_bps?: number; face_usdc?: number },
+  feeTiming: number | undefined,
+  shares: number,
+): number {
+  if (feeTiming === 1) {
+    const face = quote.face_usdc ?? shares;
+    return Math.floor((face * (quote.fee_bps ?? 0)) / 10_000);
+  }
+  return quote.fee_usdc ?? 0;
 }
 
 function Row({ k, v, warn }: { k: string; v: string; warn?: boolean }) {

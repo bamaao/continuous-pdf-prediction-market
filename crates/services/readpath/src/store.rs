@@ -67,6 +67,9 @@ pub struct MarketProj {
     /// On-chain `Market.platform` — signs `claim_fees` / `cover_lp_loss`; receives \(S_P\).
     #[serde(default)]
     pub platform: String,
+    /// Wallet that signed `create_*`. May open the resolution record.
+    #[serde(default)]
+    pub creator: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1091,6 +1094,7 @@ async fn migrate_projections(pool: &sqlx::PgPool) -> Result<()> {
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS extra_u2 SMALLINT NOT NULL DEFAULT 0",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS delegated BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE market_proj ADD COLUMN IF NOT EXISTS creator TEXT NOT NULL DEFAULT ''",
     ] {
         sqlx::query(sql).execute(pool).await?;
     }
@@ -1222,7 +1226,7 @@ async fn load_projections(pool: &sqlx::PgPool, mem: &MemoryStore) -> Result<()> 
                 trading_revenue, premium_payable, c_m, c_r, fee_bps, fee_timing, traders, tickets,
                 stake_usdc, board_phase, rho_raw, settle_cell, liability, c_p_board,
                 c_p_alloc, close_ts, risk_lock_ts, report_window_secs, extra_a, extra_b, extra_u2,
-                delegated, platform
+                delegated, platform, creator
          FROM market_proj",
     )
     .fetch_all(pool)
@@ -1267,6 +1271,7 @@ async fn load_projections(pool: &sqlx::PgPool, mem: &MemoryStore) -> Result<()> 
             extra_u2: r.try_get::<i16, _>("extra_u2").unwrap_or(0).clamp(0, 255) as u8,
             delegated: r.try_get::<bool, _>("delegated").unwrap_or(false),
             platform: r.try_get::<String, _>("platform").unwrap_or_default(),
+            creator: r.try_get::<String, _>("creator").unwrap_or_default(),
         });
     }
     let positions = sqlx::query(
@@ -1407,10 +1412,10 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
             market, slot, family, status, n, beta, p0, theta, exposure,
             trading_revenue, premium_payable, c_m, c_r, fee_bps, fee_timing, traders, tickets,
             stake_usdc, board_phase, rho_raw, settle_cell, liability, c_p_board,
-            c_p_alloc, close_ts, risk_lock_ts, report_window_secs, report_open_ts, extra_a, extra_b, extra_u2, delegated, platform
+            c_p_alloc, close_ts, risk_lock_ts, report_window_secs, report_open_ts, extra_a, extra_b, extra_u2, delegated, platform, creator
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
+            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
         )
         ON CONFLICT (market) DO UPDATE SET
             slot = EXCLUDED.slot,
@@ -1445,6 +1450,7 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
             extra_u2 = EXCLUDED.extra_u2,
             delegated = EXCLUDED.delegated,
             platform = EXCLUDED.platform,
+            creator = EXCLUDED.creator,
             updated_at = now()
         "#,
     )
@@ -1481,6 +1487,7 @@ async fn upsert_market_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, row: &
     .bind(i16::from(row.extra_u2))
     .bind(row.delegated)
     .bind(&row.platform)
+    .bind(&row.creator)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -1709,6 +1716,7 @@ mod tests {
             extra_u2: 0,
             delegated: false,
             platform: String::new(),
+            creator: String::new(),
         }
     }
 

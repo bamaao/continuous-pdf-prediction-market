@@ -170,6 +170,7 @@ mod tests {
             extra_u2: 0,
             delegated: false,
             platform: String::new(),
+            creator: String::new(),
         };
         let peak = peak_risk(&row);
         assert_eq!(peak.cell, 2);
@@ -222,6 +223,7 @@ mod tests {
             extra_u2: 0,
             delegated: false,
             platform: String::new(),
+            creator: String::new(),
         };
         let peak = peak_risk(&row);
         assert_eq!(peak.run_lo, 1);

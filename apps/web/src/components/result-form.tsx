@@ -1,6 +1,6 @@
 "use client";
 
-import { compose, familyName, fetchInfo, fetchProtocol, fetchResolution, ResolutionSnap } from "@cpm/sdk";
+import { compose, familyName, fetchCommittee, fetchInfo, fetchProtocol, fetchResolution, ResolutionSnap } from "@cpm/sdk";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MARKET_API } from "@/lib/env";
@@ -69,6 +69,9 @@ export function ResultForm({ market, family }: { market: string; family: number 
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now() / 1000);
   const [platform, setPlatform] = useState("");
+  const [creator, setCreator] = useState("");
+  const [marketStatus, setMarketStatus] = useState(0);
+  const [roster, setRoster] = useState<string[]>([]);
   const [committeeBond, setCommitteeBond] = useState(100);
   const kind = defaultKind(family);
 
@@ -78,8 +81,19 @@ export function ResultForm({ market, family }: { market: string; family: number 
 
   useEffect(() => {
     fetchInfo(MARKET_API, market)
-      .then((info) => setPlatform(info.platform ?? ""))
-      .catch(() => setPlatform(""));
+      .then((info) => {
+        setPlatform(info.platform ?? "");
+        setCreator(info.creator ?? "");
+        setMarketStatus(info.status ?? 0);
+      })
+      .catch(() => {
+        setPlatform("");
+        setCreator("");
+        setMarketStatus(0);
+      });
+    fetchCommittee(MARKET_API)
+      .then((c) => setRoster(c?.members ?? []))
+      .catch(() => setRoster([]));
     fetchProtocol(MARKET_API)
       .then((p) => setCommitteeBond(p.committee_bond))
       .catch(() => undefined);
@@ -140,8 +154,10 @@ export function ResultForm({ market, family }: { market: string; family: number 
 
   const me = publicKey?.toBase58() ?? "";
   const member = !!me && (rec?.members ?? []).includes(me);
+  const liveMember = !!me && roster.includes(me);
   const reporter = !!me && !!rec && rec.authorized_reporter !== ZERO && rec.authorized_reporter === me;
   const canPropose = member || reporter;
+  const canOpen = !!me && (liveMember || (!!creator && me === creator));
   const role = !me ? "connect a wallet" : member ? "committee member (this window)" : reporter ? "authorized reporter · propose only" : "observer";
   const reportOpen = rec?.report_open_ts || rec?.close_ts || 0;
   const reportReady = !!rec && now >= reportOpen;
@@ -150,8 +166,10 @@ export function ResultForm({ market, family }: { market: string; family: number 
     if (!rec) return { label: "window", text: "not opened", elapsed: true };
     if (rec.phase === 0) {
       const open = rec.report_open_ts || rec.close_ts;
+      const graceEnd = rec.report_deadline + Math.max(0, rec.report_window_secs || 0);
       if (now < open) return { label: "report opens", ...remain(open, now) };
-      if (now >= rec.report_deadline) return { label: "awaiting platform", text: "report missed", elapsed: true };
+      if (now >= graceEnd) return { label: "report grace", text: "anyone may fail", elapsed: true };
+      if (now >= rec.report_deadline) return { label: "platform grace", ...remain(graceEnd, now) };
       return { label: "report window", ...remain(rec.report_deadline, now) };
     }
     if (rec.phase === 1) return { label: "challenge window", ...remain(rec.challenge_end, now) };
@@ -164,8 +182,18 @@ export function ResultForm({ market, family }: { market: string; family: number 
   const canVote = !!rec && rec.phase === 2 && member;
   const isAdmin = !!me && !!platform && me === platform;
   const reportElapsed = !!rec && now >= rec.report_deadline;
+  const graceEnd = rec ? rec.report_deadline + Math.max(0, rec.report_window_secs || 0) : 0;
+  const inAdminGrace = !!rec && rec.phase === 0 && now >= rec.report_deadline && now < graceEnd;
+  const graceClosed = !!rec && rec.phase === 0 && now >= graceEnd;
   const bondLocked = !!rec && (rec.bond_locked ?? 0) > 0 && !rec.bond_slashed;
-  const canLockBond = !!rec && !terminal && (canPropose || member) && !bondLocked;
+  const canLockBond =
+    !!rec &&
+    rec.phase === 0 &&
+    !terminal &&
+    canPropose &&
+    !bondLocked &&
+    now >= reportOpen &&
+    now < rec.report_deadline;
   const canReleaseBond =
     !!rec && terminal && bondLocked && !rec.slash_due && !!me && me === rec.bond_holder;
   const canFinalize =
@@ -177,6 +205,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
     rec.phase === 0 &&
     !terminal &&
     member &&
+    marketStatus === 2 &&
     now < rec.close_ts;
 
   async function run(
@@ -203,20 +232,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
         ...extra,
       });
       const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
-      if (op === "resolve_open") {
-        try {
-          await sendSigned(connection, signTransaction, publicKey, [
-            await compose(MARKET_API, {
-              op: "lock_committee_bond",
-              owner: publicKey.toBase58(),
-              market,
-              amount: 100,
-            }),
-          ]);
-        } catch {
-          /* already locked or vault short */
-        }
-      }
+      const missedReport = op === "finalize" && rec?.phase === 0 && now >= (rec.report_deadline + Math.max(0, rec.report_window_secs || 0));
       if (op === "admin_submit_result") {
         const holder = rec?.bond_holder || rec?.members?.[0];
         if (holder) {
@@ -234,7 +250,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
           }
         }
       }
-      if (op === "finalize" || op === "void_resolution" || op === "admin_void_resolution") {
+      if ((op === "finalize" || op === "void_resolution" || op === "admin_void_resolution") && !missedReport) {
         try {
           await sendSigned(connection, signTransaction, publicKey, [
             await compose(MARKET_API, { op: "release_committee_bond", owner: publicKey.toBase58(), market }),
@@ -243,7 +259,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
           /* slashed or never locked */
         }
       }
-      if (op === "void_resolution" || op === "admin_void_resolution") {
+      if (op === "void_resolution" || op === "admin_void_resolution" || missedReport) {
         try {
           await sendSigned(connection, signTransaction, publicKey, [
             await compose(MARKET_API, { op: "begin_refund", owner: publicKey.toBase58(), market }),
@@ -348,13 +364,17 @@ export function ResultForm({ market, family }: { market: string; family: number 
             {!rec ? "Open report window" : rec.phase === 0 ? "Propose x*" : rec.phase === 1 ? "Challenge window" : "Vote"}
           </p>
           <p className="mt-2 text-[10px] leading-relaxed text-paper/50">
-            {!rec && "A member or the creator opens the record. Nobody can write x* until this exists."}
+            {!rec && "A committee member or the market creator opens the record. Nobody can write x* until this exists."}
             {rec?.phase === 0 &&
               (!me
                 ? "Connect a wallet to propose. Evidence stays in this browser; only the SHA-256 hash is posted."
-                : canPropose
-                  ? "Reporter or member files the family-correct result. Evidence stays in this browser; only the SHA-256 hash is posted."
-                  : "You can watch. Only a reporter or committee member may propose.")}
+                : graceClosed
+                  ? "The platform grace has closed. Any wallet may fail this report. That opens refunds and marks the committee bond for slashing."
+                  : inAdminGrace
+                    ? "Report window closed. Only Market.platform may write x* (slash the bond) or VOID (return the bond) until the grace ends."
+                    : canPropose
+                      ? "Reporter or member files the family-correct result inside the report window. Lock the committee bond in that same window. Evidence stays in this browser; only the SHA-256 hash is posted."
+                      : "You can watch. Only a reporter or committee member may propose.")}
             {rec?.phase === 1 &&
               (canChallenge
                 ? "File a different x*. Same family rules. If nobody challenges before the window ends, anyone may finalize the proposal."
@@ -369,7 +389,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
                 : "Members vote. Observers wait for M or the window.")}
           </p>
 
-          {((rec?.phase === 0 && (canPropose || !me)) || (rec?.phase === 1 && canChallenge)) && (
+          {((rec?.phase === 0 && (canPropose || !me) && !reportElapsed) || (inAdminGrace && isAdmin) || (rec?.phase === 1 && canChallenge)) && (
             <OutcomeFields
               family={family}
               value={value}
@@ -381,7 +401,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
             />
           )}
 
-          {rec?.phase === 0 && (canPropose || !me) && (
+          {((rec?.phase === 0 && (canPropose || !me) && !reportElapsed) || (inAdminGrace && isAdmin)) && (
             <label className="mt-3 block text-[10px] uppercase text-paper/50">
               Evidence (off-chain note or URL)
               <textarea
@@ -398,8 +418,8 @@ export function ResultForm({ market, family }: { market: string; family: number 
 
           <div className="mt-4 flex flex-col gap-2">
             {!rec && (
-              <button className="w-full bg-amber py-2 text-ink disabled:opacity-50" disabled={busy} onClick={() => run("resolve_open")}>
-                {busy ? "Opening…" : "Open window"}
+              <button className="w-full bg-amber py-2 text-ink disabled:opacity-50" disabled={busy || !canOpen} onClick={() => run("resolve_open")}>
+                {busy ? "Opening…" : canOpen ? "Open window" : me ? "Committee or creator only" : "Connect a wallet"}
               </button>
             )}
             {canLockBond && (
@@ -407,23 +427,18 @@ export function ResultForm({ market, family }: { market: string; family: number 
                 {busy ? "Locking…" : `Lock committee bond (${committeeBond} USDC)`}
               </button>
             )}
-            {canReleaseBond && (
-              <button className="w-full border border-rule py-2 text-paper/70 disabled:opacity-50" disabled={busy} onClick={() => run("release_committee_bond")}>
-                {busy ? "Releasing…" : "Release committee bond"}
-              </button>
-            )}
             {member && rec && !terminal && now < rec.close_ts && (
               <button className="w-full border border-rule py-2 text-paper/70 disabled:opacity-50" disabled={busy} onClick={() => run("halt")}>
                 {busy ? "Halting…" : "Halt trading"}
               </button>
             )}
-            {rec?.phase === 0 && (canPropose || !me) && (
+            {rec?.phase === 0 && (canPropose || !me) && !reportElapsed && (
               <button
                 className="w-full bg-amber py-2 text-ink disabled:opacity-50"
                 disabled={busy || !reportReady || !bondLocked}
                 onClick={() => run("submit_result")}
               >
-                {busy ? "Submitting…" : !bondLocked ? "Lock committee bond first" : reportReady ? "Submit result" : "Waiting for report open"}
+                {busy ? "Submitting…" : !reportReady ? "Waiting for report open" : !bondLocked ? "Lock committee bond first" : "Submit result"}
               </button>
             )}
             {canChallenge && (
@@ -450,12 +465,15 @@ export function ResultForm({ market, family }: { market: string; family: number 
             )}
             {canVoid && (
               <button className="w-full border border-rule py-2 text-paper/60 disabled:opacity-50" disabled={busy} onClick={() => run("void_resolution")}>
-                Void market (halt first)
+                Void market
               </button>
             )}
-            {isAdmin && rec?.phase === 0 && reportElapsed && (
+            {member && rec && !terminal && now < rec.close_ts && marketStatus !== 2 && (
+              <p className="text-[10px] normal-case text-paper/45">Halt trading before a committee void. Void is refused while fills can still land.</p>
+            )}
+            {isAdmin && inAdminGrace && (
               <>
-                <p className="text-[10px] normal-case text-amber">Report window closed. Platform: write x* (slash committee bond) or VOID (return bond).</p>
+                <p className="text-[10px] normal-case text-amber">Platform grace is open. Write x* (slash committee bond) or VOID (return bond). After this grace, anyone may fail the report.</p>
                 <button className="w-full bg-amber py-2 text-ink disabled:opacity-50" disabled={busy} onClick={() => run("admin_submit_result")}>
                   {busy ? "Submitting…" : "Admin submit result (slash bond)"}
                 </button>
@@ -463,6 +481,11 @@ export function ResultForm({ market, family }: { market: string; family: number 
                   Admin VOID (no slash)
                 </button>
               </>
+            )}
+            {graceClosed && (
+              <button className="w-full border border-amber py-2 text-amber disabled:opacity-50" disabled={busy} onClick={() => run("finalize")}>
+                {busy ? "Signing…" : "Fail missed report"}
+              </button>
             )}
           </div>
           {note && <p className={`mt-2 text-[10px] ${isErrNote(note) ? "text-rust" : "text-paper/60"}`}>{note}</p>}
@@ -494,6 +517,20 @@ export function ResultForm({ market, family }: { market: string; family: number 
               onClick={() => run("begin_refund")}
             >
               {busy ? "Signing…" : OPEN_REFUNDS}
+            </button>
+          )}
+          {isAdmin && !!rec?.slash_due && bondLocked && !!rec.bond_holder && (
+            <button
+              className="w-full border border-rule py-2 text-paper/70 disabled:opacity-50"
+              disabled={busy}
+              onClick={() => run("slash_committee_bond", { trader: rec.bond_holder })}
+            >
+              {busy ? "Signing…" : "Slash committee bond"}
+            </button>
+          )}
+          {canReleaseBond && (
+            <button className="w-full border border-rule py-2 text-paper/70 disabled:opacity-50" disabled={busy} onClick={() => run("release_committee_bond")}>
+              {busy ? "Releasing…" : "Release committee bond"}
             </button>
           )}
           <p className="text-[10px] text-paper/45">
