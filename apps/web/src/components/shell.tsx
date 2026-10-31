@@ -90,7 +90,14 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <main className="mx-auto max-w-6xl px-5 py-8">{children}</main>
       <footer className="mx-auto max-w-6xl px-5 pb-10 font-mono text-[11px] leading-relaxed text-paper/45">
         Fills are public on Solana. This product does not promise on-chain anonymity. Circle USDC only.
-        Session revoke is not the same as disconnecting a wallet. Keeper writes stay on the CLI.
+        Session revoke is not the same as disconnecting a wallet. Keeper writes stay on the CLI.{" "}
+        <Link href="/terms" className="text-amber">
+          Terms
+        </Link>
+        {" · "}
+        <Link href="/privacy" className="text-amber">
+          Privacy
+        </Link>
       </footer>
     </div>
   );

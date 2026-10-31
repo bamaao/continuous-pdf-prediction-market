@@ -1,0 +1,10 @@
+{
+  "name": "Continuous",
+  "package": "com.continuous.market.continuous_mobile",
+  "short_description": "Trade PDF prediction markets on Solana.",
+  "long_description": "Continuous is a Solana prediction market for phones. Browse open markets, buy a set of outcomes, deposit and withdraw USDC, quote risk coverage, and follow committee resolution. Your wallet signs every transaction through the Mobile Wallet Adapter. The app does not hold keys.",
+  "terms_path": "/terms",
+  "privacy_path": "/privacy",
+  "icon": "store/icon.png",
+  "banner": "store/banner.png"
+}
