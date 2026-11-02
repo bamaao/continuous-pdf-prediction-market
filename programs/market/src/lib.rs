@@ -1732,6 +1732,7 @@ fn open_board(
     require!(now < common.close_ts, MarketError::BadClock);
     require!(common.risk_lock_ts <= common.close_ts, MarketError::BadClock);
     lock_clocks(common)?;
+    lock_horizon(now, common)?;
     lock_layers(common)?;
     let protocol = &ctx.accounts.protocol;
     lock_protocol(protocol)?;
@@ -3283,6 +3284,22 @@ fn check_common(id_hash: &[u8; 32], n: u16, common: &CreateCommon) -> Result<()>
 fn lock_clocks(common: &CreateCommon) -> Result<()> {
     require!(
         common.report_open_ts >= common.close_ts,
+        MarketError::BadClock
+    );
+    Ok(())
+}
+
+/// Upper bounds on the creator's clocks. `lock_clocks` only orders them; without a ceiling a
+/// creator could park `report_open_ts` years out and freeze every trader's cost basis.
+fn lock_horizon(now: i64, common: &CreateCommon) -> Result<()> {
+    let horizon = common.close_ts.saturating_sub(now);
+    require!(
+        horizon <= crate::state::MAX_CLOSE_HORIZON_SECS,
+        MarketError::BadClock
+    );
+    let delay = common.report_open_ts.saturating_sub(common.close_ts);
+    require!(
+        delay <= crate::state::MAX_REPORT_DELAY_SECS,
         MarketError::BadClock
     );
     Ok(())
@@ -4905,6 +4922,48 @@ mod tests {
         assert!(lock_clocks(&common).is_err());
         common.report_open_ts = 9;
         assert!(lock_clocks(&common).is_err());
+    }
+
+    #[test]
+    fn creator_clocks_have_a_ceiling() {
+        use super::lock_horizon;
+        use super::CreateCommon;
+        use crate::state::{MAX_CLOSE_HORIZON_SECS, MAX_REPORT_DELAY_SECS};
+        use anchor_lang::prelude::Pubkey;
+        let now = 1_000_000;
+        let mut common = CreateCommon {
+            id_hash: [0; 32],
+            n: 2,
+            close_ts: now + 86_400,
+            risk_lock_ts: now + 86_400,
+            beta: 1,
+            c_m: 0,
+            fee_bps: 0,
+            fee_timing: 0,
+            authorized_reporter: Pubkey::default(),
+            report_window_secs: 60,
+            challenge_secs: 30,
+            n_layers: 1,
+            d_unit: 10_000,
+            gamma_bps: 0,
+            alpha_r_bps: 7_000,
+            platform: Pubkey::new_from_array([1u8; 32]),
+            report_open_ts: now + 86_400,
+            committee_bond: 1,
+        };
+        assert!(lock_horizon(now, &common).is_ok());
+        // Report may open at most MAX_REPORT_DELAY_SECS after close.
+        common.report_open_ts = common.close_ts + MAX_REPORT_DELAY_SECS;
+        assert!(lock_horizon(now, &common).is_ok());
+        common.report_open_ts += 1;
+        assert!(lock_horizon(now, &common).is_err());
+        // Close may sit at most MAX_CLOSE_HORIZON_SECS ahead of now.
+        common.close_ts = now + MAX_CLOSE_HORIZON_SECS;
+        common.report_open_ts = common.close_ts;
+        assert!(lock_horizon(now, &common).is_ok());
+        common.close_ts += 1;
+        common.report_open_ts = common.close_ts;
+        assert!(lock_horizon(now, &common).is_err());
     }
 
     #[test]

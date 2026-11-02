@@ -448,12 +448,13 @@ export function Board({ market }: { market: string }) {
     setBusy(true);
     setNote(op === "begin_settle" ? "locking ρ…" : "opening refunds…");
     try {
-      const ix = await compose(MARKET_API, {
+      // begin_settle may come back as [init_pool, open_tap, begin_settle]; send them together.
+      const ixs = await composeIxs(MARKET_API, {
         op,
         owner: publicKey.toBase58(),
         market,
       });
-      const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
+      const sig = await sendSigned(connection, signTransaction, publicKey, ixs);
       setNote(`${op} ${sig}`);
       for (let i = 0; i < 16; i++) {
         const desk = await fetchInfo(MARKET_API, market);

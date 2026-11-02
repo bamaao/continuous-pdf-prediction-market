@@ -140,8 +140,12 @@ pub mod vault {
     }
 
     /// Lock unused margin so it cannot be withdrawn. Used by risk quotes (FR-RSK-03).
-    pub fn reserve(ctx: Context<MutUser>, amount: u64) -> Result<()> {
+    /// Lock margin behind a risk quote. **Risk `vault_auth` PDA must co-sign** (CPI only):
+    /// `release` is CPI-only too, so a direct `reserve` would have no way back to `available`.
+    pub fn reserve(ctx: Context<ReserveMargin>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroAmount);
+        let (expected, _) = Pubkey::find_program_address(&[b"vault_auth"], &views::RISK_ID);
+        require_keys_eq!(ctx.accounts.authority.key(), expected, VaultError::NotOwner);
         require_keys_eq!(ctx.accounts.owner.key(), ctx.accounts.user.owner, VaultError::NotOwner);
         let user = &mut ctx.accounts.user;
         let locked = accounting::locked(user.reserved, user.trade_pending)?;
@@ -269,8 +273,7 @@ pub mod vault {
         require!(!bond.slashed && bond.amount > 0, VaultError::ZeroAmount);
         require_keys_eq!(ctx.accounts.holder.owner, bond.holder, VaultError::NotOwner);
         let amount = bond.amount;
-        ctx.accounts.holder.bond = accounting::debit_bond(ctx.accounts.holder.bond, amount)?;
-        ctx.accounts.platform.available = accounting::credit(ctx.accounts.platform.available, amount)?;
+        move_slashed_bond(&mut ctx.accounts.holder, &mut ctx.accounts.platform, amount)?;
         bond.slashed = true;
         Ok(())
     }
@@ -367,8 +370,7 @@ pub mod vault {
         require_keys_eq!(bond.holder, rec.challenger, VaultError::NotOwner);
         require_keys_eq!(ctx.accounts.holder.owner, bond.holder, VaultError::NotOwner);
         let amount = bond.amount;
-        ctx.accounts.holder.bond = accounting::debit_bond(ctx.accounts.holder.bond, amount)?;
-        ctx.accounts.platform.available = accounting::credit(ctx.accounts.platform.available, amount)?;
+        move_slashed_bond(&mut ctx.accounts.holder, &mut ctx.accounts.platform, amount)?;
         bond.slashed = true;
         Ok(())
     }
@@ -473,11 +475,21 @@ pub mod vault {
             market.platform,
             VaultError::WrongBoard
         );
-        let user = &mut ctx.accounts.user;
         require!(
-            user.trade_pending >= amount,
+            ctx.accounts.user.trade_pending >= amount,
             VaultError::InsufficientTradePending
         );
+        if ctx.accounts.user.key() == ctx.accounts.platform_user.key() {
+            // Platform syncing its own seat: the fee nets to zero. Both handles deserialize the
+            // same PDA and Anchor writes both back, so apply the identical mutation to each —
+            // otherwise the stale copy written last would re-credit `available`.
+            let user = &mut ctx.accounts.user;
+            user.trade_pending = accounting::release(user.trade_pending, amount)?;
+            let dup = &mut ctx.accounts.platform_user;
+            dup.trade_pending = accounting::release(dup.trade_pending, amount)?;
+            return Ok(());
+        }
+        let user = &mut ctx.accounts.user;
         user.trade_pending = accounting::release(user.trade_pending, amount)?;
         let locked = accounting::locked(user.reserved, user.trade_pending)?;
         user.available = accounting::debit_available(user.available, locked, amount)?;
@@ -517,6 +529,21 @@ pub mod vault {
 
     pub fn fund_pool(ctx: Context<FundPool>, amount: u64) -> Result<()> {
         settle::fund_pool_inner(&mut ctx.accounts.pool, &mut ctx.accounts.user, amount)
+    }
+
+    /// Permissionless `BoardTap` with `cap = 0`. `begin_settle` demands pool + tap whenever
+    /// \(L > R\); without this any payer could be stuck waiting for the platform to `set_tap`.
+    /// Never lowers a cap the platform already set.
+    pub fn open_tap(ctx: Context<OpenTap>) -> Result<()> {
+        let tap = &mut ctx.accounts.tap;
+        if tap.market == Pubkey::default() {
+            tap.market = ctx.accounts.market.key();
+            tap.cap = 0;
+            tap.allocated = 0;
+            tap.bump = ctx.bumps.tap;
+        }
+        require_keys_eq!(tap.market, ctx.accounts.market.key(), VaultError::WrongBoard);
+        Ok(())
     }
 
     pub fn set_tap(ctx: Context<SetTap>, cap: u64) -> Result<()> {
@@ -654,17 +681,20 @@ pub mod vault {
     }
 
     /// `weight_sum` is ignored — draw-path weights are computed from the Layer on-chain.
-    pub fn pay_surplus_lp(ctx: Context<QuotePay>, weight_sum: u64) -> Result<()> {
+    /// `loss_pool` is required once the LP has `cover_paid > 0`: profit first repays cover that
+    /// exceeds the LP's remaining realized loss, keeping `cover_paid ≤ (−Π)⁺`.
+    pub fn pay_surplus_lp(ctx: Context<SurplusLpPay>, weight_sum: u64) -> Result<()> {
         let layer_ai = ctx.accounts.layer.to_account_info();
         let data = layer_ai.try_borrow_data()?;
         let layer = views::Layer::from_account(&data)?;
-        settle::pay_surplus_lp_inner(
+        settle::pay_surplus_lp_with_cover(
             &mut ctx.accounts.board,
             ctx.accounts.quote.key(),
             &ctx.accounts.quote,
             Some(layer),
             &mut ctx.accounts.user,
             weight_sum,
+            ctx.accounts.loss_pool.as_deref_mut(),
         )?;
         Ok(())
     }
@@ -713,6 +743,22 @@ pub mod vault {
         )?;
         Ok(())
     }
+}
+
+/// Slashed bond: holder `bond` → platform `available`. When the holder *is* the platform both
+/// handles alias one PDA and Anchor writes both back; mirror the mutation so the last write
+/// does not resurrect the bond or double-credit `available`.
+fn move_slashed_bond(holder: &mut UserVault, platform: &mut UserVault, amount: u64) -> Result<()> {
+    if holder.owner == platform.owner {
+        holder.bond = accounting::debit_bond(holder.bond, amount)?;
+        holder.available = accounting::credit(holder.available, amount)?;
+        platform.bond = accounting::debit_bond(platform.bond, amount)?;
+        platform.available = accounting::credit(platform.available, amount)?;
+        return Ok(());
+    }
+    holder.bond = accounting::debit_bond(holder.bond, amount)?;
+    platform.available = accounting::credit(platform.available, amount)?;
+    Ok(())
 }
 
 /// Signer is not enough: another program can CPI-sign an account it owns.
@@ -874,18 +920,6 @@ pub struct Withdraw<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-#[derive(Accounts)]
-pub struct MutUser<'info> {
-    pub owner: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [USER_SEED, owner.key().as_ref()],
-        bump = user.bump,
-        has_one = owner @ VaultError::NotOwner
-    )]
-    pub user: Account<'info, UserVault>,
-}
-
 /// CPI-only lock: `authority` is the market program's Protocol PDA.
 #[derive(Accounts)]
 pub struct LockTrade<'info> {
@@ -914,6 +948,21 @@ pub struct UnlockTrade<'info> {
         seeds = [USER_SEED, owner.key().as_ref()],
         bump = user.bump,
         constraint = user.owner == owner.key() @ VaultError::NotOwner
+    )]
+    pub user: Account<'info, UserVault>,
+}
+
+/// CPI-only lock of risk `reserved`: owner signs the outer tx, risk `vault_auth` PDA co-signs.
+#[derive(Accounts)]
+pub struct ReserveMargin<'info> {
+    /// Risk `["vault_auth"]` PDA. Must sign via risk CPI seeds.
+    pub authority: Signer<'info>,
+    pub owner: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, owner.key().as_ref()],
+        bump = user.bump,
+        has_one = owner @ VaultError::NotOwner
     )]
     pub user: Account<'info, UserVault>,
 }
@@ -1239,6 +1288,23 @@ pub struct FundPool<'info> {
 }
 
 #[derive(Accounts)]
+pub struct OpenTap<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(owner = views::MARKET_ID @ VaultError::WrongBoard)]
+    pub market: Account<'info, views::Market>,
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = BoardTap::SIZE,
+        seeds = [CPTAP_SEED, market.key().as_ref()],
+        bump
+    )]
+    pub tap: Account<'info, BoardTap>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct SetTap<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
@@ -1393,6 +1459,38 @@ pub struct QuotePay<'info> {
         constraint = user.owner == quote.lp @ VaultError::NotOwner
     )]
     pub user: Account<'info, UserVault>,
+}
+
+/// `QuotePay` plus the cover pool so LP profit can repay excess cover.
+#[derive(Accounts)]
+pub struct SurplusLpPay<'info> {
+    #[account(mut, seeds = [BOARD_SEED, board.market.as_ref()], bump = board.bump)]
+    pub board: Account<'info, Board>,
+    #[account(
+        seeds = [b"quote", board.market.as_ref(), quote.lp.as_ref(), &[quote.layer_id]],
+        bump = quote.bump,
+        seeds::program = views::RISK_ID,
+        constraint = quote.market == board.market @ VaultError::WrongBoard
+    )]
+    pub quote: Account<'info, views::Quote>,
+    /// CHECK: risk `Layer` zero_copy; PDA + owner bind to this board/market.
+    #[account(
+        owner = views::RISK_ID,
+        seeds = [b"layer", board.market.as_ref(), &[quote.layer_id]],
+        bump,
+        seeds::program = views::RISK_ID
+    )]
+    pub layer: UncheckedAccount<'info>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, quote.lp.as_ref()],
+        bump = user.bump,
+        constraint = user.owner == quote.lp @ VaultError::NotOwner
+    )]
+    pub user: Account<'info, UserVault>,
+    /// Required when `user.cover_paid > 0` (clawback destination).
+    #[account(mut, seeds = [RLOSS_SEED], bump = loss_pool.bump)]
+    pub loss_pool: Option<Account<'info, LossPool>>,
 }
 
 #[derive(Accounts)]
@@ -1559,6 +1657,8 @@ pub enum VaultError {
     DirtyWide,
     #[msg("tap cap exceeds the protocol maximum")]
     TapCap,
+    #[msg("LP has cover_paid > 0 — pass the LossPool account so profit can repay it")]
+    MissingLossPool,
 }
 
 #[cfg(test)]
@@ -1614,5 +1714,63 @@ mod tests {
         assert_eq!(debit_available(100, locked_amt, 30).unwrap(), 70);
         let pending = lock_add(100, locked_amt, 50, 10).unwrap();
         assert_eq!(pending, 60);
+    }
+
+    /// resolution `bond_meets_min` / `bond_holder_is` read these raw offsets.
+    #[test]
+    fn committee_bond_layout_is_stable() {
+        use super::CommitteeBond;
+        use anchor_lang::prelude::Pubkey;
+        use anchor_lang::AccountSerialize;
+        let bond = CommitteeBond {
+            market: Pubkey::new_from_array([3u8; 32]),
+            holder: Pubkey::new_from_array([4u8; 32]),
+            amount: 0x0102_0304_0506_0708,
+            slashed: true,
+            bump: 7,
+        };
+        let mut data = Vec::new();
+        bond.try_serialize(&mut data).unwrap();
+        assert_eq!(data.len(), 8 + CommitteeBond::SIZE);
+        assert_eq!(&data[8..40], &[3u8; 32]);
+        assert_eq!(&data[40..72], &[4u8; 32]);
+        assert_eq!(
+            u64::from_le_bytes(data[72..80].try_into().unwrap()),
+            0x0102_0304_0506_0708
+        );
+        assert_eq!(data[80], 1);
+    }
+
+    #[test]
+    fn slashing_the_platforms_own_bond_mirrors_both_handles() {
+        use super::{move_slashed_bond, UserVault};
+        use anchor_lang::prelude::Pubkey;
+        let owner = Pubkey::new_from_array([9u8; 32]);
+        let mk = || UserVault {
+            owner,
+            available: 100,
+            reserved: 0,
+            bump: 0,
+            risk_pnl: 0,
+            bond: 40,
+            cover_paid: 0,
+            trade_pending: 0,
+        };
+        let mut holder = mk();
+        let mut platform = mk();
+        move_slashed_bond(&mut holder, &mut platform, 40).unwrap();
+        // Whichever copy Anchor writes last, the ledger is bond → available.
+        for v in [&holder, &platform] {
+            assert_eq!(v.bond, 0);
+            assert_eq!(v.available, 140);
+        }
+        let mut h = mk();
+        let mut p = mk();
+        p.owner = Pubkey::new_from_array([1u8; 32]);
+        move_slashed_bond(&mut h, &mut p, 40).unwrap();
+        assert_eq!(h.bond, 0);
+        assert_eq!(h.available, 100);
+        assert_eq!(p.available, 140);
+        assert_eq!(p.bond, 40);
     }
 }

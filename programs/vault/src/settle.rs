@@ -591,7 +591,30 @@ pub fn pay_surplus_lp_inner(
     quote: &Quote,
     layer: Option<&Layer>,
     lp: &mut crate::UserVault,
+    weight_sum: u64,
+) -> Result<u64> {
+    pay_surplus_lp_with_cover(board, quote_key, quote, layer, lp, weight_sum, None)
+}
+
+/// Profit that would push `cover_paid` above the LP's remaining realized loss \((-\Pi)^+\).
+/// That slice was reimbursed by the LossPool for a loss the LP no longer carries.
+pub fn cover_clawback(lp: &crate::UserVault, share: u64) -> u64 {
+    if lp.cover_paid == 0 || share == 0 {
+        return 0;
+    }
+    let pnl_after = lp.risk_pnl.saturating_add(share.min(i64::MAX as u64) as i64);
+    let loss_after = if pnl_after >= 0 { 0 } else { pnl_after.unsigned_abs() };
+    lp.cover_paid.saturating_sub(loss_after).min(share)
+}
+
+pub fn pay_surplus_lp_with_cover(
+    board: &mut Board,
+    quote_key: Pubkey,
+    quote: &Quote,
+    layer: Option<&Layer>,
+    lp: &mut crate::UserVault,
     _weight_sum: u64,
+    loss_pool: Option<&mut LossPool>,
 ) -> Result<u64> {
     require!(board.phase == BOARD_SETTLED, VaultError::NotFinalized);
     require!(board.rho_raw >= Q64::ONE.raw(), VaultError::NoSurplus);
@@ -611,7 +634,13 @@ pub fn pay_surplus_lp_inner(
     };
     let share = share.min(left);
     if share > 0 {
-        lp.available = accounting::credit(lp.available, share)?;
+        let claw = cover_clawback(lp, share);
+        if claw > 0 {
+            let pool = loss_pool.ok_or(error!(VaultError::MissingLossPool))?;
+            pool.available = accounting::credit(pool.available, claw)?;
+            lp.cover_paid = lp.cover_paid.saturating_sub(claw);
+        }
+        lp.available = accounting::credit(lp.available, share - claw)?;
         board.paid_surplus = board.paid_surplus.saturating_add(share);
         pnl_add(lp, share as i64);
     }
@@ -1040,6 +1069,70 @@ mod tests {
     }
 
     #[test]
+    fn profit_repays_cover_before_it_becomes_lp_gain() {
+        // Covered 50 on a −50 loss; later +30: all 30 go back to the pool, cover_paid → 20.
+        let mut lp = user(0, 0);
+        lp.risk_pnl = -50;
+        lp.cover_paid = 50;
+        assert_eq!(cover_clawback(&lp, 30), 30);
+        // +80 wipes the loss: 50 back to the pool, LP keeps 30.
+        assert_eq!(cover_clawback(&lp, 80), 50);
+        // Partial cover (20 of 50): +10 leaves loss 40 ≥ cover 20 → nothing to repay.
+        lp.cover_paid = 20;
+        assert_eq!(cover_clawback(&lp, 10), 0);
+        // No cover → never claws.
+        lp.cover_paid = 0;
+        assert_eq!(cover_clawback(&lp, 10), 0);
+    }
+
+    #[test]
+    fn surplus_with_cover_needs_pool_and_routes_clawback() {
+        let mut b = board();
+        b.phase = BOARD_SETTLED;
+        b.liability = 100;
+        b.trading_revenue = 60;
+        b.rho_raw = Q64::ONE.raw();
+        b.surplus_r = 50;
+        let a = Pubkey::new_from_array([1; 32]);
+        let mut layer = Layer {
+            market: b.market,
+            quote_count: 1,
+            ..Layer::default()
+        };
+        layer.quote_keys[0] = a;
+        layer.quote_live[0] = 1;
+        layer.quote_filled[0] = 50;
+        let qa = Quote {
+            market: b.market,
+            lp: a,
+            capacity: 50,
+            filled: 50,
+            premium: 0,
+            premium_owed: 0,
+            ts: 1,
+            profit_share_bps: 0,
+            layer_id: 0,
+            cancelled: false,
+            bump: 0,
+        };
+        let mut lp = user(0, 0);
+        lp.risk_pnl = -50;
+        lp.cover_paid = 50;
+        // Pool missing while cover is outstanding: refuse rather than hand the LP the gain.
+        assert!(pay_surplus_lp_with_cover(&mut b, a, &qa, Some(&layer), &mut lp, 0, None).is_err());
+        assert_eq!(lp.available, 0);
+        let mut pool = LossPool { available: 0, bump: 0 };
+        let paid = pay_surplus_lp_with_cover(&mut b, a, &qa, Some(&layer), &mut lp, 0, Some(&mut pool))
+            .unwrap();
+        assert_eq!(paid, 50);
+        assert_eq!(pool.available, 50);
+        assert_eq!(lp.available, 0);
+        assert_eq!(lp.cover_paid, 0);
+        assert_eq!(lp.risk_pnl, 0);
+        assert_eq!(b.paid_surplus, 50);
+    }
+
+    #[test]
     fn trade_only_pool_when_no_cm_no_cr() {
         let mut b = board();
         b.c_m_locked = 0;
@@ -1286,6 +1379,7 @@ mod tests {
             report_open_ts: 0,
             slash_due: false,
             void_votes: 0,
+            proposed_once: false,
         }
     }
 

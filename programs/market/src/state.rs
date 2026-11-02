@@ -9,6 +9,11 @@ pub const PROTOCOL_SEED: &[u8] = b"protocol";
 
 pub const MAX_N: u16 = 1024;
 pub const MAX_COMMITTEE: usize = 16;
+/// Furthest `close_ts` a creator may pick (2 years). Bounds how long capital can sit in a board.
+pub const MAX_CLOSE_HORIZON_SECS: i64 = 2 * 366 * 86_400;
+/// Longest gap `report_open_ts - close_ts` (90 days). Past it no one — committee, VOID, or
+/// admin — can act, so an unbounded value would lock every trader's cost until the creator's date.
+pub const MAX_REPORT_DELAY_SECS: i64 = 90 * 86_400;
 pub const FOOTBALL_K_MAX: u8 = 10;
 pub const FOOTBALL_N: u16 = 121;
 /// Charge $\phi\cdot C_S$ when the trader buys.

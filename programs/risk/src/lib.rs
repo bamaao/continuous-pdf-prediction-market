@@ -3,7 +3,7 @@
 
 use anchor_lang::prelude::*;
 use market::state::{Market, Status};
-use vault::cpi::accounts::{MutUser, ReleaseReserve};
+use vault::cpi::accounts::{ReleaseReserve, ReserveMargin};
 use vault::cpi::{release, reserve};
 
 pub const VAULT_AUTH_SEED: &[u8] = b"vault_auth";
@@ -82,15 +82,20 @@ pub mod risk {
             layer.bump = ctx.bumps.layer;
         }
         require!(layer.attachment == 0 && layer.layer_id == POOL_LAYER, RiskError::BadLayer);
-        require!((layer.quote_count as usize) < MAX_QUOTES, RiskError::BookFull);
+        // Cancelled quotes free their slot; otherwise 64 quote-and-cancel wallets could wall the pool.
+        let idx = free_slot(&layer)?;
 
+        let bump = [ctx.bumps.vault_auth];
+        let seeds: &[&[u8]] = &[VAULT_AUTH_SEED, &bump];
         reserve(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.vault_program.to_account_info(),
-                MutUser {
+                ReserveMargin {
+                    authority: ctx.accounts.vault_auth.to_account_info(),
                     owner: ctx.accounts.lp.to_account_info(),
                     user: ctx.accounts.user_vault.to_account_info(),
                 },
+                &[seeds],
             ),
             capacity,
         )?;
@@ -115,14 +120,16 @@ pub mod risk {
         seat.bump = ctx.bumps.seat;
 
         let unit = math::unit_premium(premium, capacity).ok_or(RiskError::BadSize)?;
-        let idx = layer.quote_count as usize;
         layer.quote_keys[idx] = qk;
         layer.quote_cap[idx] = capacity;
         layer.quote_filled[idx] = 0;
         layer.set_unit(idx, unit);
         layer.quote_ts[idx] = now;
         layer.quote_live[idx] = 1;
-        layer.quote_count += 1;
+        layer.quote_skip[idx] = 0;
+        if idx == layer.quote_count as usize {
+            layer.quote_count += 1;
+        }
 
         try_fill(book, &mut layer, q, seat, idx, qk)?;
         Ok(())
@@ -230,6 +237,20 @@ fn unwind_quote(
     quote.premium_owed = 0;
     quote.cancelled = true;
     Ok(capacity)
+}
+
+/// First slot a cancelled quote vacated (`live == 0`, nothing filled), else the next fresh slot.
+/// Cancelled quotes are unwound to `filled == 0` and their account closed, so the vault never
+/// needs the old key again.
+fn free_slot(layer: &Layer) -> Result<usize> {
+    let count = layer.quote_count as usize;
+    for i in 0..count {
+        if layer.quote_live[i] == 0 && layer.quote_filled[i] == 0 {
+            return Ok(i);
+        }
+    }
+    require!(count < MAX_QUOTES, RiskError::BookFull);
+    Ok(count)
 }
 
 fn quote_index(layer: &Layer, key: Pubkey) -> Result<usize> {
@@ -462,6 +483,9 @@ pub struct QuoteLayer<'info> {
         constraint = user_vault.owner == lp.key() @ RiskError::NotOwner
     )]
     pub user_vault: Box<Account<'info, vault::UserVault>>,
+    /// CHECK: co-signs vault.reserve CPI; no data account required.
+    #[account(seeds = [VAULT_AUTH_SEED], bump)]
+    pub vault_auth: UncheckedAccount<'info>,
     pub vault_program: Program<'info, vault::program::Vault>,
     pub system_program: Program<'info, System>,
 }
@@ -482,11 +506,15 @@ pub struct FillNext<'info> {
 
 #[derive(Accounts)]
 pub struct CancelUnfilled<'info> {
+    #[account(mut)]
     pub lp: Signer<'info>,
     #[account(owner = market::ID)]
     pub market: Box<Account<'info, Market>>,
+    /// Closed on cancel (rent back to the LP) so the same LP can quote this market again and
+    /// the Layer slot can be recycled.
     #[account(
         mut,
+        close = lp,
         seeds = [QUOTE_SEED, quote.market.as_ref(), lp.key().as_ref(), &[quote.layer_id]],
         bump = quote.bump,
         constraint = quote.market == market.key() @ RiskError::WrongBook
@@ -627,6 +655,28 @@ mod tests {
         assert_eq!(quote.filled, 0);
         assert_eq!(layer.quote_live[0], 0);
         assert_eq!(seat.filled_d, 0);
+    }
+
+    #[test]
+    fn cancelled_slots_are_recycled_before_the_book_fills() {
+        use super::{free_slot, Layer};
+        use bytemuck::Zeroable;
+        let mut layer = Layer::zeroed();
+        // Empty layer appends.
+        assert_eq!(free_slot(&layer).unwrap(), 0);
+        layer.quote_count = MAX_QUOTES as u8;
+        for i in 0..MAX_QUOTES {
+            layer.quote_live[i] = 1;
+            layer.quote_filled[i] = 1;
+        }
+        assert!(free_slot(&layer).is_err());
+        // One cancelled (unwound) quote reopens exactly that slot.
+        layer.quote_live[5] = 0;
+        layer.quote_filled[5] = 0;
+        assert_eq!(free_slot(&layer).unwrap(), 5);
+        // A slot with live == 0 but filled exposure is not free (never produced by unwind, guard anyway).
+        layer.quote_filled[5] = 3;
+        assert!(free_slot(&layer).is_err());
     }
 
     #[test]

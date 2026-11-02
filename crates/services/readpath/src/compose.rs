@@ -655,12 +655,18 @@ pub fn build(body: &ComposeBody) -> Result<Instruction, StatusCode> {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
             Ok(client::begin_refund(market))
         }
+        "open_tap" => {
+            let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            Ok(client::open_tap(owner, market))
+        }
         "begin_settle" => {
             let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+            // Pool + tap by default: on-chain rejects a shortfall settle without them, and the
+            // caller cannot know L vs R up front. `build_ixs` prepends the permissionless inits.
             Ok(client::begin_settle_on(
                 market,
                 true,
-                body.include_pool.unwrap_or(false),
+                body.include_pool.unwrap_or(true),
                 settle_grid(market, body),
             ))
         }
@@ -980,6 +986,17 @@ pub fn build_ixs(body: &ComposeBody) -> Result<Vec<Instruction>, StatusCode> {
     if body.op == "buy_set" {
         return fill_set_from_body(pk(&body.owner)?, body);
     }
+    if body.op == "begin_settle" && body.include_pool.unwrap_or(true) {
+        // AdjustPool / LossPool / BoardTap are init_if_needed and permissionless; creating them
+        // here means a shortfall market can always be settled without the platform.
+        let owner = pk(&body.owner)?;
+        let market = pk(body.market.as_deref().ok_or(StatusCode::BAD_REQUEST)?)?;
+        return Ok(vec![
+            client::init_pool(owner),
+            client::open_tap(owner, market),
+            build(body)?,
+        ]);
+    }
     Ok(vec![build(body)?])
 }
 
@@ -1124,7 +1141,7 @@ mod tests {
     #[test]
     fn begin_settle_points_at_winning_shard() {
         let market = Pubkey::new_unique();
-        let shard0 = client::begin_settle_on(market, true, false, client::grid_pda(&market));
+        let shard0 = client::begin_settle_on(market, true, true, client::grid_pda(&market));
         let got = build(&ComposeBody {
             op: "begin_settle".into(),
             owner: Pubkey::new_unique().to_string(),
@@ -1141,6 +1158,40 @@ mod tests {
         .unwrap();
         assert_eq!(got.program_id, shard0.program_id);
         assert_ne!(got.accounts, shard0.accounts);
+    }
+
+    #[test]
+    fn begin_settle_carries_pool_and_tap_by_default() {
+        let market = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let body = ComposeBody {
+            op: "begin_settle".into(),
+            owner: owner.to_string(),
+            market: Some(market.to_string()),
+            family: Some(1),
+            kind: Some(1),
+            milli: Some(true),
+            n: Some(16),
+            value: Some(2_400),
+            x_min: Some(-2_000),
+            x_max: Some(12_000),
+            ..Default::default()
+        };
+        let ixs = build_ixs(&body).unwrap();
+        assert_eq!(ixs.len(), 3);
+        assert_eq!(ixs[0], client::init_pool(owner));
+        assert_eq!(ixs[1], client::open_tap(owner, market));
+        let settle = &ixs[2];
+        assert!(settle.accounts.iter().any(|m| m.pubkey == client::board_tap(&market)));
+        assert!(settle.accounts.iter().any(|m| m.pubkey == client::adjust_pool()));
+        // Explicit opt-out still produces the bare instruction.
+        let bare = build_ixs(&ComposeBody {
+            include_pool: Some(false),
+            ..body
+        })
+        .unwrap();
+        assert_eq!(bare.len(), 1);
+        assert!(!bare[0].accounts.iter().any(|m| m.pubkey == client::board_tap(&market)));
     }
 
     #[test]

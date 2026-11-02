@@ -177,6 +177,7 @@ pub struct Resolution {
     pub report_open_ts: i64,
     pub slash_due: bool,
     pub void_votes: u8,
+    pub proposed_once: bool,
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]

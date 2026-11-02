@@ -358,6 +358,10 @@ enum ResolveCmd {
         b: i64,
     },
     Finalize { market: String },
+    /// Lock the committee report bond (USDC from your vault). Required before `submit`.
+    LockBond { market: String, amount: u64 },
+    /// Return the committee bond after finalize / VOID / Failed (when not slashed).
+    ReleaseBond { market: String },
 }
 
 #[derive(Subcommand)]
@@ -888,8 +892,13 @@ fn sync_vault_on_l1(
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+    // Session PDA only exists for session traders; a plain L1 owner has none to wait on.
     let session = client::session_pda(&owner);
-    wait_owned_by_market(l1, &[pos, market, session], 80)?;
+    let mut wait_for = vec![pos, market];
+    if rpc.get_account(&session).is_ok() {
+        wait_for.push(session);
+    }
+    wait_owned_by_market(l1, &wait_for, 80)?;
     // Skip when post-undelegate sync already cleared debt (avoids double SYNC_SEAT_FEE).
     if let Ok(acc) = rpc.get_account(&pos) {
         if let Ok(p) = client::decode_position(&acc.data) {
@@ -2193,6 +2202,16 @@ fn main() -> Result<()> {
             let sig = send(&opt.url, &kp, client::resolve_open(me, market))?;
             println!("ok {sig}");
         }
+        Cmd::Resolve(ResolveCmd::LockBond { market, amount }) => {
+            let market = Pubkey::from_str(&market)?;
+            let sig = send(&opt.url, &kp, client::lock_committee_bond(me, market, amount))?;
+            println!("ok {sig}");
+        }
+        Cmd::Resolve(ResolveCmd::ReleaseBond { market }) => {
+            let market = Pubkey::from_str(&market)?;
+            let sig = send(&opt.url, &kp, client::release_committee_bond(me, market))?;
+            println!("ok {sig}");
+        }
         Cmd::Resolve(ResolveCmd::Submit { market, value, family, kind, b }) => {
             let market = Pubkey::from_str(&market)?;
             let a = match family {
@@ -2246,7 +2265,15 @@ fn main() -> Result<()> {
             let market = Pubkey::from_str(&market)?;
             let rpc = RpcClient::new_with_commitment(opt.url.clone(), CommitmentConfig::confirmed());
             let grid = settle_grid_of(&rpc, market)?;
-            let sig = send(&opt.url, &kp, client::begin_settle_on(market, risk, pool, grid))?;
+            let settle = client::begin_settle_on(market, risk, pool, grid);
+            // With --pool, also create AdjustPool / LossPool / BoardTap (permissionless,
+            // init_if_needed) so a shortfall settle does not wait on the platform's set_tap.
+            let ixs = if pool {
+                vec![client::init_pool(me), client::open_tap(me, market), settle]
+            } else {
+                vec![settle]
+            };
+            let sig = send_ixs(&opt.url, &kp, ixs, &[])?;
             println!("ok {sig}");
         }
         Cmd::Settle(SettleCmd::Payout { market, mask, owner }) => {

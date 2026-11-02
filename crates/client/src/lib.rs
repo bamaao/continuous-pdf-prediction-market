@@ -1586,6 +1586,7 @@ pub fn risk_quote(
     let (quote, _) =
         Pubkey::find_program_address(&[risk::QUOTE_SEED, market.as_ref(), lp.as_ref(), &[layer_id]], &risk::ID);
     let (seat, _) = Pubkey::find_program_address(&[risk::SEAT_SEED, market.as_ref(), lp.as_ref()], &risk::ID);
+    let (vault_auth, _) = Pubkey::find_program_address(&[risk::VAULT_AUTH_SEED], &risk::ID);
     Instruction {
         program_id: risk::ID,
         accounts: risk::accounts::QuoteLayer {
@@ -1596,6 +1597,7 @@ pub fn risk_quote(
             quote,
             seat,
             user_vault: user_vault(&lp),
+            vault_auth,
             vault_program: vault::ID,
             system_program: system_program::ID,
         }
@@ -2071,9 +2073,17 @@ pub fn release_lp(market: Pubkey, lp: Pubkey, layer_id: u8) -> Instruction {
 }
 
 pub fn pay_surplus_lp(market: Pubkey, lp: Pubkey, layer_id: u8, weight_sum: u64) -> Instruction {
+    // LossPool is always passed: on-chain it is only consulted when the LP carries cover_paid.
     Instruction {
         program_id: vault::ID,
-        accounts: quote_pay(market, lp, layer_id).to_account_metas(None),
+        accounts: vault::accounts::SurplusLpPay {
+            board: board(&market),
+            quote: quote_pda(&market, &lp, layer_id),
+            layer: layer_pda(&market, layer_id),
+            user: user_vault(&lp),
+            loss_pool: Some(loss_pool()),
+        }
+        .to_account_metas(None),
         data: vault::instruction::PaySurplusLp { weight_sum }.data(),
     }
 }
@@ -2128,6 +2138,21 @@ pub fn fund_pool(owner: Pubkey, amount: u64) -> Instruction {
         }
         .to_account_metas(None),
         data: vault::instruction::FundPool { amount }.data(),
+    }
+}
+
+/// Permissionless cap-0 `BoardTap` so a shortfall `begin_settle` never waits on the platform.
+pub fn open_tap(payer: Pubkey, market: Pubkey) -> Instruction {
+    Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::OpenTap {
+            payer,
+            market,
+            tap: board_tap(&market),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: vault::instruction::OpenTap {}.data(),
     }
 }
 

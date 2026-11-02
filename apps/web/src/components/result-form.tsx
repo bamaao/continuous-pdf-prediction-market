@@ -1,6 +1,6 @@
 "use client";
 
-import { compose, familyName, fetchCommittee, fetchInfo, fetchProtocol, fetchResolution, ResolutionSnap } from "@cpm/sdk";
+import { compose, composeIxs, familyName, fetchCommittee, fetchInfo, fetchProtocol, fetchResolution, ResolutionSnap } from "@cpm/sdk";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MARKET_API } from "@/lib/env";
@@ -219,7 +219,8 @@ export function ResultForm({ market, family }: { market: string; family: number 
     setBusy(true);
     setNote("signing…");
     try {
-      const ix = await compose(MARKET_API, {
+      // begin_settle may come back as [init_pool, open_tap, begin_settle]; send them together.
+      const ixs = await composeIxs(MARKET_API, {
         op,
         owner: publicKey.toBase58(),
         market,
@@ -231,7 +232,7 @@ export function ResultForm({ market, family }: { market: string; family: number 
         evidence_hex: hash || undefined,
         ...extra,
       });
-      const sig = await sendSigned(connection, signTransaction, publicKey, [ix]);
+      const sig = await sendSigned(connection, signTransaction, publicKey, ixs);
       const missedReport = op === "finalize" && rec?.phase === 0 && now >= (rec.report_deadline + Math.max(0, rec.report_window_secs || 0));
       if (op === "admin_submit_result") {
         const holder = rec?.bond_holder || rec?.members?.[0];

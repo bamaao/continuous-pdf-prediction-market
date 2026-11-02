@@ -84,6 +84,7 @@ pub mod resolution {
         rec.evidence_hash = [0u8; 32];
         rec.slash_due = false;
         rec.void_votes = 0;
+        rec.proposed_once = false;
         rec.bump = ctx.bumps.record;
         Ok(())
     }
@@ -121,6 +122,7 @@ pub mod resolution {
         require!(effect == Effect::BecomeProposed, ResError::BadPhase);
         rec.phase = Phase::Proposed as u8;
         rec.proposer = reporter;
+        rec.proposed_once = true;
         rec.proposed = outcome;
         rec.challenged = Outcome::default();
         rec.votes_proposal = 0;
@@ -253,8 +255,10 @@ pub mod resolution {
                 Effect::Fail => {
                     rec.phase = Phase::Failed as u8;
                     rec.refunds_due = true;
-                    // Grace expired with no result. Slash the occupied committee bond.
-                    rec.slash_due = true;
+                    // Grace expired with no result. Slash only when nobody ever reported;
+                    // a proposer whose vote deadlocked and whose admin stayed silent did
+                    // their job and gets the bond back via `release_committee_bond`.
+                    rec.slash_due = !rec.proposed_once;
                     true
                 }
                 Effect::AwaitAdmin => {
@@ -575,6 +579,9 @@ pub struct Resolution {
     pub slash_due: bool,
     /// Distinct member endorsements toward M-of-N VOID.
     pub void_votes: u8,
+    /// A committee proposal was filed at least once. A later `Fail` (vote deadlock + admin
+    /// absent) then refunds without slashing — the proposer did report.
+    pub proposed_once: bool,
 }
 
 impl Resolution {
@@ -912,5 +919,20 @@ mod tests {
         // market::apply_resolution_status reads phase at disc+market+members+reporter+family.
         const PHASE_OFF: usize = 8 + 32 + 512 + 32 + 1;
         assert_eq!(data[PHASE_OFF], Phase::Finalized as u8);
+    }
+
+    /// vault `views::Resolution` must deserialize the same bytes; the field order is the contract.
+    #[test]
+    fn proposed_once_is_the_trailing_field() {
+        let mut rec = Resolution::default();
+        rec.proposed_once = true;
+        let mut data = Vec::new();
+        rec.try_serialize(&mut data).unwrap();
+        assert_eq!(*data.last().unwrap(), 1u8);
+        rec.proposed_once = false;
+        let mut data2 = Vec::new();
+        rec.try_serialize(&mut data2).unwrap();
+        assert_eq!(*data2.last().unwrap(), 0u8);
+        assert_eq!(data.len(), data2.len());
     }
 }
